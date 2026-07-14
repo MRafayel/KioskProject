@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+var
+data
+pnpm-lock.yaml
+docs/BUILD_PLAN.md
+

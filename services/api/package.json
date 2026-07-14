@@ -1,0 +1,25 @@
+{
+  "name": "@printing-kiosk/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@fastify/cors": "11.3.0",
+    "@fastify/helmet": "13.1.0",
+    "@printing-kiosk/config": "workspace:*",
+    "@printing-kiosk/contracts": "workspace:*",
+    "dotenv": "17.4.2",
+    "fastify": "5.10.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "lint": "eslint src",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src"
+  },
+  "devDependencies": {
+    "tsx": "4.23.0"
+  }
+}

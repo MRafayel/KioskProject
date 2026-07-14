@@ -1,0 +1,40 @@
+{
+  "name": "printing-kiosk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "pnpm@11.12.0",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "pnpm build:packages && turbo run dev --parallel",
+    "build:packages": "turbo run build --filter='./packages/*'",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:integration": "vitest run tests/integration --passWithNoTests",
+    "test:e2e": "vitest run tests/e2e --passWithNoTests",
+    "infra:up": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml up -d",
+    "infra:down": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml down",
+    "infra:status": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml ps",
+    "infra:logs": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml logs --tail=200",
+    "infra:validate": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml config --quiet",
+    "db:generate": "pnpm --filter @printing-kiosk/database generate",
+    "db:migrate": "pnpm --filter @printing-kiosk/database migrate",
+    "db:seed": "pnpm --filter @printing-kiosk/database seed"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5",
+    "turbo": "2.10.4",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.63.0",
+    "vitest": "4.1.10"
+  }
+}

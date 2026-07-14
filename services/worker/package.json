@@ -1,0 +1,23 @@
+{
+  "name": "@printing-kiosk/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@printing-kiosk/config": "workspace:*",
+    "@printing-kiosk/contracts": "workspace:*",
+    "dotenv": "17.4.2",
+    "pino": "10.3.1"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "lint": "eslint src",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "tsx": "4.23.0"
+  }
+}

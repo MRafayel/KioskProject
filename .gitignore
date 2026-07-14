@@ -1,0 +1,56 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# Dependencies and build output
+node_modules/
+.pnpm-store/
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+coverage/
+**/src/generated/
+playwright-report/
+test-results/
+
+# Customer documents and generated artifacts
+var/
+data/
+uploads/
+quarantine/
+previews/
+print-ready/
+mock-printer-output/
+*.spool
+
+# Local databases, queues, and object storage
+*.sqlite
+*.sqlite3
+postgres-data/
+redis-data/
+minio-data/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# Certificates generated for local HTTPS
+.certs/
