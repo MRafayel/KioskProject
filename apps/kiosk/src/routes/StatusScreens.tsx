@@ -1,12 +1,14 @@
 import { useEffect } from "react";
 import { Navigate, useNavigate, useParams } from "react-router-dom";
 
+import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { calculatePrintSummary, formatPrice } from "../features/session/model.js";
 
 const PROTOTYPE_STEP_DELAY_MS = 1_200;
 
 export function PaymentScreen() {
+  const { messages } = useLanguage();
   const { state } = usePrototypeSession();
   const navigate = useNavigate();
 
@@ -23,15 +25,16 @@ export function PaymentScreen() {
 
   return (
     <TerminalProgress
-      eyebrow="Secure demo payment"
-      title="Processing payment"
-      description="Please wait. Do not close or leave this screen."
-      detail="No real charge is made in this prototype."
+      eyebrow={messages.status.paymentEyebrow}
+      title={messages.status.paymentTitle}
+      description={messages.status.paymentDescription}
+      detail={messages.status.paymentDetail}
     />
   );
 }
 
 export function PrintingScreen() {
+  const { messages } = useLanguage();
   const { state } = usePrototypeSession();
   const navigate = useNavigate();
 
@@ -48,16 +51,17 @@ export function PrintingScreen() {
 
   return (
     <TerminalProgress
-      eyebrow="Step 4 of 4"
-      title="Printing your document"
-      description="Your payment was approved. Please wait for every sheet."
-      detail="Preparing · Sending · Printing"
+      eyebrow={messages.status.printingEyebrow}
+      title={messages.status.printingTitle}
+      description={messages.status.printingDescription}
+      detail={messages.status.printingDetail}
       printAnimation
     />
   );
 }
 
 export function FailureScreen() {
+  const { messages } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useNavigate();
   const { failureType } = useParams();
@@ -70,16 +74,20 @@ export function FailureScreen() {
       <div className="status-mark" aria-hidden="true">
         !
       </div>
-      <p className="eyebrow">Action needed</p>
-      <h1>{paymentFailure ? "Payment was declined" : "The printer needs attention"}</h1>
+      <p className="eyebrow">{messages.status.actionNeeded}</p>
+      <h1>
+        {paymentFailure ? messages.status.paymentDeclinedTitle : messages.status.printerErrorTitle}
+      </h1>
       <p>
         {paymentFailure
-          ? "Nothing was charged. You can retry the demo payment or return to your settings."
-          : "Printing stopped before completion. Keep this session open while you retry."}
+          ? messages.status.paymentDeclinedDescription
+          : messages.status.printerErrorDescription}
       </p>
       <div className="failure-detail" role="status">
-        <strong>{paymentFailure ? "PAYMENT_DECLINED" : "PRINTER_UNAVAILABLE"}</strong>
-        <span>Prototype failure · Your file is still available in this session.</span>
+        <strong>
+          {paymentFailure ? messages.status.paymentDeclinedCode : messages.status.printerErrorCode}
+        </strong>
+        <span>{messages.status.failureDetail}</span>
       </div>
       <div className="button-row button-row--center">
         <button
@@ -87,7 +95,7 @@ export function FailureScreen() {
           type="button"
           onClick={() => void navigate(paymentFailure ? "/checkout" : "/configure")}
         >
-          Review settings
+          {messages.status.reviewSettings}
         </button>
         <button
           className="button button--primary"
@@ -97,7 +105,7 @@ export function FailureScreen() {
             void navigate(paymentFailure ? "/payment" : "/printing");
           }}
         >
-          Retry {paymentFailure ? "payment" : "printing"}
+          {paymentFailure ? messages.status.retryPayment : messages.status.retryPrinting}
         </button>
       </div>
     </div>
@@ -105,6 +113,7 @@ export function FailureScreen() {
 }
 
 export function CompleteScreen() {
+  const { messages, numberLocale, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useNavigate();
 
@@ -114,6 +123,7 @@ export function CompleteScreen() {
 
   const finish = () => {
     dispatch({ type: "RESET" });
+    resetLocale();
     void navigate("/", { replace: true });
   };
 
@@ -122,28 +132,25 @@ export function CompleteScreen() {
       <div className="status-mark status-mark--success" aria-hidden="true">
         ✓
       </div>
-      <p className="eyebrow">Print complete</p>
-      <h1>Your documents are ready</h1>
-      <p>
-        Collect all {summary.totalSheets} sheet{summary.totalSheets === 1 ? "" : "s"} from the
-        output area below.
-      </p>
+      <p className="eyebrow">{messages.status.completeEyebrow}</p>
+      <h1>{messages.status.completeTitle}</h1>
+      <p>{messages.status.collectSheets(summary.totalSheets)}</p>
       <dl className="completion-summary">
         <div>
-          <dt>Printed</dt>
+          <dt>{messages.status.printed}</dt>
           <dd>{state.files[0]?.name}</dd>
         </div>
         <div>
-          <dt>Paid</dt>
-          <dd>{formatPrice(summary.priceCents)}</dd>
+          <dt>{messages.status.paid}</dt>
+          <dd>{formatPrice(summary.priceCents, numberLocale)}</dd>
         </div>
         <div>
-          <dt>Files</dt>
-          <dd>Deletion scheduled</dd>
+          <dt>{messages.status.files}</dt>
+          <dd>{messages.status.deletionScheduled}</dd>
         </div>
       </dl>
       <button className="button button--primary" type="button" onClick={finish}>
-        Finish and delete files
+        {messages.status.finish}
       </button>
     </div>
   );

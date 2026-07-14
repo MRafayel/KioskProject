@@ -1,18 +1,21 @@
 import { useState } from "react";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 
-import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
-
+import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
+import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
+import { formatSessionTime, useSessionTimer } from "../features/session/SessionTimerProvider.js";
 
 const steps = [
-  { path: "/upload", label: "Upload" },
-  { path: "/configure", label: "Settings" },
-  { path: "/checkout", label: "Pay" },
-  { path: "/printing", label: "Print" }
+  { path: "/upload" },
+  { path: "/configure" },
+  { path: "/checkout" },
+  { path: "/printing" }
 ] as const;
 
 export function KioskLayout() {
+  const { messages, resetLocale } = useLanguage();
+  const { remainingSeconds } = useSessionTimer();
   const { state, dispatch } = usePrototypeSession();
   const location = useLocation();
   const navigate = useNavigate();
@@ -25,6 +28,7 @@ export function KioskLayout() {
 
   const cancelSession = () => {
     dispatch({ type: "RESET" });
+    resetLocale();
     setCancelOpen(false);
     void navigate("/", { replace: true });
   };
@@ -37,12 +41,12 @@ export function KioskLayout() {
             P
           </span>
           <span>
-            <strong>Print kiosk</strong>
-            <small>{PRODUCT_SCOPE.outputMode.toLowerCase()} documents</small>
+            <strong>{messages.brand.name}</strong>
+            <small>{messages.brand.activeSubtitle}</small>
           </span>
         </div>
 
-        <ol className="stepper" aria-label="Print progress">
+        <ol className="stepper" aria-label={messages.common.printProgress}>
           {steps.map((step, index) => (
             <li
               key={step.path}
@@ -52,31 +56,44 @@ export function KioskLayout() {
               aria-current={index === currentStep ? "step" : undefined}
             >
               <span>{index + 1}</span>
-              {step.label}
+              {messages.common.steps[index]}
             </li>
           ))}
         </ol>
 
-        {canCancel ? (
-          <button
-            className="button button--quiet topbar__cancel"
-            type="button"
-            onClick={() => setCancelOpen(true)}
-          >
-            Cancel
-          </button>
-        ) : (
-          <span className="topbar__placeholder" aria-hidden="true" />
-        )}
+        <div className="topbar__actions">
+          {canCancel ? (
+            <button
+              className="button button--quiet topbar__cancel"
+              type="button"
+              onClick={() => setCancelOpen(true)}
+            >
+              {messages.common.cancel}
+            </button>
+          ) : null}
+        </div>
       </header>
 
       <main className="screen" id="main-content">
         <Outlet />
       </main>
 
-      <footer className="privacy-strip">
-        <span aria-hidden="true">●</span> Private files are removed automatically after this
-        session.
+      <footer className="session-footer">
+        <LanguageSelector />
+        <div className="privacy-strip">
+          <span aria-hidden="true">●</span> {messages.common.privacyNotice}
+        </div>
+        <div
+          className={
+            remainingSeconds <= 30 ? "session-timer session-timer--warning" : "session-timer"
+          }
+          role="timer"
+          aria-label={messages.idle.countdown(remainingSeconds)}
+        >
+          <span aria-hidden="true">◷</span>
+          <span>{messages.idle.timeRemaining}</span>
+          <strong>{formatSessionTime(remainingSeconds)}</strong>
+        </div>
       </footer>
 
       {cancelOpen ? (
@@ -85,8 +102,8 @@ export function KioskLayout() {
             <div className="status-mark status-mark--small" aria-hidden="true">
               ?
             </div>
-            <h2 id="cancel-title">Cancel this print session?</h2>
-            <p>No payment will be made. Uploaded files will be removed.</p>
+            <h2 id="cancel-title">{messages.common.cancelTitle}</h2>
+            <p>{messages.common.cancelDescription}</p>
             <div className="button-row">
               <button
                 className="button button--secondary"
@@ -94,10 +111,10 @@ export function KioskLayout() {
                 onClick={() => setCancelOpen(false)}
                 autoFocus
               >
-                Keep session
+                {messages.common.keepSession}
               </button>
               <button className="button button--danger" type="button" onClick={cancelSession}>
-                Cancel session
+                {messages.common.cancelSession}
               </button>
             </div>
           </section>

@@ -41,6 +41,8 @@ describe("prototype session model", () => {
 
   it("calculates pages, sides, sheets, copies, and the minimum charge", () => {
     expect(calculatePrintSummary([file], defaultPrintSettings)).toEqual({
+      pageStart: 1,
+      pageEnd: 8,
       selectedPages: 8,
       totalSides: 8,
       totalSheets: 8,
@@ -50,16 +52,18 @@ describe("prototype session model", () => {
     expect(
       calculatePrintSummary([file], {
         ...defaultPrintSettings,
-        pageRange: "FIRST_FOUR",
+        pageStart: 3,
+        pageEnd: 7,
         duplex: true,
-        pagesPerSheet: 2,
         copies: 2
       })
     ).toEqual({
-      selectedPages: 4,
-      totalSides: 4,
-      totalSheets: 2,
-      priceCents: 100
+      pageStart: 3,
+      pageEnd: 7,
+      selectedPages: 5,
+      totalSides: 10,
+      totalSheets: 6,
+      priceCents: 150
     });
   });
 });

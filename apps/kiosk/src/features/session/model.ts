@@ -1,6 +1,4 @@
-export type PaperSize = "A4" | "LETTER";
 export type Orientation = "PORTRAIT" | "LANDSCAPE";
-export type PageRange = "ALL" | "FIRST_FOUR";
 export type PrototypeOutcome = "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR";
 
 export interface PrototypeSession {
@@ -19,12 +17,11 @@ export interface PrototypeFile {
 }
 
 export interface PrintSettings {
-  paperSize: PaperSize;
   orientation: Orientation;
-  pageRange: PageRange;
+  pageStart: number;
+  pageEnd: number | null;
   copies: number;
   duplex: boolean;
-  pagesPerSheet: 1 | 2;
 }
 
 export interface PrototypeState {
@@ -43,12 +40,11 @@ export type PrototypeAction =
   | { type: "RESET" };
 
 export const defaultPrintSettings: PrintSettings = {
-  paperSize: "A4",
   orientation: "PORTRAIT",
-  pageRange: "ALL",
+  pageStart: 1,
+  pageEnd: null,
   copies: 1,
-  duplex: false,
-  pagesPerSheet: 1
+  duplex: false
 };
 
 export const initialPrototypeState: PrototypeState = {
@@ -79,6 +75,8 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
 }
 
 export interface PrintSummary {
+  pageStart: number;
+  pageEnd: number;
   selectedPages: number;
   totalSides: number;
   totalSheets: number;
@@ -90,14 +88,18 @@ export function calculatePrintSummary(
   settings: PrintSettings
 ): PrintSummary {
   const availablePages = files.reduce((total, file) => total + file.pageCount, 0);
-  const selectedPages =
-    settings.pageRange === "FIRST_FOUR" ? Math.min(4, availablePages) : availablePages;
-  const sidesPerCopy = Math.ceil(selectedPages / settings.pagesPerSheet);
+  const pageStart = availablePages === 0 ? 0 : clampPage(settings.pageStart, 1, availablePages);
+  const requestedEnd = settings.pageEnd ?? availablePages;
+  const pageEnd = availablePages === 0 ? 0 : clampPage(requestedEnd, pageStart, availablePages);
+  const selectedPages = availablePages === 0 ? 0 : pageEnd - pageStart + 1;
+  const sidesPerCopy = selectedPages;
   const sheetsPerCopy = settings.duplex ? Math.ceil(sidesPerCopy / 2) : sidesPerCopy;
   const totalSides = sidesPerCopy * settings.copies;
   const totalSheets = sheetsPerCopy * settings.copies;
 
   return {
+    pageStart,
+    pageEnd,
     selectedPages,
     totalSides,
     totalSheets,
@@ -105,12 +107,21 @@ export function calculatePrintSummary(
   };
 }
 
-export function formatPrice(priceCents: number): string {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(
+function clampPage(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, Math.trunc(value)));
+}
+
+export function formatPrice(priceCents: number, locale = "en-US"): string {
+  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD" }).format(
     priceCents / 100
   );
 }
 
-export function formatFileSize(sizeBytes: number): string {
-  return `${(sizeBytes / 1_000_000).toFixed(1)} MB`;
+export function formatFileSize(sizeBytes: number, locale = "en-US", unit = "MB"): string {
+  const size = new Intl.NumberFormat(locale, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  }).format(sizeBytes / 1_000_000);
+
+  return `${size} ${unit}`;
 }

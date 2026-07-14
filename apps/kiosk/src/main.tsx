@@ -5,6 +5,7 @@ import { HashRouter } from "react-router-dom";
 
 import { App } from "./app/App.js";
 import { KioskErrorBoundary } from "./app/KioskErrorBoundary.js";
+import { LanguageProvider } from "./features/i18n/LanguageProvider.js";
 import { PrototypeSessionProvider } from "./features/session/PrototypeSessionProvider.js";
 
 import "./styles.css";
@@ -21,14 +22,16 @@ if (!root) throw new Error("ROOT_ELEMENT_MISSING");
 
 createRoot(root).render(
   <StrictMode>
-    <KioskErrorBoundary>
-      <QueryClientProvider client={queryClient}>
-        <PrototypeSessionProvider>
-          <HashRouter>
-            <App />
-          </HashRouter>
-        </PrototypeSessionProvider>
-      </QueryClientProvider>
-    </KioskErrorBoundary>
+    <LanguageProvider>
+      <KioskErrorBoundary>
+        <QueryClientProvider client={queryClient}>
+          <PrototypeSessionProvider>
+            <HashRouter>
+              <App />
+            </HashRouter>
+          </PrototypeSessionProvider>
+        </QueryClientProvider>
+      </KioskErrorBoundary>
+    </LanguageProvider>
   </StrictMode>
 );

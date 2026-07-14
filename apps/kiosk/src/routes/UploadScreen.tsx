@@ -2,11 +2,13 @@ import { useMutation } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { useNavigate } from "react-router-dom";
 
+import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { formatFileSize } from "../features/session/model.js";
 import { simulatePhoneUpload } from "../mocks/prototypeService.js";
 
 export function UploadScreen() {
+  const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useNavigate();
   const upload = useMutation({
@@ -20,25 +22,25 @@ export function UploadScreen() {
   return (
     <div className="screen-grid screen-grid--upload">
       <section className="screen-copy" aria-labelledby="upload-title">
-        <p className="eyebrow">Step 1 of 4</p>
-        <h1 id="upload-title">Upload your document</h1>
-        <p>Scan this QR code with your phone. No account or app is needed.</p>
+        <p className="eyebrow">{messages.upload.step}</p>
+        <h1 id="upload-title">{messages.upload.title}</h1>
+        <p>{messages.upload.description}</p>
 
         <ol className="instruction-list">
           <li>
-            <span>1</span> Open your phone camera
+            <span>1</span> {messages.upload.instructionCamera}
           </li>
           <li>
-            <span>2</span> Scan the QR code
+            <span>2</span> {messages.upload.instructionQr}
           </li>
           <li>
-            <span>3</span> Choose a PDF, JPEG, or PNG
+            <span>3</span> {messages.upload.instructionFile}
           </li>
         </ol>
 
         <div className="prototype-note">
-          <strong>Prototype control</strong>
-          <span>Phase 1 has no backend, so this button simulates a secure phone upload.</span>
+          <strong>{messages.upload.prototypeControl}</strong>
+          <span>{messages.upload.prototypeDescription}</span>
           <button
             className="button button--secondary"
             type="button"
@@ -46,51 +48,55 @@ export function UploadScreen() {
             disabled={upload.isPending || Boolean(file)}
           >
             {file
-              ? "Demo file received"
+              ? messages.upload.demoReceived
               : upload.isPending
-                ? "Receiving…"
-                : "Simulate phone upload"}
+                ? messages.upload.receiving
+                : messages.upload.simulate}
           </button>
         </div>
       </section>
 
-      <section className="upload-panel" aria-label="Upload session">
+      <section className="upload-panel" aria-label={messages.upload.sessionLabel}>
         <div className="qr-card">
           <QRCodeSVG
             value={state.session.uploadUrl}
             size={220}
             level="M"
             marginSize={2}
-            title="Prototype mobile upload QR code"
+            title={messages.upload.qrTitle}
           />
           <div className="session-code">
-            <span>Or enter code</span>
+            <span>{messages.upload.enterCode}</span>
             <strong>{state.session.shortCode}</strong>
           </div>
           <span className="status-pill status-pill--waiting">
-            <span aria-hidden="true">●</span> {file ? "File received" : "Waiting for your phone"}
+            <span aria-hidden="true">●</span>{" "}
+            {file ? messages.upload.fileReceived : messages.upload.waitingForPhone}
           </span>
         </div>
 
         {file ? (
-          <article className="file-card" aria-label="Uploaded document">
+          <article className="file-card" aria-label={messages.upload.uploadedDocument}>
             <div className="file-card__icon" aria-hidden="true">
               PDF
             </div>
             <div>
               <strong>{file.name}</strong>
               <span>
-                {file.pageCount} pages · {formatFileSize(file.sizeBytes)}
+                {messages.upload.fileMeta(
+                  file.pageCount,
+                  formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)
+                )}
               </span>
             </div>
-            <span className="file-card__check" aria-label="Upload complete">
+            <span className="file-card__check" aria-label={messages.upload.uploadComplete}>
               ✓
             </span>
           </article>
         ) : (
           <div className="upload-placeholder" aria-live="polite">
             <span className="pulse" aria-hidden="true" />
-            Your uploaded files will appear here automatically.
+            {messages.upload.placeholder}
           </div>
         )}
 
@@ -100,7 +106,7 @@ export function UploadScreen() {
           disabled={!file}
           onClick={() => void navigate("/configure")}
         >
-          Continue to print settings <span aria-hidden="true">→</span>
+          {messages.upload.continue} <span aria-hidden="true">→</span>
         </button>
       </section>
     </div>

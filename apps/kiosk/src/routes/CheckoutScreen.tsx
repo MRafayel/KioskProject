@@ -1,5 +1,6 @@
 import { Navigate, useNavigate } from "react-router-dom";
 
+import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
   calculatePrintSummary,
@@ -7,13 +8,10 @@ import {
   type PrototypeOutcome
 } from "../features/session/model.js";
 
-const outcomes: Array<{ value: PrototypeOutcome; label: string }> = [
-  { value: "SUCCESS", label: "Successful print" },
-  { value: "PAYMENT_DECLINED", label: "Payment declined" },
-  { value: "PRINTER_ERROR", label: "Printer error" }
-];
+const outcomes: PrototypeOutcome[] = ["SUCCESS", "PAYMENT_DECLINED", "PRINTER_ERROR"];
 
 export function CheckoutScreen() {
+  const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useNavigate();
 
@@ -24,65 +22,58 @@ export function CheckoutScreen() {
   return (
     <div className="checkout-grid">
       <section className="screen-copy" aria-labelledby="checkout-title">
-        <p className="eyebrow">Step 3 of 4</p>
-        <h1 id="checkout-title">Review and pay</h1>
-        <p>Check your print details. The prototype will simulate payment at this kiosk.</p>
+        <p className="eyebrow">{messages.checkout.step}</p>
+        <h1 id="checkout-title">{messages.checkout.title}</h1>
+        <p>{messages.checkout.description}</p>
 
         <article className="receipt-card">
           <div className="receipt-card__heading">
             <div>
               <strong>{state.files[0]?.name}</strong>
-              <span>{summary.selectedPages} selected pages</span>
+              <span>{messages.checkout.selectedPages(summary.selectedPages)}</span>
             </div>
             <button
               className="text-button"
               type="button"
               onClick={() => void navigate("/configure")}
             >
-              Edit
+              {messages.checkout.edit}
             </button>
           </div>
           <dl className="receipt-list">
             <div>
-              <dt>Copies</dt>
+              <dt>{messages.checkout.copies}</dt>
               <dd>{state.settings.copies}</dd>
             </div>
             <div>
-              <dt>Paper</dt>
-              <dd>{state.settings.paperSize}</dd>
-            </div>
-            <div>
-              <dt>Sides</dt>
-              <dd>{state.settings.duplex ? "Double-sided" : "Single-sided"}</dd>
-            </div>
-            <div>
-              <dt>Layout</dt>
+              <dt>{messages.checkout.sides}</dt>
               <dd>
-                {state.settings.pagesPerSheet} page{state.settings.pagesPerSheet === 1 ? "" : "s"}{" "}
-                per side
+                {state.settings.duplex
+                  ? messages.configure.doubleSided
+                  : messages.configure.singleSided}
               </dd>
             </div>
             <div>
-              <dt>Output</dt>
-              <dd>Monochrome</dd>
+              <dt>{messages.checkout.output}</dt>
+              <dd>{messages.common.monochrome}</dd>
             </div>
           </dl>
         </article>
 
         <fieldset className="prototype-outcomes">
-          <legend>Prototype outcome</legend>
-          <p>Choose a result to verify the kiosk recovery screens.</p>
+          <legend>{messages.checkout.prototypeOutcome}</legend>
+          <p>{messages.checkout.prototypeDescription}</p>
           <div>
             {outcomes.map((outcome) => (
-              <label key={outcome.value}>
+              <label key={outcome}>
                 <input
                   type="radio"
                   name="prototype-outcome"
-                  value={outcome.value}
-                  checked={state.outcome === outcome.value}
-                  onChange={() => dispatch({ type: "OUTCOME_CHANGED", outcome: outcome.value })}
+                  value={outcome}
+                  checked={state.outcome === outcome}
+                  onChange={() => dispatch({ type: "OUTCOME_CHANGED", outcome })}
                 />
-                <span>{outcome.label}</span>
+                <span>{outcomeLabel(outcome, messages.checkout)}</span>
               </label>
             ))}
           </div>
@@ -93,30 +84,44 @@ export function CheckoutScreen() {
         <div className="lock-mark" aria-hidden="true">
           ⌁
         </div>
-        <h2 id="payment-summary-title">Payment summary</h2>
+        <h2 id="payment-summary-title">{messages.checkout.paymentSummary}</h2>
         <dl className="summary-list">
           <div>
-            <dt>{summary.totalSides} monochrome sides</dt>
-            <dd>{formatPrice(summary.totalSides * 15)}</dd>
+            <dt>{messages.checkout.monochromeSides(summary.totalSides)}</dt>
+            <dd>{formatPrice(summary.totalSides * 15, numberLocale)}</dd>
           </div>
           <div>
-            <dt>Minimum transaction</dt>
-            <dd>{summary.totalSides * 15 < 100 ? "Applied" : "—"}</dd>
+            <dt>{messages.checkout.minimumTransaction}</dt>
+            <dd>{summary.totalSides * 15 < 100 ? messages.checkout.applied : "—"}</dd>
           </div>
         </dl>
         <div className="price-total price-total--large">
-          <span>Total due</span>
-          <strong>{formatPrice(summary.priceCents)}</strong>
+          <span>{messages.checkout.totalDue}</span>
+          <strong>{formatPrice(summary.priceCents, numberLocale)}</strong>
         </div>
         <button
           className="button button--primary button--wide"
           type="button"
           onClick={() => void navigate("/payment")}
         >
-          Pay {formatPrice(summary.priceCents)} <span aria-hidden="true">→</span>
+          {messages.checkout.pay(formatPrice(summary.priceCents, numberLocale))}{" "}
+          <span aria-hidden="true">→</span>
         </button>
-        <p className="payment-card__note">Demo only. No card data or real charge is involved.</p>
+        <p className="payment-card__note">{messages.checkout.demoNotice}</p>
       </aside>
     </div>
   );
+}
+
+function outcomeLabel(
+  outcome: PrototypeOutcome,
+  messages: {
+    outcomeSuccess: string;
+    outcomePaymentDeclined: string;
+    outcomePrinterError: string;
+  }
+): string {
+  if (outcome === "PAYMENT_DECLINED") return messages.outcomePaymentDeclined;
+  if (outcome === "PRINTER_ERROR") return messages.outcomePrinterError;
+  return messages.outcomeSuccess;
 }

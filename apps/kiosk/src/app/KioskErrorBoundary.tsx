@@ -1,5 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
+import { useLanguage } from "../features/i18n/LanguageProvider.js";
+
 interface Props {
   children: ReactNode;
 }
@@ -22,22 +24,28 @@ export class KioskErrorBoundary extends Component<Props, State> {
   public override render(): ReactNode {
     if (!this.state.failed) return this.props.children;
 
-    return (
-      <main className="terminal-state terminal-state--error">
-        <div className="status-mark" aria-hidden="true">
-          !
-        </div>
-        <p className="eyebrow">Kiosk recovery</p>
-        <h1>Something went wrong</h1>
-        <p>Your documents have not been printed or charged.</p>
-        <button
-          className="button button--primary"
-          type="button"
-          onClick={() => window.location.reload()}
-        >
-          Restart kiosk
-        </button>
-      </main>
-    );
+    return <LocalizedErrorFallback />;
   }
+}
+
+function LocalizedErrorFallback() {
+  const { messages } = useLanguage();
+
+  return (
+    <main className="terminal-state terminal-state--error">
+      <div className="status-mark" aria-hidden="true">
+        !
+      </div>
+      <p className="eyebrow">{messages.error.eyebrow}</p>
+      <h1>{messages.error.title}</h1>
+      <p>{messages.error.description}</p>
+      <button
+        className="button button--primary"
+        type="button"
+        onClick={() => window.location.reload()}
+      >
+        {messages.error.restart}
+      </button>
+    </main>
+  );
 }

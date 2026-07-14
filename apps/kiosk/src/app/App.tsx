@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
-import { IdleGuard } from "../components/IdleGuard.js";
 import { KioskLayout } from "../components/KioskLayout.js";
+import { SessionTimerProvider } from "../features/session/SessionTimerProvider.js";
 import { CheckoutScreen } from "../routes/CheckoutScreen.js";
 import { ConfigureScreen } from "../routes/ConfigureScreen.js";
 import {
@@ -15,7 +15,7 @@ import { WelcomeScreen } from "../routes/WelcomeScreen.js";
 
 export function App() {
   return (
-    <>
+    <SessionTimerProvider>
       <Routes>
         <Route path="/" element={<WelcomeScreen />} />
         <Route element={<KioskLayout />}>
@@ -29,7 +29,6 @@ export function App() {
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <IdleGuard />
-    </>
+    </SessionTimerProvider>
   );
 }
