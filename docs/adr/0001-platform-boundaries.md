@@ -1,6 +1,6 @@
 # ADR 0001: platform boundaries and MVP defaults
 
-Status: Proposed  
+Status: Proposed
 Date: 2026-07-12
 
 ## Context

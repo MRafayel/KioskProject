@@ -1,6 +1,7 @@
 # Phase 0 status
 
-Date: 2026-07-12
+- Date: 2026-07-13
+- Status: complete
 
 ## Completed
 
@@ -33,17 +34,13 @@ Date: 2026-07-12
 - pnpm infra:validate
 - Prisma schema validation and client generation
 - API process binds successfully when run outside the workspace sandbox
+- Docker engine 29.6.1 and native arm64 hello-world container
+- Healthy PostgreSQL 17, Redis 7, and MinIO containers
+- Loopback-only container port bindings
+- Baseline Prisma migration applied successfully
+- Seeded product scope read back from PostgreSQL
+- API `/health/live` returns the print-only monochrome contract
+- API `/health/ready` reports PostgreSQL, Redis, and object storage as healthy
 
-## Pending Docker acceptance
-
-Docker Desktop is currently stopped because its setup flow rejected the
-license. After the project owner accepts Docker Desktop's terms:
-
-1. Run pnpm infra:up.
-2. Confirm all three containers are healthy with pnpm infra:status.
-3. Run pnpm db:migrate.
-4. Run pnpm db:seed.
-5. Re-run the complete Phase 0 verification.
-
-No feature-phase implementation should begin until these infrastructure checks
-pass.
+The Phase 0 acceptance gate is satisfied. Phase 1 may now begin with the kiosk
+user-interface prototype while preserving the print-only monochrome boundary.

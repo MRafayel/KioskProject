@@ -17,4 +17,3 @@ model SystemMetadata {
 
   @@map("system_metadata")
 }
-

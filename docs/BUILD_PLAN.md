@@ -1,7 +1,8 @@
 # Printing Kiosk software build plan
 
-Status: proposed architecture for review  
-Audience: solo developer building the first prototype, then a commercial pilot  
+Status: proposed architecture for review
+
+Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
 
 ## 1. Executive direction
@@ -310,6 +311,8 @@ quality gates, not calendar dates, decide when a phase is complete.
 
 ### Phase 0 — reproducible and clean development workspace
 
+**Status:** complete on 2026-07-13. See `docs/PHASE_0_STATUS.md`.
+
 **Objective:** make a fresh checkout safe and runnable.
 
 **Build:** initialize Git and pnpm/Turborepo; strict TypeScript; lint, format,
@@ -338,6 +341,8 @@ committed .env files, verbose request-body logging, and premature
 microservices.
 
 ### Phase 1 — kiosk UI prototype
+
+**Status:** complete on 2026-07-13. See `docs/PHASE_1_STATUS.md`.
 
 **Objective:** validate a complete touchscreen journey without a backend.
 
@@ -2321,8 +2326,10 @@ This workspace was inspected on macOS 26.4:
   The shell must load ~/.nvm/nvm.sh before those commands appear on PATH.
 - Visual Studio Code 1.127.0 and its code command are installed.
 - Docker Desktop 4.81.0, Docker client 29.6.1, and Compose 5.2.0 are installed.
-  Docker's setup must be completed as documented in docs/DOCKER_AUDIT.md.
-- The repository is initialized on main and Phase 0 scaffolding is present.
+  Docker setup and the native arm64 runtime checks are complete, as documented
+  in docs/DOCKER_AUDIT.md.
+- The repository is initialized on main and the Phase 0 acceptance gate is
+  complete.
 
 ### 22.2 Install prerequisites on this Mac
 

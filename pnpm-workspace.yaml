@@ -5,6 +5,7 @@ packages:
 allowBuilds:
   "@prisma/engines": true
   esbuild: true
+  msw: false
   prisma: true
 overrides:
   "@hono/node-server": "1.19.13"

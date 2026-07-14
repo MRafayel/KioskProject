@@ -5,4 +5,3 @@ CREATE TABLE "system_metadata" (
   "updated_at" TIMESTAMPTZ NOT NULL,
   CONSTRAINT "system_metadata_pkey" PRIMARY KEY ("key")
 );
-

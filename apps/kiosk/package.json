@@ -5,20 +5,30 @@
   "type": "module",
   "dependencies": {
     "@printing-kiosk/contracts": "workspace:*",
+    "@tanstack/react-query": "5.101.2",
+    "qrcode.react": "4.2.0",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "react-router-dom": "7.18.1"
   },
   "scripts": {
     "build": "tsc -b && vite build",
     "dev": "vite --host 127.0.0.1 --port 5173",
-    "lint": "eslint src vite.config.ts",
+    "lint": "eslint src e2e vite.config.ts playwright.config.ts",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run src",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
+    "jsdom": "29.1.1",
     "vite": "8.1.4"
   }
 }

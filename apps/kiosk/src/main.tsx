@@ -1,30 +1,34 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { HashRouter } from "react-router-dom";
 
-import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
+import { App } from "./app/App.js";
+import { KioskErrorBoundary } from "./app/KioskErrorBoundary.js";
+import { PrototypeSessionProvider } from "./features/session/PrototypeSessionProvider.js";
 
 import "./styles.css";
 
-function App() {
-  return (
-    <main className="shell">
-      <section className="card" aria-labelledby="phase-title">
-        <p className="eyebrow">Phase 0</p>
-        <h1 id="phase-title">Printing kiosk foundation is ready</h1>
-        <p>
-          Product scope: print-only, {PRODUCT_SCOPE.outputMode.toLowerCase()} output. Customer
-          workflows begin in Phase 1.
-        </p>
-      </section>
-    </main>
-  );
-}
+const queryClient = new QueryClient({
+  defaultOptions: {
+    mutations: { retry: false },
+    queries: { retry: false, staleTime: Number.POSITIVE_INFINITY }
+  }
+});
 
 const root = document.getElementById("root");
 if (!root) throw new Error("ROOT_ELEMENT_MISSING");
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    <KioskErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <PrototypeSessionProvider>
+          <HashRouter>
+            <App />
+          </HashRouter>
+        </PrototypeSessionProvider>
+      </QueryClientProvider>
+    </KioskErrorBoundary>
   </StrictMode>
 );

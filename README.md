@@ -4,10 +4,11 @@ Privacy-first, self-service monochrome printing kiosk platform.
 
 ## Current status
 
-Phase 0 is in progress. The repository contains a TypeScript/pnpm monorepo,
-placeholder kiosk and mobile applications, API and local-agent health services,
-typed configuration/contracts, a Prisma/PostgreSQL baseline, and local
-PostgreSQL/Redis/MinIO infrastructure.
+Phases 0 and 1 are complete. The repository contains a reproducible
+TypeScript/pnpm monorepo, a tested touchscreen kiosk journey, a placeholder
+mobile application, API and local-agent health services, typed
+configuration/contracts, a migrated Prisma/PostgreSQL baseline, and healthy
+local PostgreSQL/Redis/MinIO infrastructure.
 
 The product is intentionally print-only and monochrome. Document scanning,
 photocopying/xerox, and color printing are outside scope.
@@ -18,8 +19,9 @@ Read these documents before implementation:
   device simulation, security, testing, and the phased delivery plan.
 - docs/adr/0001-platform-boundaries.md — decisions that should remain stable
   as the implementation grows.
-- docs/DOCKER_AUDIT.md — Docker Desktop diagnosis and the remaining owner action.
-- docs/PHASE_0_STATUS.md — completed and pending Phase 0 acceptance checks.
+- docs/DOCKER_AUDIT.md — Docker Desktop diagnosis and verified resolution.
+- docs/PHASE_0_STATUS.md — Phase 0 implementation and acceptance evidence.
+- docs/PHASE_1_STATUS.md — kiosk prototype features and browser-test evidence.
 - SECURITY.md — handling rules for secrets and private customer documents.
 
 ## Phase 0 commands
@@ -39,6 +41,7 @@ pnpm build
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:e2e
 pnpm infra:up
 pnpm db:migrate
 pnpm db:seed

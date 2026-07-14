@@ -1,10 +1,10 @@
 # Docker Desktop audit
 
-Date: 2026-07-12  
-Machine: Apple silicon macOS  
-Docker Desktop: 4.81.0  
-Docker client: 29.6.1  
-Docker Compose: 5.2.0
+- Date: 2026-07-13
+- Machine: Apple silicon macOS
+- Docker Desktop: 4.81.0
+- Docker client: 29.6.1
+- Docker Compose: 5.2.0
 
 ## Findings
 
@@ -27,24 +27,25 @@ A forced Desktop stop released the leaked descriptors. On the clean restart:
 3. The setup flow then sent POST /license/reject.
 4. Docker Desktop shut down cleanly and removed ~/.docker/run/docker.sock.
 
-The current blocker is therefore the unaccepted Docker Desktop license/setup,
-not the project Compose file. The Compose file passes docker compose config.
+The shutdown was caused by the unaccepted Docker Desktop license/setup, not the
+project Compose file. The Compose file passed docker compose config throughout.
 
-## Required user action
+## Resolution verified
 
-1. Open Docker Desktop from Applications.
-2. Read and accept Docker Desktop's terms if you agree to them. Codex cannot
-   accept legal terms on your behalf.
-3. If prompted about Rosetta, choose Continue without Rosetta. This project
-   uses native arm64 PostgreSQL, Redis, and MinIO images.
-4. Wait until Docker reports that the engine is running.
-5. In Docker Desktop settings, enable/install CLI tools for the system PATH if
-   desired.
+The owner completed Docker Desktop's setup on 2026-07-13. Runtime checks then
+confirmed:
+
+- the Docker 29.6.1 engine responds normally;
+- the native arm64 hello-world image runs successfully without Rosetta;
+- PostgreSQL 17, Redis 7, and MinIO start and report healthy;
+- all service ports bind to 127.0.0.1 only;
+- the baseline Prisma migration and seed complete successfully;
+- the API readiness endpoint reaches PostgreSQL, Redis, and MinIO.
 
 The repository's scripts/docker.mjs also finds the CLI inside Docker.app, so
 project commands do not depend on a global docker symlink.
 
-Verify after accepting:
+Repeat the project checks with:
 
 ```bash
 docker version
