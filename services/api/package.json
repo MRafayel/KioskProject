@@ -8,8 +8,11 @@
     "@fastify/helmet": "13.1.0",
     "@printing-kiosk/config": "workspace:*",
     "@printing-kiosk/contracts": "workspace:*",
+    "@printing-kiosk/database": "workspace:*",
+    "@printing-kiosk/domain": "workspace:*",
     "dotenv": "17.4.2",
-    "fastify": "5.10.0"
+    "fastify": "5.10.0",
+    "zod": "4.4.3"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

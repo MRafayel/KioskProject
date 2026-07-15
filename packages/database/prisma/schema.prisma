@@ -17,3 +17,136 @@ model SystemMetadata {
 
   @@map("system_metadata")
 }
+
+model Kiosk {
+  id                  String            @id @db.VarChar(64)
+  publicCode          String            @unique @map("public_code") @db.VarChar(64)
+  name                String            @db.VarChar(160)
+  status              String            @default("ACTIVE") @db.VarChar(32)
+  timezone            String            @default("Asia/Yerevan") @db.VarChar(64)
+  capabilities        Json
+  capabilitiesVersion Int               @default(1) @map("capabilities_version")
+  configVersion       Int               @default(1) @map("config_version")
+  lastSeenAt          DateTime?         @map("last_seen_at")
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @default(now()) @updatedAt @map("updated_at")
+  credentials         KioskCredential[]
+  sessions            PrintSession[]
+  auditEvents         AuditEvent[]
+
+  @@index([status])
+  @@index([lastSeenAt])
+  @@map("kiosks")
+}
+
+model KioskCredential {
+  id           String    @id @db.Uuid
+  kioskId      String    @map("kiosk_id") @db.VarChar(64)
+  credentialId String    @unique @map("credential_id") @db.VarChar(100)
+  secretDigest String    @unique @map("secret_digest") @db.VarChar(64)
+  scopes       String[]
+  issuedAt     DateTime  @default(now()) @map("issued_at")
+  expiresAt    DateTime? @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  lastUsedAt   DateTime? @map("last_used_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  kiosk        Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+
+  @@index([kioskId, revokedAt])
+  @@map("kiosk_credentials")
+}
+
+model PrintSession {
+  id             String              @id @db.Uuid
+  publicId       String              @unique @map("public_id") @db.VarChar(80)
+  kioskId        String              @map("kiosk_id") @db.VarChar(64)
+  locale         String              @db.VarChar(10)
+  state          String              @db.VarChar(40)
+  stateVersion   Int                 @default(1) @map("state_version")
+  idleExpiresAt  DateTime            @map("idle_expires_at")
+  hardExpiresAt  DateTime            @map("hard_expires_at")
+  terminalReason String?             @map("terminal_reason") @db.VarChar(80)
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @default(now()) @updatedAt @map("updated_at")
+  canceledAt     DateTime?           @map("canceled_at")
+  expiredAt      DateTime?           @map("expired_at")
+  completedAt    DateTime?           @map("completed_at")
+  kiosk          Kiosk               @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  uploadGrant    SessionUploadGrant?
+  auditEvents    AuditEvent[]
+  outboxEvents   OutboxEvent[]
+
+  @@index([kioskId, createdAt])
+  @@index([state, idleExpiresAt])
+  @@index([state, hardExpiresAt])
+  @@map("print_sessions")
+}
+
+model SessionUploadGrant {
+  id              String       @id @db.Uuid
+  sessionId       String       @unique @map("session_id") @db.Uuid
+  tokenDigest     String       @unique @map("token_digest") @db.VarChar(64)
+  shortCodeDigest String       @unique @map("short_code_digest") @db.VarChar(64)
+  status          String       @default("ACTIVE") @db.VarChar(24)
+  expiresAt       DateTime     @map("expires_at")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  revokedAt       DateTime?    @map("revoked_at")
+  session         PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, status])
+  @@map("session_upload_grants")
+}
+
+model AuditEvent {
+  id         String        @id @db.Uuid
+  occurredAt DateTime      @default(now()) @map("occurred_at")
+  actorType  String        @map("actor_type") @db.VarChar(32)
+  actorId    String        @map("actor_id") @db.VarChar(100)
+  kioskId    String?       @map("kiosk_id") @db.VarChar(64)
+  sessionId  String?       @map("session_id") @db.Uuid
+  action     String        @db.VarChar(100)
+  outcome    String        @db.VarChar(32)
+  requestId  String?       @map("request_id") @db.VarChar(100)
+  metadata   Json?
+  kiosk      Kiosk?        @relation(fields: [kioskId], references: [id], onDelete: SetNull)
+  session    PrintSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId, occurredAt])
+  @@index([actorType, actorId, occurredAt])
+  @@map("audit_events")
+}
+
+model OutboxEvent {
+  id              String       @id @db.Uuid
+  aggregateType   String       @map("aggregate_type") @db.VarChar(50)
+  aggregateId     String       @map("aggregate_id") @db.Uuid
+  sequence        Int
+  type            String       @db.VarChar(100)
+  payload         Json
+  status          String       @default("PENDING") @db.VarChar(24)
+  publishAttempts Int          @default(0) @map("publish_attempts")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  publishedAt     DateTime?    @map("published_at")
+  session         PrintSession @relation(fields: [aggregateId], references: [id], onDelete: Cascade)
+
+  @@unique([aggregateId, sequence])
+  @@index([status, createdAt])
+  @@map("outbox_events")
+}
+
+model IdempotencyRecord {
+  id             String   @id @db.Uuid
+  actorId        String   @map("actor_id") @db.VarChar(100)
+  action         String   @db.VarChar(100)
+  keyDigest      String   @map("key_digest") @db.VarChar(64)
+  requestHash    String   @map("request_hash") @db.VarChar(64)
+  responseStatus Int      @map("response_status")
+  responseBody   Json     @map("response_body")
+  resourceId     String?  @map("resource_id") @db.VarChar(100)
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  @@unique([actorId, action, keyDigest])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}

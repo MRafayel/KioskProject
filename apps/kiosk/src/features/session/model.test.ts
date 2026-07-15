@@ -11,9 +11,12 @@ import {
 
 const session: PrototypeSession = {
   id: "session-test",
+  publicId: "ps_session-test",
+  version: 1,
   shortCode: "123 456",
   uploadUrl: "https://upload.example.test/session-test?token=prototype",
-  expiresAt: "2030-01-01T00:00:00.000Z"
+  expiresAt: "2030-01-01T00:00:00.000Z",
+  hardExpiresAt: "2030-01-01T00:30:00.000Z"
 };
 
 const file: PrototypeFile = {

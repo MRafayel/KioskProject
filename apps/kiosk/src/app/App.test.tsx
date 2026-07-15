@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
 import { LanguageProvider } from "../features/i18n/LanguageProvider.js";
@@ -12,9 +12,52 @@ import { PrototypeSessionProvider } from "../features/session/PrototypeSessionPr
 import { initialPrototypeState, type PrototypeState } from "../features/session/model.js";
 import { App } from "./App.js";
 
+beforeEach(() => {
+  window.sessionStorage.clear();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/cancel")) {
+        return Promise.resolve(
+          new Response("{}", {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            session: {
+              id: "01900000-0000-7000-8000-000000000010",
+              publicId: "ps_1234567890abcdef",
+              kioskId: "kiosk_dev_001",
+              locale: document.documentElement.lang || "hy",
+              state: "WAITING_FOR_UPLOAD",
+              version: 1,
+              expiresAt: "2030-01-01T00:10:00.000Z",
+              hardExpiresAt: "2030-01-01T00:30:00.000Z",
+              createdAt: "2030-01-01T00:00:00.000Z",
+              canceledAt: null
+            },
+            upload: {
+              shortCode: "48291357",
+              qrUrl: "https://upload.example.test/s/ps_1234567890abcdef#t=u_example"
+            }
+          }),
+          { status: 201, headers: { "content-type": "application/json" } }
+        )
+      );
+    })
+  );
+});
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("kiosk prototype journey", () => {
@@ -73,9 +116,12 @@ describe("kiosk prototype journey", () => {
         ...initialPrototypeState,
         session: {
           id: "idle-test-session",
+          publicId: "ps_idle-test-session",
+          version: 1,
           shortCode: "123 456",
           uploadUrl: "https://upload.example.test/idle-test-session",
-          expiresAt: "2030-01-01T00:00:00.000Z"
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          hardExpiresAt: "2030-01-01T00:30:00.000Z"
         }
       }
     });

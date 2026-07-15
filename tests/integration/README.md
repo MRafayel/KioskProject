@@ -1,5 +1,6 @@
 # Integration tests
 
-Phase 0 reserves this directory for tests that use real PostgreSQL, Redis, and
-private object storage. Test fixtures must be synthetic and must never contain
-customer documents.
+These tests use the real local PostgreSQL service. Run `pnpm infra:up`,
+`pnpm db:migrate`, and `pnpm db:seed` before `pnpm test:integration`.
+
+All fixtures are synthetic. Never place customer documents in this directory.

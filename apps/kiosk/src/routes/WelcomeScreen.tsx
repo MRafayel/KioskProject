@@ -4,14 +4,14 @@ import { useNavigate } from "react-router-dom";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import { createPrototypeSession } from "../mocks/prototypeService.js";
+import { createKioskSession } from "../features/session/sessionService.js";
 
 export function WelcomeScreen() {
-  const { messages } = useLanguage();
+  const { locale, messages } = useLanguage();
   const { dispatch } = usePrototypeSession();
   const navigate = useNavigate();
   const createSession = useMutation({
-    mutationFn: createPrototypeSession,
+    mutationFn: () => createKioskSession(locale),
     onSuccess: (session) => {
       dispatch({ type: "SESSION_CREATED", session });
       void navigate("/upload");

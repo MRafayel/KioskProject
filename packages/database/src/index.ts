@@ -7,4 +7,5 @@ export function createDatabaseClient(connectionString: string): PrismaClient {
   return new PrismaClient({ adapter });
 }
 
+export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };

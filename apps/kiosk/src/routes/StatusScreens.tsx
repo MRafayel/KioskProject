@@ -4,6 +4,7 @@ import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { calculatePrintSummary, formatPrice } from "../features/session/model.js";
+import { closeKioskSession } from "../features/session/sessionService.js";
 
 const PROTOTYPE_STEP_DELAY_MS = 1_200;
 
@@ -122,6 +123,7 @@ export function CompleteScreen() {
   const summary = calculatePrintSummary(state.files, state.settings);
 
   const finish = () => {
+    if (state.session) void closeKioskSession(state.session).catch(() => undefined);
     dispatch({ type: "RESET" });
     resetLocale();
     void navigate("/", { replace: true });

@@ -5,6 +5,7 @@ import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { formatSessionTime, useSessionTimer } from "../features/session/SessionTimerProvider.js";
+import { closeKioskSession } from "../features/session/sessionService.js";
 
 const steps = [
   { path: "/upload" },
@@ -25,12 +26,20 @@ export function KioskLayout() {
 
   const currentStep = stepIndex(location.pathname);
   const canCancel = ["/upload", "/configure", "/checkout"].includes(location.pathname);
+  const showSessionTimer = location.pathname !== "/printing";
 
-  const cancelSession = () => {
-    dispatch({ type: "RESET" });
-    resetLocale();
-    setCancelOpen(false);
-    void navigate("/", { replace: true });
+  const cancelSession = async () => {
+    const session = state.session;
+    if (!session) return;
+
+    try {
+      await closeKioskSession(session);
+    } finally {
+      dispatch({ type: "RESET" });
+      resetLocale();
+      setCancelOpen(false);
+      void navigate("/", { replace: true });
+    }
   };
 
   return (
@@ -83,17 +92,19 @@ export function KioskLayout() {
         <div className="privacy-strip">
           <span aria-hidden="true">●</span> {messages.common.privacyNotice}
         </div>
-        <div
-          className={
-            remainingSeconds <= 30 ? "session-timer session-timer--warning" : "session-timer"
-          }
-          role="timer"
-          aria-label={messages.idle.countdown(remainingSeconds)}
-        >
-          <span aria-hidden="true">◷</span>
-          <span>{messages.idle.timeRemaining}</span>
-          <strong>{formatSessionTime(remainingSeconds)}</strong>
-        </div>
+        {showSessionTimer ? (
+          <div
+            className={
+              remainingSeconds <= 30 ? "session-timer session-timer--warning" : "session-timer"
+            }
+            role="timer"
+            aria-label={messages.idle.countdown(remainingSeconds)}
+          >
+            <span aria-hidden="true">◷</span>
+            <span>{messages.idle.timeRemaining}</span>
+            <strong>{formatSessionTime(remainingSeconds)}</strong>
+          </div>
+        ) : null}
       </footer>
 
       {cancelOpen ? (
@@ -113,7 +124,11 @@ export function KioskLayout() {
               >
                 {messages.common.keepSession}
               </button>
-              <button className="button button--danger" type="button" onClick={cancelSession}>
+              <button
+                className="button button--danger"
+                type="button"
+                onClick={() => void cancelSession()}
+              >
                 {messages.common.cancelSession}
               </button>
             </div>

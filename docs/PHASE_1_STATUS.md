@@ -9,8 +9,9 @@
 - Real prototype QR code and short session code.
 - Deterministic simulated phone upload for a PDF document.
 - Uploaded-file confirmation and removal path.
-- Monochrome settings for page range, paper size, orientation, pages per side,
-  simplex/duplex, and 1–10 copies.
+- Monochrome settings for any valid contiguous page range, orientation,
+  simplex/duplex, and 1–10 copies. A4 is fixed by the printer capability and is
+  not shown as a customer choice.
 - Pure sheet, side, and prototype-price calculation outside React screens.
 - Checkout and simulated payment progress.
 - Simulated successful printing, payment decline, and printer failure.
@@ -19,7 +20,10 @@
 - Session cancellation confirmation on pre-payment screens, with cancellation
   hidden once payment begins so the kiosk never promises that no charge was
   made after payment.
-- Sixty-second inactivity warning and ninety-second privacy reset.
+- A visible 120-second inactivity countdown that resets after user activity or
+  navigation, with a final warning dialog. The countdown is intentionally
+  hidden while the printer-progress animation is shown, but timeout enforcement
+  remains active.
 - Error boundary with a safe kiosk restart screen.
 - Large touch controls, visible keyboard focus, reduced-motion support, and
   responsive landscape layouts.
@@ -52,6 +56,6 @@
 - Strict TypeScript, ESLint, Prettier, and production builds pass for the kiosk
   package.
 
-Phase 2 may now replace prototype session creation with authoritative backend
-sessions while keeping the established touchscreen journey and print-only
-monochrome boundary.
+Phase 2 replaced prototype session creation with authoritative backend sessions
+while keeping the established touchscreen journey and print-only monochrome
+boundary.

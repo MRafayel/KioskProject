@@ -6,6 +6,13 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    proxy: {
+      "/agent": {
+        target: "http://127.0.0.1:3100",
+        changeOrigin: false,
+        rewrite: (path) => path.replace(/^\/agent/, "")
+      }
+    }
   }
 });

@@ -3,9 +3,12 @@ export type PrototypeOutcome = "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR";
 
 export interface PrototypeSession {
   id: string;
+  publicId: string;
+  version: number;
   shortCode: string;
   uploadUrl: string;
   expiresAt: string;
+  hardExpiresAt: string;
 }
 
 export interface PrototypeFile {

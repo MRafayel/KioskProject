@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: proposed architecture for review
+Status: active implementation plan; Phases 0–2 complete
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
@@ -238,8 +238,9 @@ without confirming its license.
 5. Upload up to 10 PDF/JPEG/PNG files with hard size and page limits.
 6. Validate into quarantine, generate previews, and mark files ready.
 7. Notify the kiosk in real time and recover via snapshot after reconnect.
-8. Reorder/remove files and choose page ranges, copies, simplex/duplex, A4,
-   orientation, pages per sheet, and fit. Output is always monochrome.
+8. Reorder/remove files and choose flexible page ranges, copies,
+   simplex/duplex, orientation, and fit on fixed A4 paper. Output is always
+   monochrome.
 9. Create a server-authoritative, expiring price quote.
 10. Run a fake payment outcome with idempotent callbacks.
 11. Create a normalized print-ready PDF and immutable job manifest.
@@ -369,12 +370,15 @@ business state hidden in React components, and missing recovery screens.
 
 ### Phase 2 — authoritative temporary sessions
 
+**Status:** complete on 2026-07-14. See `docs/PHASE_2_STATUS.md`.
+
 **Objective:** put session lifecycle and concurrency in the backend.
 
-**Build:** seed a development kiosk; create ID, public ID, random short code,
-upload-token digest, expiry, and state; pure transition function; optimistic
-version; audit/outbox event; injected Clock and random source; idempotent
-create/cancel.
+**Build:** seed a development kiosk; create ID, public ID, domain-separated
+HMAC-derived upload token and short code, digest-only grant storage, expiry, and
+state; pure transition function; optimistic version; audit/outbox event;
+injected Clock and random source; idempotent create/cancel with HMAC-digested
+keys and sanitized replay records.
 
 **Tools:** Fastify, Prisma/PostgreSQL, Zod, node crypto, Vitest, fast-check.
 
@@ -385,18 +389,21 @@ packages/database/prisma.
 **Endpoints:** POST /v1/kiosks/:kioskId/sessions; GET /v1/sessions/:sessionId;
 POST /v1/sessions/:sessionId/cancel.
 
-**Entities:** kiosks, kiosk_credentials, print_sessions, audit_events,
-outbox_events, idempotency_records.
+**Entities:** kiosks, kiosk_credentials, print_sessions,
+session_upload_grants, audit_events, outbox_events, idempotency_records.
 
-**Tests:** code collision retry, token digest storage, transition table,
-concurrent update, exact expiry boundary, duplicate idempotency key, active
-session uniqueness.
+**Tests:** code collision retry, digest-only token/code/key storage, exact safe
+replay, replay tamper/state refusal, transition table, tenant isolation,
+concurrent create/cancel, exact expiry boundary, duplicate/expired idempotency
+key, active session uniqueness, and database response sanitization.
 
-**Done:** create returns the one-time QR value and refresh retrieves the same
-truth; invalid/stale transitions return 409 or 412.
+**Done:** create returns the QR value and a duplicate request safely reconstructs
+the exact response only while the original waiting grant remains active;
+invalid/stale transitions return 409 or 412.
 
-**Avoid:** treating the code as a secret, storing a raw token, accepting client
-state assignments, and writing audit separately from the transaction.
+**Avoid:** treating the code as sufficient authorization, storing a raw token,
+short code, idempotency key, or credential-bearing replay response; accepting
+client state assignments; and writing audit separately from the transaction.
 
 ### Phase 3 — QR and mobile upload
 
@@ -790,7 +797,9 @@ https://upload.example.test/s/ps_7Jk2mQf9Cw#t=u_example-256-bit-random-value
 ~~~
 
 - ps_... is an opaque public ID with at least 128 bits of randomness.
-- u_... is 32 cryptographically random bytes encoded base64url.
+- u_... is a 32-byte, domain-separated HMAC-derived value encoded base64url.
+  The server can reconstruct it for the original idempotent create retry
+  without storing the bearer credential.
 - The fragment is not sent in the HTTP path or ordinary Referer header. The
   mobile app reads it, exchanges it in a POST body, then calls
   history.replaceState to remove it.
@@ -828,7 +837,8 @@ upload, but not beyond a 30-minute hard maximum.
 
 ### 9.3 Numeric fallback code
 
-Generate an eight-digit CSPRNG code and ensure uniqueness among active sessions.
+Generate an eight-digit value with a CSPRNG or domain-separated HMAC derivation
+and ensure uniqueness among active sessions.
 It is guessable and is not sufficient authorization in production. Preferred
 flow:
 
@@ -1352,8 +1362,9 @@ nonnegative checks, unique constraints, and transactional migrations.
 
 - Outbox: aggregate ID, per-session sequence, type, redacted payload, publish
   attempts/status.
-- Idempotency: actor/action/key, request hash, stored response/resource,
-  expiry; unique actor/action/key.
+- Idempotency: actor/action/context-bound key digest, request hash, sanitized
+  response/resource, expiry; unique actor/action/key digest. Never persist a
+  raw key or credential-bearing response.
 - Cleanup: session, lease, checkpoint/status, attempts/error/next retry.
 
 ### 11.2 What belongs in Redis
@@ -2630,12 +2641,37 @@ export const CreateSessionResponse = z.object({
 import {
   createHmac,
   randomBytes,
-  randomInt,
   randomUUID
 } from "node:crypto";
 
+const derive = (
+  purpose: "upload-token" | "short-code",
+  sessionId: string,
+  idempotencyKey: string,
+  pepper: string
+) => createHmac("sha256", pepper)
+  .update("printing-kiosk/" + purpose + "/v1\0")
+  .update(sessionId)
+  .update("\0")
+  .update(idempotencyKey)
+  .digest();
+
 const digest = (value: string, pepper: string) =>
-  createHmac("sha256", pepper).update(value, "utf8").digest();
+  createHmac("sha256", pepper).update(value, "utf8").digest("hex");
+
+const digestIdempotencyKey = (
+  actorId: string,
+  action: string,
+  value: string,
+  pepper: string
+) => createHmac("sha256", pepper)
+  .update("printing-kiosk/idempotency-key/v1\0")
+  .update(actorId)
+  .update("\0")
+  .update(action)
+  .update("\0")
+  .update(value)
+  .digest("hex");
 
 export async function createSession(input: {
   kioskId: string;
@@ -2644,19 +2680,38 @@ export async function createSession(input: {
   pepper: string;
   clock: Clock;
 }) {
-  const replay = await idempotency.find(input.kioskId, input.idempotencyKey);
-  if (replay) return replay.response;
-
   for (let collisionAttempt = 0; collisionAttempt < 5; collisionAttempt += 1) {
     const id = randomUUID(); // use UUIDv7 helper in the real implementation
     const publicId = "ps_" + randomBytes(16).toString("base64url");
-    const grant = "u_" + randomBytes(32).toString("base64url");
-    const code = randomInt(0, 100_000_000).toString().padStart(8, "0");
+    const grantBytes = derive("upload-token", id, input.idempotencyKey, input.pepper);
+    const codeBytes = derive("short-code", id, input.idempotencyKey, input.pepper);
+    const grant = "u_" + grantBytes.toString("base64url");
+    const code = (codeBytes.readBigUInt64BE(0) % 100_000_000n)
+      .toString()
+      .padStart(8, "0");
     const expiresAt = input.clock.addMinutes(10);
 
     try {
       return await database.transaction(async (tx) => {
-        await tx.lockKioskAndAssertNoActiveSession(input.kioskId);
+        await tx.lockKiosk(input.kioskId);
+        const idempotencyKeyDigest = digestIdempotencyKey(
+          input.kioskId,
+          "sessions.create",
+          input.idempotencyKey,
+          input.pepper
+        );
+        const replay = await tx.idempotency.findByKeyDigest(
+          input.kioskId,
+          "sessions.create",
+          idempotencyKeyDigest
+        );
+        if (replay) {
+          // Verify request hash, waiting state, active/unexpired grant, and both
+          // derived digests before reconstructing the original response.
+          return reconstructSafeCreateReplay(replay, input);
+        }
+        await tx.sessions.assertNoActiveSession(input.kioskId);
+
         const session = await tx.sessions.insert({
           id,
           publicId,
@@ -2685,8 +2740,11 @@ export async function createSession(input: {
         });
         await tx.idempotency.store(
           input.kioskId,
-          input.idempotencyKey,
-          response
+          "sessions.create",
+          idempotencyKeyDigest,
+          hashRequest({ kioskId: input.kioskId }),
+          { session }, // never persist shortCode, qrUrl, or the upload token
+          session.id
         );
         return response;
       });

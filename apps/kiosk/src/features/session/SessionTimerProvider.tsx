@@ -12,6 +12,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { useLanguage } from "../i18n/LanguageProvider.js";
 import { usePrototypeSession } from "./PrototypeSessionProvider.js";
+import { closeKioskSession } from "./sessionService.js";
 
 const SESSION_DURATION_SECONDS = 120;
 const WARNING_AT_SECONDS = 30;
@@ -34,11 +35,12 @@ export function SessionTimerProvider({ children }: { children: ReactNode }) {
   const active = Boolean(state.session) && location.pathname !== "/";
 
   const returnHome = useCallback(() => {
+    if (state.session) void closeKioskSession(state.session).catch(() => undefined);
     dispatch({ type: "RESET" });
     resetLocale();
     setWarningOpen(false);
     void navigate("/", { replace: true });
-  }, [dispatch, navigate, resetLocale]);
+  }, [dispatch, navigate, resetLocale, state.session]);
 
   const resetActivity = useCallback(() => {
     if (!active) return;

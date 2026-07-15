@@ -9,7 +9,8 @@
   "packageManager": "pnpm@11.12.0",
   "scripts": {
     "build": "turbo run build",
-    "dev": "pnpm build:packages && turbo run dev --parallel",
+    "dev": "pnpm build:packages && turbo run dev",
+    "dev:kiosk": "pnpm build:packages && turbo run dev --filter=@printing-kiosk/api --filter=@printing-kiosk/kiosk-agent --filter=@printing-kiosk/kiosk --filter=@printing-kiosk/mobile-upload",
     "build:packages": "turbo run build --filter='./packages/*'",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

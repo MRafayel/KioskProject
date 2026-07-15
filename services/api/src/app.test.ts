@@ -61,3 +61,20 @@ describe("health routes", () => {
     });
   });
 });
+
+describe("session route authentication", () => {
+  it("rejects an unauthenticated kiosk before accessing session data", async () => {
+    const app = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/kiosks/kiosk_dev_001/sessions",
+      headers: { "idempotency-key": "unauthenticated-create" },
+      payload: { locale: "hy" }
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+  });
+});

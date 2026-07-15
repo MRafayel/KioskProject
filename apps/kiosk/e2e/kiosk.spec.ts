@@ -1,6 +1,38 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/agent/v1/sessions**", async (route) => {
+    if (route.request().url().endsWith("/cancel")) {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      return;
+    }
+
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {
+          id: "01900000-0000-7000-8000-000000000020",
+          publicId: "ps_1234567890abcdef",
+          kioskId: "kiosk_dev_001",
+          locale: "hy",
+          state: "WAITING_FOR_UPLOAD",
+          version: 1,
+          expiresAt: "2030-01-01T00:10:00.000Z",
+          hardExpiresAt: "2030-01-01T00:30:00.000Z",
+          createdAt: "2030-01-01T00:00:00.000Z",
+          canceledAt: null
+        },
+        upload: {
+          shortCode: "48291357",
+          qrUrl: "https://upload.example.test/s/ps_1234567890abcdef#t=u_example"
+        }
+      })
+    });
+  });
+});
+
 test("completes the successful print prototype", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".welcome__footer")).toBeInViewport();
@@ -33,7 +65,7 @@ test("completes the successful print prototype", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Processing payment" })).toBeVisible();
   await expect(page.getByRole("timer")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Printing your document" })).toBeVisible();
-  await expect(page.getByRole("timer")).toBeVisible();
+  await expect(page.getByRole("timer")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
   await expect(page.getByRole("timer")).toBeVisible();
 
