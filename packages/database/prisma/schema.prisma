@@ -57,22 +57,25 @@ model KioskCredential {
 }
 
 model PrintSession {
-  id             String              @id @db.Uuid
-  publicId       String              @unique @map("public_id") @db.VarChar(80)
-  kioskId        String              @map("kiosk_id") @db.VarChar(64)
-  locale         String              @db.VarChar(10)
-  state          String              @db.VarChar(40)
-  stateVersion   Int                 @default(1) @map("state_version")
-  idleExpiresAt  DateTime            @map("idle_expires_at")
-  hardExpiresAt  DateTime            @map("hard_expires_at")
-  terminalReason String?             @map("terminal_reason") @db.VarChar(80)
-  createdAt      DateTime            @default(now()) @map("created_at")
-  updatedAt      DateTime            @default(now()) @updatedAt @map("updated_at")
-  canceledAt     DateTime?           @map("canceled_at")
-  expiredAt      DateTime?           @map("expired_at")
-  completedAt    DateTime?           @map("completed_at")
-  kiosk          Kiosk               @relation(fields: [kioskId], references: [id], onDelete: Restrict)
-  uploadGrant    SessionUploadGrant?
+  id             String               @id @db.Uuid
+  publicId       String               @unique @map("public_id") @db.VarChar(80)
+  kioskId        String               @map("kiosk_id") @db.VarChar(64)
+  locale         String               @db.VarChar(10)
+  state          String               @db.VarChar(40)
+  stateVersion   Int                  @default(1) @map("state_version")
+  eventSequence  Int                  @default(1) @map("event_sequence")
+  idleExpiresAt  DateTime             @map("idle_expires_at")
+  hardExpiresAt  DateTime             @map("hard_expires_at")
+  terminalReason String?              @map("terminal_reason") @db.VarChar(80)
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @default(now()) @updatedAt @map("updated_at")
+  canceledAt     DateTime?            @map("canceled_at")
+  expiredAt      DateTime?            @map("expired_at")
+  completedAt    DateTime?            @map("completed_at")
+  kiosk          Kiosk                @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  uploadGrants   SessionUploadGrant[]
+  mobileClients  MobileClient[]
+  uploadedFiles  UploadedFile[]
   auditEvents    AuditEvent[]
   outboxEvents   OutboxEvent[]
 
@@ -83,18 +86,79 @@ model PrintSession {
 }
 
 model SessionUploadGrant {
-  id              String       @id @db.Uuid
-  sessionId       String       @unique @map("session_id") @db.Uuid
-  tokenDigest     String       @unique @map("token_digest") @db.VarChar(64)
-  shortCodeDigest String       @unique @map("short_code_digest") @db.VarChar(64)
-  status          String       @default("ACTIVE") @db.VarChar(24)
-  expiresAt       DateTime     @map("expires_at")
-  createdAt       DateTime     @default(now()) @map("created_at")
-  revokedAt       DateTime?    @map("revoked_at")
-  session         PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id              String        @id @db.Uuid
+  sessionId       String        @map("session_id") @db.Uuid
+  tokenDigest     String        @unique @map("token_digest") @db.VarChar(64)
+  shortCodeDigest String        @map("short_code_digest") @db.VarChar(64)
+  status          String        @default("ACTIVE") @db.VarChar(24)
+  expiresAt       DateTime      @map("expires_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  claimedClientId String?       @map("claimed_client_id") @db.Uuid
+  claimedAt       DateTime?     @map("claimed_at")
+  revokedAt       DateTime?     @map("revoked_at")
+  session         PrintSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  claimedClient   MobileClient? @relation("ClaimedUploadGrant", fields: [claimedClientId, sessionId], references: [id, sessionId], onDelete: Restrict)
 
+  @@unique([claimedClientId, sessionId])
   @@index([sessionId, status])
   @@map("session_upload_grants")
+}
+
+model MobileClient {
+  id                String              @id @db.Uuid
+  sessionId         String              @map("session_id") @db.Uuid
+  cookieDigest      String              @unique @map("cookie_digest") @db.VarChar(64)
+  clientNonceDigest String              @map("client_nonce_digest") @db.VarChar(64)
+  status            String              @default("ACTIVE") @db.VarChar(24)
+  expiresAt         DateTime            @map("expires_at")
+  lastSeenAt        DateTime?           @map("last_seen_at")
+  createdAt         DateTime            @default(now()) @map("created_at")
+  revokedAt         DateTime?           @map("revoked_at")
+  session           PrintSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  claimedGrant      SessionUploadGrant? @relation("ClaimedUploadGrant")
+  uploadedFiles     UploadedFile[]
+
+  @@unique([id, sessionId])
+  @@unique([sessionId, clientNonceDigest])
+  @@index([sessionId, status])
+  @@index([status, expiresAt])
+  @@map("mobile_clients")
+}
+
+model UploadedFile {
+  id                  String       @id @db.Uuid
+  sessionId           String       @map("session_id") @db.Uuid
+  uploadedByClientId  String       @map("uploaded_by_client_id") @db.Uuid
+  clientFileId        String       @map("client_file_id") @db.Uuid
+  ordinal             Int
+  displayName         String       @map("display_name") @db.VarChar(160)
+  status              String       @db.VarChar(24)
+  kind                String?      @db.VarChar(12)
+  declaredMime        String?      @map("declared_mime") @db.VarChar(100)
+  detectedMime        String?      @map("detected_mime") @db.VarChar(100)
+  extension           String?      @db.VarChar(10)
+  reservedBytes       Int          @map("reserved_bytes")
+  sizeBytes           Int?         @map("size_bytes")
+  contentSha256       String?      @map("content_sha256") @db.VarChar(64)
+  quarantineObjectKey String?      @unique @map("quarantine_object_key") @db.VarChar(512)
+  rejectionCode       String?      @map("rejection_code") @db.VarChar(80)
+  cleanupAttempts     Int          @default(0) @map("cleanup_attempts")
+  cleanupDueAt        DateTime?    @map("cleanup_due_at")
+  cleanupErrorCode    String?      @map("cleanup_error_code") @db.VarChar(80)
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @default(now()) @updatedAt @map("updated_at")
+  quarantinedAt       DateTime?    @map("quarantined_at")
+  deleteRequestedAt   DateTime?    @map("delete_requested_at")
+  deletedAt           DateTime?    @map("deleted_at")
+  session             PrintSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  uploadedByClient    MobileClient @relation(fields: [uploadedByClientId, sessionId], references: [id, sessionId], onDelete: Restrict)
+
+  @@unique([sessionId, clientFileId])
+  @@unique([sessionId, ordinal])
+  @@index([sessionId, status, ordinal])
+  @@index([status, updatedAt])
+  @@index([cleanupDueAt])
+  @@map("uploaded_files")
 }
 
 model AuditEvent {

@@ -83,6 +83,16 @@ export async function buildAgent(
     )
   );
 
+  app.get<{ Params: { sessionId: string } }>("/v1/sessions/:sessionId/files", (request, reply) =>
+    forwardApiResponse(
+      upstreamFetch,
+      environment,
+      `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/files`,
+      { method: "GET", headers: upstreamHeaders(environment) },
+      reply
+    )
+  );
+
   app.post<{ Params: { sessionId: string } }>(
     "/v1/sessions/:sessionId/cancel",
     async (request, reply) => {

@@ -19,7 +19,10 @@ const WARNING_AT_SECONDS = 30;
 
 interface SessionTimerContextValue {
   remainingSeconds: number;
+  recordActivity: () => void;
 }
+
+type ClosureStatus = "idle" | "closing" | "failed";
 
 const SessionTimerContext = createContext<SessionTimerContextValue | null>(null);
 
@@ -29,64 +32,102 @@ export function SessionTimerProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
   const deadlineRef = useRef(0);
+  const closureStatusRef = useRef<ClosureStatus>("idle");
   const [remainingSeconds, setRemainingSeconds] = useState(SESSION_DURATION_SECONDS);
   const [warningOpen, setWarningOpen] = useState(false);
+  const [closureStatus, setClosureStatus] = useState<ClosureStatus>("idle");
 
   const active = Boolean(state.session) && location.pathname !== "/";
 
-  const returnHome = useCallback(() => {
-    if (state.session) void closeKioskSession(state.session).catch(() => undefined);
+  const updateClosureStatus = useCallback((status: ClosureStatus) => {
+    closureStatusRef.current = status;
+    setClosureStatus(status);
+  }, []);
+
+  const closePrivateSession = useCallback(async () => {
+    const session = state.session;
+    if (!session || closureStatusRef.current === "closing") return;
+
+    updateClosureStatus("closing");
+    setWarningOpen(true);
+    try {
+      await closeKioskSession(session);
+    } catch {
+      updateClosureStatus("failed");
+      return;
+    }
+
+    updateClosureStatus("idle");
     dispatch({ type: "RESET" });
     resetLocale();
     setWarningOpen(false);
     void navigate("/", { replace: true });
-  }, [dispatch, navigate, resetLocale, state.session]);
+  }, [dispatch, navigate, resetLocale, state.session, updateClosureStatus]);
+  const closePrivateSessionRef = useRef(closePrivateSession);
+  closePrivateSessionRef.current = closePrivateSession;
 
-  const resetActivity = useCallback(() => {
-    if (!active) return;
+  const recordActivity = useCallback(() => {
+    if (!active || closureStatusRef.current !== "idle") return;
     deadlineRef.current = Date.now() + SESSION_DURATION_SECONDS * 1000;
     setRemainingSeconds(SESSION_DURATION_SECONDS);
+    setWarningOpen(false);
   }, [active]);
 
   const continueSession = useCallback(() => {
     setWarningOpen(false);
-    resetActivity();
-  }, [resetActivity]);
+    recordActivity();
+  }, [recordActivity]);
 
   useEffect(() => {
     if (!active) {
       deadlineRef.current = 0;
+      closureStatusRef.current = "idle";
+      setClosureStatus("idle");
       setRemainingSeconds(SESSION_DURATION_SECONDS);
       setWarningOpen(false);
       return;
     }
 
-    let expired = false;
     setWarningOpen(false);
-    resetActivity();
+    recordActivity();
 
     const tick = () => {
       const seconds = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000));
       setRemainingSeconds(seconds);
 
       if (seconds > 0 && seconds <= WARNING_AT_SECONDS) setWarningOpen(true);
-      if (seconds === 0 && !expired) {
-        expired = true;
-        returnHome();
+      if (seconds === 0 && closureStatusRef.current === "idle") {
+        void closePrivateSessionRef.current();
       }
     };
 
     const activityEvents = ["pointerdown", "keydown", "kiosk-activity"] as const;
-    activityEvents.forEach((eventName) => window.addEventListener(eventName, resetActivity));
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, recordActivity));
     const timer = window.setInterval(tick, 250);
 
     return () => {
       window.clearInterval(timer);
-      activityEvents.forEach((eventName) => window.removeEventListener(eventName, resetActivity));
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, recordActivity));
     };
-  }, [active, location.pathname, resetActivity, returnHome]);
+  }, [active, location.pathname, recordActivity]);
 
-  const value = useMemo(() => ({ remainingSeconds }), [remainingSeconds]);
+  const value = useMemo(
+    () => ({ remainingSeconds, recordActivity }),
+    [recordActivity, remainingSeconds]
+  );
+
+  const recoveryMode = closureStatus !== "idle";
+  const modalTitle =
+    closureStatus === "failed"
+      ? messages.common.cleanupPendingTitle
+      : closureStatus === "closing"
+        ? messages.common.cleanupInProgress
+        : messages.idle.title;
+  const modalDescription = recoveryMode
+    ? closureStatus === "failed"
+      ? messages.common.cleanupPendingDescription
+      : messages.common.cleanupInProgressDescription
+    : messages.idle.description;
 
   return (
     <SessionTimerContext.Provider value={value}>
@@ -103,23 +144,50 @@ export function SessionTimerProvider({ children }: { children: ReactNode }) {
             aria-modal="true"
             aria-labelledby="idle-title"
           >
-            <div className="countdown" aria-label={messages.idle.countdown(remainingSeconds)}>
-              {remainingSeconds}
-            </div>
-            <h2 id="idle-title">{messages.idle.title}</h2>
-            <p>{messages.idle.description}</p>
+            {recoveryMode ? (
+              <div className="status-mark status-mark--small" aria-hidden="true">
+                {closureStatus === "failed" ? "!" : "…"}
+              </div>
+            ) : (
+              <div className="countdown" aria-label={messages.idle.countdown(remainingSeconds)}>
+                {remainingSeconds}
+              </div>
+            )}
+            <h2 id="idle-title">{modalTitle}</h2>
+            <p>{modalDescription}</p>
             <div className="button-row">
-              <button className="button button--secondary" type="button" onClick={returnHome}>
-                {messages.idle.endSession}
-              </button>
-              <button
-                className="button button--primary"
-                type="button"
-                onClick={continueSession}
-                autoFocus
-              >
-                {messages.idle.continue}
-              </button>
+              {closureStatus === "failed" ? (
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={() => void closePrivateSession()}
+                  autoFocus
+                >
+                  {messages.common.retryCleanup}
+                </button>
+              ) : closureStatus === "closing" ? (
+                <button className="button button--primary" type="button" disabled>
+                  {messages.common.cleanupInProgress}
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="button button--secondary"
+                    type="button"
+                    onClick={() => void closePrivateSession()}
+                  >
+                    {messages.idle.endSession}
+                  </button>
+                  <button
+                    className="button button--primary"
+                    type="button"
+                    onClick={continueSession}
+                    autoFocus
+                  >
+                    {messages.idle.continue}
+                  </button>
+                </>
+              )}
             </div>
           </section>
         </div>

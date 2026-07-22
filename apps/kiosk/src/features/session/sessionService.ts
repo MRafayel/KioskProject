@@ -1,10 +1,14 @@
-import { createSessionResponseSchema } from "@printing-kiosk/contracts";
+import {
+  createSessionResponseSchema,
+  listUploadedFilesResponseSchema
+} from "@printing-kiosk/contracts";
 
 import type { Locale } from "../i18n/messages.js";
-import type { PrototypeSession } from "./model.js";
+import type { PrototypeFile, PrototypeSession } from "./model.js";
 
 const CREATE_KEY_STORAGE = "printing-kiosk.pending-create";
 const CANCEL_KEY_PREFIX = "printing-kiosk.pending-cancel.";
+const inFlightClosures = new Map<string, Promise<void>>();
 
 export async function createKioskSession(locale: Locale): Promise<PrototypeSession> {
   const idempotencyKey = getCreateIdempotencyKey(locale);
@@ -24,7 +28,6 @@ export async function createKioskSession(locale: Locale): Promise<PrototypeSessi
     id: result.session.id,
     publicId: result.session.publicId,
     version: result.session.version,
-    shortCode: formatShortCode(result.upload.shortCode),
     uploadUrl: result.upload.qrUrl,
     expiresAt: result.session.expiresAt,
     hardExpiresAt: result.session.hardExpiresAt
@@ -32,26 +35,61 @@ export async function createKioskSession(locale: Locale): Promise<PrototypeSessi
 }
 
 export async function closeKioskSession(session: PrototypeSession): Promise<void> {
+  const inFlight = inFlightClosures.get(session.id);
+  if (inFlight) return inFlight;
+
+  const closure = closeKioskSessionOnce(session);
+  inFlightClosures.set(session.id, closure);
+  try {
+    await closure;
+  } finally {
+    inFlightClosures.delete(session.id);
+  }
+}
+
+async function closeKioskSessionOnce(session: PrototypeSession): Promise<void> {
   const storageKey = `${CANCEL_KEY_PREFIX}${session.id}`;
   const idempotencyKey = sessionStorage.getItem(storageKey) ?? newIdempotencyKey();
   sessionStorage.setItem(storageKey, idempotencyKey);
 
-  try {
-    const response = await fetch(`/agent/v1/sessions/${encodeURIComponent(session.id)}/cancel`, {
-      method: "POST",
-      headers: {
-        "idempotency-key": idempotencyKey,
-        "if-match": `"${session.version}"`
-      },
-      keepalive: true
-    });
+  const response = await fetch(`/agent/v1/sessions/${encodeURIComponent(session.id)}/cancel`, {
+    method: "POST",
+    headers: {
+      "idempotency-key": idempotencyKey,
+      "if-match": `"${session.version}"`
+    },
+    keepalive: true
+  });
 
-    if (!response.ok && response.status !== 404 && response.status !== 410) {
-      throw await sessionRequestError(response, "SESSION_CANCEL_FAILED");
-    }
-  } finally {
-    clearStoredSessionKeys(session.id);
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    throw await sessionRequestError(response, "SESSION_CANCEL_FAILED");
   }
+
+  // Keep both the authoritative session and this stable key while closure is
+  // uncertain. Only a confirmed terminal response permits the kiosk to forget
+  // the customer's session and its replay key.
+  clearStoredSessionKeys(session.id);
+}
+
+export async function listKioskSessionFiles(sessionId: string): Promise<PrototypeFile[]> {
+  const response = await fetch(`/agent/v1/sessions/${encodeURIComponent(sessionId)}/files`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    cache: "no-store"
+  });
+
+  if (!response.ok) throw await sessionRequestError(response, "SESSION_FILES_FAILED");
+
+  const result = listUploadedFilesResponseSchema.parse(await response.json());
+  return result.items.map((file) => ({
+    id: file.id,
+    ordinal: file.ordinal,
+    name: null,
+    kind: file.kind,
+    status: file.status,
+    pageCount: null,
+    sizeBytes: file.sizeBytes
+  }));
 }
 
 export function clearStoredSessionKeys(sessionId?: string): void {
@@ -77,10 +115,6 @@ function getCreateIdempotencyKey(locale: Locale): string {
 
 function newIdempotencyKey(): string {
   return `kiosk-${crypto.randomUUID()}`;
-}
-
-function formatShortCode(value: string): string {
-  return `${value.slice(0, 4)} ${value.slice(4)}`;
 }
 
 async function sessionRequestError(response: Response, fallbackCode: string): Promise<Error> {

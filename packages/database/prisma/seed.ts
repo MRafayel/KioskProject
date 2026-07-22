@@ -1,10 +1,27 @@
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+
+import { config as loadDotenv } from "dotenv";
 
 import { createDatabaseClient } from "../src/index.js";
+import { assertSafeDevelopmentSeedTarget } from "../src/development-seed.js";
 
+loadDotenv({
+  path: fileURLToPath(new URL("../../../.env", import.meta.url)),
+  override: false,
+  quiet: true
+});
+
+const configuredConnectionString = process.env.DATABASE_URL;
 const connectionString =
-  process.env.DATABASE_URL ??
+  configuredConnectionString ??
   "postgresql://printing_kiosk:development-only@localhost:5432/printing_kiosk";
+
+assertSafeDevelopmentSeedTarget({
+  nodeEnvironment: process.env.NODE_ENV,
+  databaseUrl: connectionString,
+  usesBuiltInDefault: configuredConnectionString === undefined
+});
 
 const database = createDatabaseClient(connectionString);
 const developmentKioskId = process.env.DEV_KIOSK_ID ?? "kiosk_dev_001";
@@ -69,12 +86,12 @@ await database.kioskCredential.upsert({
     kioskId: developmentKioskId,
     credentialId: "development-kiosk-credential",
     secretDigest: credentialDigest,
-    scopes: ["sessions:create", "sessions:read", "sessions:cancel"]
+    scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read"]
   },
   update: {
     kioskId: developmentKioskId,
     secretDigest: credentialDigest,
-    scopes: ["sessions:create", "sessions:read", "sessions:cancel"],
+    scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read"],
     revokedAt: null,
     expiresAt: null
   }

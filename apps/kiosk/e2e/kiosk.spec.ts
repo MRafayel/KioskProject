@@ -8,6 +8,26 @@ test.beforeEach(async ({ page }) => {
       return;
     }
 
+    if (route.request().url().endsWith("/files")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              id: "01900000-0000-7000-8000-000000000021",
+              ordinal: 0,
+              status: "QUARANTINED",
+              kind: "PDF",
+              sizeBytes: 2_400_000,
+              createdAt: "2030-01-01T00:00:00.000Z"
+            }
+          ]
+        })
+      });
+      return;
+    }
+
     await route.fulfill({
       status: 201,
       contentType: "application/json",
@@ -33,7 +53,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("completes the successful print prototype", async ({ page }) => {
+test("receives the phone upload while keeping unvalidated settings locked", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".welcome__footer")).toBeInViewport();
   await expectNoHorizontalOverflow(page);
@@ -44,57 +64,21 @@ test("completes the successful print prototype", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Upload your document" })).toBeVisible();
   await expect(page.getByRole("timer")).toContainText("02:00");
 
-  await page.getByRole("button", { name: "Simulate phone upload" }).click();
-  await expect(page.getByText("sample-document.pdf")).toBeVisible();
-  await page.getByRole("button", { name: /Continue to print settings/i }).click();
-
-  await expect(page.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
-  await expect(page.getByRole("timer")).toContainText("02:00");
+  await expect(page.getByText("Document 1.pdf")).toBeVisible();
+  await expect(page.getByText("4829 1357")).toHaveCount(0);
+  await expect(page.getByText("Received — checking file safety").first()).toBeVisible();
+  await expect(page.getByText(/8 pages/i)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /simulate phone upload/i })).toHaveCount(0);
   await expect(page.locator(".session-footer")).toBeInViewport();
   await expectNoHorizontalOverflow(page);
-  await expect(page.getByText("Paper size", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Pages per side", { exact: true })).toHaveCount(0);
-  await page.getByRole("spinbutton", { name: "From page" }).fill("3");
-  await page.getByRole("spinbutton", { name: "To page" }).fill("7");
-  await page.getByRole("button", { name: "Increase copies" }).click();
-  await page.getByLabel("Double-sided").check();
-  await page.getByRole("button", { name: /Review and pay/i }).click();
-  await expect(page.getByRole("timer")).toContainText("02:00");
-
-  await page.getByRole("button", { name: /Pay \$1\.50/i }).click();
-  await expect(page.getByRole("heading", { name: "Processing payment" })).toBeVisible();
-  await expect(page.getByRole("timer")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Printing your document" })).toBeVisible();
-  await expect(page.getByRole("timer")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
-  await expect(page.getByRole("timer")).toBeVisible();
-
-  await page.getByRole("button", { name: "Finish and delete files" }).click();
-  await expect(page.locator("html")).toHaveAttribute("lang", "hy");
-  await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeVisible();
 });
 
-test("offers cancel, browser-back, failure, and retry paths", async ({ page }) => {
+test("offers a safe cancel path while an uploaded file is quarantined", async ({ page }) => {
   await page.goto("/");
   await switchToEnglish(page);
   await page.getByRole("button", { name: "Start printing" }).click();
-  await page.getByRole("button", { name: "Simulate phone upload" }).click();
-  await page.getByRole("button", { name: /Continue to print settings/i }).click();
-
-  await page.goBack();
-  await expect(page.getByRole("heading", { name: "Upload your document" })).toBeVisible();
-  await page.getByRole("button", { name: /Continue to print settings/i }).click();
-  await page.getByRole("button", { name: /Review and pay/i }).click();
-  await page.getByLabel("Printer error").check();
-  await page.getByRole("button", { name: /Pay /i }).click();
-
-  await expect(page.getByRole("heading", { name: "The printer needs attention" })).toBeVisible();
-  await page.getByRole("button", { name: "Retry printing" }).click();
-  await expect(page.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
-
-  await page.getByRole("button", { name: "Finish and delete files" }).click();
-  await switchToEnglish(page);
-  await page.getByRole("button", { name: "Start printing" }).click();
+  await expect(page.getByText("Document 1.pdf")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("dialog", { name: "Cancel this print session?" })).toBeVisible();
   await page.getByRole("button", { name: "Cancel session" }).click();
@@ -114,6 +98,7 @@ test("has keyboard-visible focus and no serious accessibility violations", async
   ).toEqual([]);
 
   await page.getByRole("button", { name: "Սկսել տպագրությունը" }).click();
+  await expect(page.getByText("Փաստաթուղթ 1.pdf")).toBeVisible();
   const uploadResults = await new AxeBuilder({ page }).analyze();
   expect(
     uploadResults.violations.filter(
@@ -142,21 +127,11 @@ test("keeps Russian and Armenian meaningful across the active session", async ({
   await page.getByRole("button", { name: "Հայերեն" }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "hy");
   await expect(page.getByRole("heading", { name: "Վերբեռնեք փաստաթուղթը" })).toBeVisible();
-  await page.getByRole("button", { name: "Նմանակել վերբեռնումը" }).click();
-  await page.getByRole("button", { name: "Անցնել տպման կարգավորումներին" }).click();
-
-  await expect(page.getByRole("heading", { name: "Ընտրեք տպման կարգավորումները" })).toBeVisible();
-  await page.getByRole("button", { name: "Ստուգել և վճարել" }).click();
-  await expect(page.getByRole("heading", { name: "Ստուգեք պատվերը և վճարեք" })).toBeVisible();
-
-  await page.getByRole("button", { name: /Վճարել/ }).click();
-  await expect(page.getByRole("heading", { name: "Մշակում ենք վճարումը" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Տպում ենք փաստաթուղթը" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Փաստաթղթերը պատրաստ են" })).toBeVisible();
-
-  await page.getByRole("button", { name: "Ավարտել և հեռացնել ֆայլերը" }).click();
-  await expect(page.locator("html")).toHaveAttribute("lang", "hy");
-  await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeVisible();
+  await expect(page.getByText("Փաստաթուղթ 1.pdf")).toBeVisible();
+  await expect(
+    page.getByText("Ֆայլը ստացվել է․ անվտանգության ստուգում է կատարվում").first()
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Անցնել տպման կարգավորումներին" })).toBeDisabled();
 });
 
 async function switchToEnglish(page: Page): Promise<void> {

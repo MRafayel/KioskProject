@@ -13,7 +13,6 @@ const session: PrototypeSession = {
   id: "session-test",
   publicId: "ps_session-test",
   version: 1,
-  shortCode: "123 456",
   uploadUrl: "https://upload.example.test/session-test?token=prototype",
   expiresAt: "2030-01-01T00:00:00.000Z",
   hardExpiresAt: "2030-01-01T00:30:00.000Z"
@@ -21,8 +20,10 @@ const session: PrototypeSession = {
 
 const file: PrototypeFile = {
   id: "file-test",
+  ordinal: 0,
   name: "safe-fixture.pdf",
-  mimeType: "application/pdf",
+  kind: "PDF",
+  status: "READY",
   pageCount: 8,
   sizeBytes: 2_000_000
 };
@@ -68,5 +69,46 @@ describe("prototype session model", () => {
       totalSheets: 6,
       priceCents: 150
     });
+  });
+
+  it("replaces the kiosk file snapshot in server order", () => {
+    const quarantinedFile: PrototypeFile = {
+      ...file,
+      id: "quarantined-file",
+      ordinal: 1,
+      name: null,
+      status: "QUARANTINED",
+      pageCount: null
+    };
+
+    expect(
+      prototypeReducer(
+        { ...initialPrototypeState, files: [file] },
+        { type: "FILES_SYNCED", files: [quarantinedFile, file] }
+      ).files
+    ).toEqual([file, quarantinedFile]);
+  });
+
+  it("keeps a replacement ahead of an older rejection tombstone", () => {
+    const rejectedFile: PrototypeFile = {
+      ...file,
+      status: "REJECTED",
+      pageCount: null
+    };
+    const replacement: PrototypeFile = {
+      ...file,
+      id: "replacement-file",
+      ordinal: 1,
+      name: null,
+      status: "QUARANTINED",
+      pageCount: null
+    };
+
+    expect(
+      prototypeReducer(initialPrototypeState, {
+        type: "FILES_SYNCED",
+        files: [rejectedFile, replacement]
+      }).files
+    ).toEqual([replacement, rejectedFile]);
   });
 });

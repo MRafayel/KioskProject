@@ -248,6 +248,12 @@ p {
   background: var(--blue-light);
 }
 
+.status-pill--danger {
+  border-color: #edbfc2;
+  color: var(--red);
+  background: var(--red-light);
+}
+
 .language-switcher {
   display: flex;
   align-items: center;
@@ -612,30 +618,6 @@ p {
   border-radius: 0.5rem;
 }
 
-.session-code {
-  margin: 0.8rem 0;
-  text-align: center;
-}
-
-.session-code span,
-.session-code strong {
-  display: block;
-}
-
-.session-code span {
-  color: var(--muted);
-  font-size: 0.74rem;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.session-code strong {
-  margin-top: 0.2rem;
-  color: var(--navy);
-  font-size: 1.5rem;
-  letter-spacing: 0.15em;
-}
-
 .upload-placeholder {
   display: flex;
   min-height: 74px;
@@ -725,6 +707,35 @@ p {
   border-radius: 50%;
   color: white !important;
   background: var(--green);
+}
+
+.file-card__check--pending {
+  color: var(--blue) !important;
+  background: var(--blue-light);
+}
+
+.file-card__check--danger {
+  background: var(--red);
+}
+
+.upload-panel__pending,
+.upload-refresh-error {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+  text-align: center;
+}
+
+.upload-refresh-error {
+  max-width: 600px;
+  margin-top: 1.7rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid #e7b65a;
+  border-radius: 0.8rem;
+  color: #7a5000;
+  background: #fff6df;
+  text-align: left;
 }
 
 .screen-heading {
@@ -1020,6 +1031,25 @@ p {
 .receipt-list,
 .completion-summary {
   margin: 0;
+}
+
+.cleanup-recovery {
+  display: flex;
+  width: min(610px, 100%);
+  margin: 0 auto 1rem;
+  padding: 1rem 1.2rem;
+  flex-direction: column;
+  gap: 0.35rem;
+  border: 1px solid #efc4c7;
+  border-radius: 0.9rem;
+  color: var(--red);
+  background: var(--red-light);
+  text-align: left;
+}
+
+.cleanup-recovery span {
+  color: #7e5960;
+  line-height: 1.45;
 }
 
 .summary-list div,

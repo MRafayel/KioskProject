@@ -1,21 +1,46 @@
-import { useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import { formatFileSize } from "../features/session/model.js";
-import { simulatePhoneUpload } from "../mocks/prototypeService.js";
+import { useSessionTimer } from "../features/session/SessionTimerProvider.js";
+import {
+  fileExtension,
+  formatFileSize,
+  isReadyFile,
+  type PrototypeFile
+} from "../features/session/model.js";
+import { listKioskSessionFiles } from "../features/session/sessionService.js";
 
 export function UploadScreen() {
   const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
+  const { recordActivity } = useSessionTimer();
   const navigate = useNavigate();
-  const upload = useMutation({
-    mutationFn: simulatePhoneUpload,
-    onSuccess: (file) => dispatch({ type: "FILE_UPLOADED", file })
+  const sessionId = state.session?.id;
+  const filesQuery = useQuery({
+    queryKey: ["kiosk-session-files", sessionId],
+    queryFn: () => {
+      if (!sessionId) throw new Error("SESSION_REQUIRED");
+      return listKioskSessionFiles(sessionId);
+    },
+    enabled: Boolean(sessionId),
+    refetchInterval: 1_000,
+    refetchIntervalInBackground: false,
+    gcTime: 0,
+    retry: false
   });
+
+  useEffect(() => {
+    if (!filesQuery.data) return;
+    dispatch({ type: "FILES_SYNCED", files: filesQuery.data });
+    if (filesQuery.data.some((file) => file.status === "UPLOADING")) recordActivity();
+  }, [dispatch, filesQuery.data, filesQuery.dataUpdatedAt, recordActivity]);
+
   const file = state.files[0];
+  const readyFile = isReadyFile(file);
 
   if (!state.session) return null;
 
@@ -38,22 +63,11 @@ export function UploadScreen() {
           </li>
         </ol>
 
-        <div className="prototype-note">
-          <strong>{messages.upload.prototypeControl}</strong>
-          <span>{messages.upload.prototypeDescription}</span>
-          <button
-            className="button button--secondary"
-            type="button"
-            onClick={() => upload.mutate()}
-            disabled={upload.isPending || Boolean(file)}
-          >
-            {file
-              ? messages.upload.demoReceived
-              : upload.isPending
-                ? messages.upload.receiving
-                : messages.upload.simulate}
-          </button>
-        </div>
+        {filesQuery.isError ? (
+          <p className="upload-refresh-error" role="status">
+            {messages.upload.refreshError}
+          </p>
+        ) : null}
       </section>
 
       <section className="upload-panel" aria-label={messages.upload.sessionLabel}>
@@ -65,32 +79,35 @@ export function UploadScreen() {
             marginSize={2}
             title={messages.upload.qrTitle}
           />
-          <div className="session-code">
-            <span>{messages.upload.enterCode}</span>
-            <strong>{state.session.shortCode}</strong>
-          </div>
-          <span className="status-pill status-pill--waiting">
+          <span
+            className={`status-pill status-pill--${file && statusTone(file) === "danger" ? "danger" : "waiting"}`}
+          >
             <span aria-hidden="true">●</span>{" "}
-            {file ? messages.upload.fileReceived : messages.upload.waitingForPhone}
+            {file ? fileStatusLabel(file, messages.upload) : messages.upload.waitingForPhone}
           </span>
         </div>
 
         {file ? (
           <article className="file-card" aria-label={messages.upload.uploadedDocument}>
             <div className="file-card__icon" aria-hidden="true">
-              PDF
+              {file.kind ?? "FILE"}
             </div>
             <div>
-              <strong>{file.name}</strong>
+              <strong>
+                {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+              </strong>
               <span>
-                {messages.upload.fileMeta(
-                  file.pageCount,
-                  formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)
-                )}
+                {fileStatusLabel(file, messages.upload)}
+                {file.sizeBytes === null
+                  ? ""
+                  : ` · ${formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)}`}
               </span>
             </div>
-            <span className="file-card__check" aria-label={messages.upload.uploadComplete}>
-              ✓
+            <span
+              className={`file-card__check file-card__check--${statusTone(file)}`}
+              aria-label={fileStatusLabel(file, messages.upload)}
+            >
+              {statusMark(file)}
             </span>
           </article>
         ) : (
@@ -103,12 +120,51 @@ export function UploadScreen() {
         <button
           className="button button--primary button--wide"
           type="button"
-          disabled={!file}
+          disabled={!readyFile}
           onClick={() => void navigate("/configure")}
         >
           {messages.upload.continue} <span aria-hidden="true">→</span>
         </button>
+        {file && !readyFile ? (
+          <p className="upload-panel__pending" role="status">
+            {file.status === "REJECTED"
+              ? messages.upload.rejectedHelp
+              : messages.upload.continueUnavailable}
+          </p>
+        ) : null}
       </section>
     </div>
   );
+}
+
+function fileStatusLabel(
+  file: PrototypeFile,
+  messages: {
+    uploadComplete: string;
+    fileUploading: string;
+    fileChecking: string;
+    fileRejected: string;
+    fileDeleting: string;
+    fileDeleted: string;
+  }
+): string {
+  if (file.status === "READY") return messages.uploadComplete;
+  if (file.status === "UPLOADING") return messages.fileUploading;
+  if (file.status === "QUARANTINED") return messages.fileChecking;
+  if (file.status === "REJECTED") return messages.fileRejected;
+  if (file.status === "DELETED") return messages.fileDeleted;
+  return messages.fileDeleting;
+}
+
+function statusMark(file: PrototypeFile): string {
+  if (file.status === "READY") return "✓";
+  if (file.status === "REJECTED") return "!";
+  if (file.status === "DELETED") return "×";
+  return "…";
+}
+
+function statusTone(file: PrototypeFile): "success" | "danger" | "pending" {
+  if (file.status === "READY") return "success";
+  if (file.status === "REJECTED" || file.status === "DELETED") return "danger";
+  return "pending";
 }

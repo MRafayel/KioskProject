@@ -1,9 +1,8 @@
-import "dotenv/config";
-
-import { loadEnvironment } from "@printing-kiosk/config";
+import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 
 import { buildAgent } from "./app.js";
 
+loadWorkspaceEnvironmentFile();
 const environment = loadEnvironment();
 const app = await buildAgent(environment);
 

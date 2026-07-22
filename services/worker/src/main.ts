@@ -1,10 +1,9 @@
-import "dotenv/config";
-
 import pino from "pino";
 
-import { loadEnvironment } from "@printing-kiosk/config";
+import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
 
+loadWorkspaceEnvironmentFile();
 const environment = loadEnvironment();
 const logger = pino({ level: environment.LOG_LEVEL });
 

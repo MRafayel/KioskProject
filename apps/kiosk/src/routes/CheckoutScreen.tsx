@@ -4,7 +4,9 @@ import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
   calculatePrintSummary,
+  fileExtension,
   formatPrice,
+  isReadyFile,
   type PrototypeOutcome
 } from "../features/session/model.js";
 
@@ -15,7 +17,8 @@ export function CheckoutScreen() {
   const { state, dispatch } = usePrototypeSession();
   const navigate = useNavigate();
 
-  if (state.files.length === 0) return <Navigate to="/upload" replace />;
+  const file = state.files[0];
+  if (!isReadyFile(file)) return <Navigate to="/upload" replace />;
 
   const summary = calculatePrintSummary(state.files, state.settings);
 
@@ -29,7 +32,9 @@ export function CheckoutScreen() {
         <article className="receipt-card">
           <div className="receipt-card__heading">
             <div>
-              <strong>{state.files[0]?.name}</strong>
+              <strong>
+                {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+              </strong>
               <span>{messages.checkout.selectedPages(summary.selectedPages)}</span>
             </div>
             <button

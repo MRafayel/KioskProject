@@ -17,6 +17,11 @@ export interface MessageCatalog {
     cancelSession: string;
     cancelTitle: string;
     cancelDescription: string;
+    cleanupInProgress: string;
+    cleanupInProgressDescription: string;
+    cleanupPendingTitle: string;
+    cleanupPendingDescription: string;
+    retryCleanup: string;
     monochrome: string;
   };
   welcome: {
@@ -40,20 +45,22 @@ export interface MessageCatalog {
     instructionCamera: string;
     instructionQr: string;
     instructionFile: string;
-    prototypeControl: string;
-    prototypeDescription: string;
-    demoReceived: string;
-    receiving: string;
-    simulate: string;
     sessionLabel: string;
     qrTitle: string;
-    enterCode: string;
-    fileReceived: string;
     waitingForPhone: string;
     uploadedDocument: string;
     uploadComplete: string;
     placeholder: string;
     continue: string;
+    continueUnavailable: string;
+    rejectedHelp: string;
+    refreshError: string;
+    fileName: (position: number, extension: string) => string;
+    fileUploading: string;
+    fileChecking: string;
+    fileRejected: string;
+    fileDeleting: string;
+    fileDeleted: string;
     fileMeta: (pageCount: number, size: string) => string;
   };
   configure: {
@@ -192,6 +199,13 @@ const english: MessageCatalog = {
     cancelSession: "Cancel session",
     cancelTitle: "Cancel this print session?",
     cancelDescription: "No payment will be made. Uploaded files will be removed.",
+    cleanupInProgress: "Closing private session…",
+    cleanupInProgressDescription:
+      "Keep this screen open while the kiosk confirms that file cleanup has started.",
+    cleanupPendingTitle: "File cleanup still needs confirmation",
+    cleanupPendingDescription:
+      "The kiosk could not confirm that this private session was closed. It has kept the session on this screen so you can retry safely. Please do not leave yet.",
+    retryCleanup: "Retry secure cleanup",
     monochrome: "Black-and-white"
   },
   welcome: {
@@ -215,20 +229,23 @@ const english: MessageCatalog = {
     instructionCamera: "Open your phone camera",
     instructionQr: "Point the camera at the QR code",
     instructionFile: "Choose a PDF, JPEG, or PNG file",
-    prototypeControl: "Prototype control",
-    prototypeDescription: "Phase 1 has no backend, so this button simulates a secure phone upload.",
-    demoReceived: "Demo file received",
-    receiving: "Receiving…",
-    simulate: "Simulate phone upload",
     sessionLabel: "Upload session",
-    qrTitle: "Prototype mobile upload QR code",
-    enterCode: "Or enter code",
-    fileReceived: "File received",
+    qrTitle: "QR code for secure phone upload",
     waitingForPhone: "Waiting for your phone",
     uploadedDocument: "Uploaded document",
     uploadComplete: "Upload complete",
     placeholder: "Your uploaded files will appear here automatically.",
     continue: "Continue to print settings",
+    continueUnavailable: "Print settings will unlock after the document passes security checks.",
+    rejectedHelp: "Remove this file on your phone and upload another document.",
+    refreshError: "The upload status is temporarily unavailable. We will keep trying.",
+    fileName: (position, extension) =>
+      extension === "file" ? `Document ${position}` : `Document ${position}.${extension}`,
+    fileUploading: "Upload in progress",
+    fileChecking: "Received — checking file safety",
+    fileRejected: "File rejected",
+    fileDeleting: "Removing file",
+    fileDeleted: "File removed",
     fileMeta: (pageCount, size) => `${pageCount} ${pageCount === 1 ? "page" : "pages"} · ${size}`
   },
   configure: {
@@ -353,6 +370,13 @@ const russian: MessageCatalog = {
     cancelSession: "Отменить сеанс",
     cancelTitle: "Отменить этот сеанс печати?",
     cancelDescription: "Оплата не будет выполнена, а загруженные файлы будут удалены.",
+    cleanupInProgress: "Закрываем конфиденциальный сеанс…",
+    cleanupInProgressDescription:
+      "Не закрывайте этот экран, пока терминал подтверждает начало удаления файлов.",
+    cleanupPendingTitle: "Удаление файлов ещё не подтверждено",
+    cleanupPendingDescription:
+      "Терминал не смог подтвердить, что конфиденциальный сеанс закрыт. Сеанс остался на экране для безопасной повторной попытки. Пока не уходите.",
+    retryCleanup: "Повторить безопасное удаление",
     monochrome: "Чёрно-белая"
   },
   welcome: {
@@ -376,21 +400,24 @@ const russian: MessageCatalog = {
     instructionCamera: "Откройте камеру телефона",
     instructionQr: "Наведите камеру на QR-код",
     instructionFile: "Выберите файл PDF, JPEG или PNG",
-    prototypeControl: "Управление прототипом",
-    prototypeDescription:
-      "В первой версии сервер ещё не подключён, поэтому кнопка имитирует безопасную загрузку с телефона.",
-    demoReceived: "Тестовый файл получен",
-    receiving: "Получаем файл…",
-    simulate: "Имитировать загрузку",
     sessionLabel: "Сеанс загрузки",
-    qrTitle: "Тестовый QR-код для загрузки с телефона",
-    enterCode: "Или введите код",
-    fileReceived: "Файл получен",
+    qrTitle: "QR-код для безопасной загрузки с телефона",
     waitingForPhone: "Ожидаем подключение телефона",
     uploadedDocument: "Загруженный документ",
     uploadComplete: "Загрузка завершена",
     placeholder: "Загруженные файлы автоматически появятся здесь.",
     continue: "Перейти к настройкам печати",
+    continueUnavailable:
+      "Настройки печати откроются после того, как документ пройдёт проверку безопасности.",
+    rejectedHelp: "Удалите этот файл на телефоне и загрузите другой документ.",
+    refreshError: "Статус загрузки временно недоступен. Проверка повторится автоматически.",
+    fileName: (position, extension) =>
+      extension === "file" ? `Документ ${position}` : `Документ ${position}.${extension}`,
+    fileUploading: "Файл загружается",
+    fileChecking: "Файл получен — выполняется проверка безопасности",
+    fileRejected: "Файл отклонён",
+    fileDeleting: "Удаляем файл",
+    fileDeleted: "Файл удалён",
     fileMeta: (pageCount, size) =>
       `${pageCount} ${russianPlural(pageCount, "страница", "страницы", "страниц")} · ${size}`
   },
@@ -520,6 +547,13 @@ const armenian: MessageCatalog = {
     cancelSession: "Չեղարկել տպումը",
     cancelTitle: "Չեղարկե՞լ տպման այս գործընթացը։",
     cancelDescription: "Վճարում չի կատարվի, իսկ վերբեռնված ֆայլերը կհեռացվեն։",
+    cleanupInProgress: "Փակում ենք անձնական տպման գործընթացը…",
+    cleanupInProgressDescription:
+      "Մի փակեք այս էկրանը, մինչև տերմինալը հաստատի, որ ֆայլերի հեռացումը սկսվել է։",
+    cleanupPendingTitle: "Ֆայլերի հեռացումը դեռ հաստատված չէ",
+    cleanupPendingDescription:
+      "Տերմինալը չի կարողացել հաստատել, որ անձնական գործողությունը փակվել է։ Այն պահվել է այս էկրանին՝ անվտանգ կրկին փորձելու համար։ Առայժմ մի հեռացեք։",
+    retryCleanup: "Կրկին փորձել անվտանգ հեռացումը",
     monochrome: "Սև-սպիտակ"
   },
   welcome: {
@@ -543,21 +577,24 @@ const armenian: MessageCatalog = {
     instructionCamera: "Բացեք հեռախոսի տեսախցիկը",
     instructionQr: "Ուղղեք տեսախցիկը QR կոդին",
     instructionFile: "Ընտրեք PDF, JPEG կամ PNG ֆայլ",
-    prototypeControl: "Նախատիպի կառավարում",
-    prototypeDescription:
-      "Առաջին փուլում սերվերը դեռ միացված չէ, ուստի այս կոճակը նմանակում է հեռախոսից անվտանգ վերբեռնումը։",
-    demoReceived: "Փորձնական ֆայլը ստացվել է",
-    receiving: "Ստանում ենք ֆայլը…",
-    simulate: "Նմանակել վերբեռնումը",
     sessionLabel: "Ֆայլերի վերբեռնման բաժին",
-    qrTitle: "Հեռախոսից ֆայլ վերբեռնելու փորձնական QR կոդ",
-    enterCode: "Կամ մուտքագրեք կոդը",
-    fileReceived: "Ֆայլը ստացվել է",
+    qrTitle: "Հեռախոսից անվտանգ վերբեռնման QR կոդ",
     waitingForPhone: "Սպասում ենք հեռախոսի միացմանը",
     uploadedDocument: "Վերբեռնված փաստաթուղթ",
     uploadComplete: "Վերբեռնումն ավարտված է",
     placeholder: "Վերբեռնված ֆայլերն այստեղ կհայտնվեն ավտոմատ։",
     continue: "Անցնել տպման կարգավորումներին",
+    continueUnavailable:
+      "Տպման կարգավորումները հասանելի կլինեն փաստաթղթի անվտանգության ստուգումից հետո։",
+    rejectedHelp: "Հեռախոսից հեռացրեք այս ֆայլը և վերբեռնեք մեկ այլ փաստաթուղթ։",
+    refreshError: "Վերբեռնման կարգավիճակը ժամանակավորապես անհասանելի է։ Կրկին կփորձենք ավտոմատ։",
+    fileName: (position, extension) =>
+      extension === "file" ? `Փաստաթուղթ ${position}` : `Փաստաթուղթ ${position}.${extension}`,
+    fileUploading: "Ֆայլը վերբեռնվում է",
+    fileChecking: "Ֆայլը ստացվել է․ անվտանգության ստուգում է կատարվում",
+    fileRejected: "Ֆայլը մերժվել է",
+    fileDeleting: "Ֆայլը հեռացվում է",
+    fileDeleted: "Ֆայլը հեռացված է",
     fileMeta: (pageCount, size) => `${pageCount} էջ · ${size}`
   },
   configure: {

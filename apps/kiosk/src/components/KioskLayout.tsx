@@ -7,6 +7,8 @@ import { usePrototypeSession } from "../features/session/PrototypeSessionProvide
 import { formatSessionTime, useSessionTimer } from "../features/session/SessionTimerProvider.js";
 import { closeKioskSession } from "../features/session/sessionService.js";
 
+type CancelStatus = "closed" | "confirming" | "closing" | "failed";
+
 const steps = [
   { path: "/upload" },
   { path: "/configure" },
@@ -20,7 +22,7 @@ export function KioskLayout() {
   const { state, dispatch } = usePrototypeSession();
   const location = useLocation();
   const navigate = useNavigate();
-  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelStatus, setCancelStatus] = useState<CancelStatus>("closed");
 
   if (!state.session) return <Navigate to="/" replace />;
 
@@ -30,17 +32,33 @@ export function KioskLayout() {
 
   const cancelSession = async () => {
     const session = state.session;
-    if (!session) return;
+    if (!session || cancelStatus === "closing") return;
 
+    setCancelStatus("closing");
     try {
       await closeKioskSession(session);
-    } finally {
-      dispatch({ type: "RESET" });
-      resetLocale();
-      setCancelOpen(false);
-      void navigate("/", { replace: true });
+    } catch {
+      setCancelStatus("failed");
+      return;
     }
+
+    dispatch({ type: "RESET" });
+    resetLocale();
+    setCancelStatus("closed");
+    void navigate("/", { replace: true });
   };
+
+  const cancelRecovery = cancelStatus === "closing" || cancelStatus === "failed";
+  const cancelTitle = cancelRecovery
+    ? cancelStatus === "failed"
+      ? messages.common.cleanupPendingTitle
+      : messages.common.cleanupInProgress
+    : messages.common.cancelTitle;
+  const cancelDescription = cancelRecovery
+    ? cancelStatus === "failed"
+      ? messages.common.cleanupPendingDescription
+      : messages.common.cleanupInProgressDescription
+    : messages.common.cancelDescription;
 
   return (
     <div className="kiosk-shell">
@@ -75,7 +93,7 @@ export function KioskLayout() {
             <button
               className="button button--quiet topbar__cancel"
               type="button"
-              onClick={() => setCancelOpen(true)}
+              onClick={() => setCancelStatus("confirming")}
             >
               {messages.common.cancel}
             </button>
@@ -107,30 +125,51 @@ export function KioskLayout() {
         ) : null}
       </footer>
 
-      {cancelOpen ? (
-        <div className="modal-backdrop" role="presentation">
+      {cancelStatus !== "closed" ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <section className="modal" role="dialog" aria-modal="true" aria-labelledby="cancel-title">
             <div className="status-mark status-mark--small" aria-hidden="true">
-              ?
+              {cancelStatus === "failed" ? "!" : cancelStatus === "closing" ? "…" : "?"}
             </div>
-            <h2 id="cancel-title">{messages.common.cancelTitle}</h2>
-            <p>{messages.common.cancelDescription}</p>
+            <h2 id="cancel-title">{cancelTitle}</h2>
+            <p>{cancelDescription}</p>
             <div className="button-row">
-              <button
-                className="button button--secondary"
-                type="button"
-                onClick={() => setCancelOpen(false)}
-                autoFocus
-              >
-                {messages.common.keepSession}
-              </button>
-              <button
-                className="button button--danger"
-                type="button"
-                onClick={() => void cancelSession()}
-              >
-                {messages.common.cancelSession}
-              </button>
+              {cancelStatus === "failed" ? (
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={() => void cancelSession()}
+                  autoFocus
+                >
+                  {messages.common.retryCleanup}
+                </button>
+              ) : cancelStatus === "closing" ? (
+                <button className="button button--primary" type="button" disabled>
+                  {messages.common.cleanupInProgress}
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="button button--secondary"
+                    type="button"
+                    onClick={() => setCancelStatus("closed")}
+                    autoFocus
+                  >
+                    {messages.common.keepSession}
+                  </button>
+                  <button
+                    className="button button--danger"
+                    type="button"
+                    onClick={() => void cancelSession()}
+                  >
+                    {messages.common.cancelSession}
+                  </button>
+                </>
+              )}
             </div>
           </section>
         </div>

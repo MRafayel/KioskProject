@@ -1,3 +1,5 @@
+import type { UploadedFileKind, UploadedFileStatus } from "@printing-kiosk/contracts";
+
 export type Orientation = "PORTRAIT" | "LANDSCAPE";
 export type PrototypeOutcome = "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR";
 
@@ -5,7 +7,6 @@ export interface PrototypeSession {
   id: string;
   publicId: string;
   version: number;
-  shortCode: string;
   uploadUrl: string;
   expiresAt: string;
   hardExpiresAt: string;
@@ -13,11 +14,19 @@ export interface PrototypeSession {
 
 export interface PrototypeFile {
   id: string;
-  name: string;
-  mimeType: "application/pdf";
+  ordinal: number;
+  name: string | null;
+  kind: UploadedFileKind | null;
+  status: UploadedFileStatus | "READY";
+  pageCount: number | null;
+  sizeBytes: number | null;
+}
+
+export type ReadyPrototypeFile = PrototypeFile & {
+  status: "READY";
   pageCount: number;
   sizeBytes: number;
-}
+};
 
 export interface PrintSettings {
   orientation: Orientation;
@@ -36,7 +45,7 @@ export interface PrototypeState {
 
 export type PrototypeAction =
   | { type: "SESSION_CREATED"; session: PrototypeSession }
-  | { type: "FILE_UPLOADED"; file: PrototypeFile }
+  | { type: "FILES_SYNCED"; files: PrototypeFile[] }
   | { type: "FILE_REMOVED"; fileId: string }
   | { type: "SETTINGS_CHANGED"; settings: Partial<PrintSettings> }
   | { type: "OUTCOME_CHANGED"; outcome: PrototypeOutcome }
@@ -61,10 +70,12 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
   switch (action.type) {
     case "SESSION_CREATED":
       return { ...initialPrototypeState, session: action.session };
-    case "FILE_UPLOADED":
+    case "FILES_SYNCED":
       return {
         ...state,
-        files: [...state.files.filter((file) => file.id !== action.file.id), action.file]
+        files: [...action.files].sort(
+          (a, b) => fileDisplayPriority(a) - fileDisplayPriority(b) || a.ordinal - b.ordinal
+        )
       };
     case "FILE_REMOVED":
       return { ...state, files: state.files.filter((file) => file.id !== action.fileId) };
@@ -90,7 +101,7 @@ export function calculatePrintSummary(
   files: PrototypeFile[],
   settings: PrintSettings
 ): PrintSummary {
-  const availablePages = files.reduce((total, file) => total + file.pageCount, 0);
+  const availablePages = files.reduce((total, file) => total + (file.pageCount ?? 0), 0);
   const pageStart = availablePages === 0 ? 0 : clampPage(settings.pageStart, 1, availablePages);
   const requestedEnd = settings.pageEnd ?? availablePages;
   const pageEnd = availablePages === 0 ? 0 : clampPage(requestedEnd, pageStart, availablePages);
@@ -110,8 +121,23 @@ export function calculatePrintSummary(
   };
 }
 
+export function isReadyFile(file: PrototypeFile | undefined): file is ReadyPrototypeFile {
+  return file?.status === "READY" && file.pageCount !== null && file.sizeBytes !== null;
+}
+
+export function fileExtension(kind: UploadedFileKind | null): string {
+  if (kind === "PDF") return "pdf";
+  if (kind === "JPEG") return "jpg";
+  if (kind === "PNG") return "png";
+  return "file";
+}
+
 function clampPage(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, Math.trunc(value)));
+}
+
+function fileDisplayPriority(file: PrototypeFile): number {
+  return file.status === "REJECTED" || file.status === "DELETED" ? 1 : 0;
 }
 
 export function formatPrice(priceCents: number, locale = "en-US"): string {

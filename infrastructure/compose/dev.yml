@@ -31,7 +31,7 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: development-user
@@ -46,6 +46,31 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  minio-init:
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      API_POLICY_JSON: >-
+        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":["arn:aws:s3:::printing-kiosk-private"]},{"Effect":"Allow","Action":["s3:AbortMultipartUpload","s3:DeleteObject","s3:ListMultipartUploadParts","s3:PutObject"],"Resource":["arn:aws:s3:::printing-kiosk-private/quarantine/v1/*"]}]}
+      LIFECYCLE_JSON: >-
+        {"Rules":[{"ID":"temporary-quarantine-backstop","Status":"Enabled","Filter":{"Prefix":"quarantine/v1/"},"Expiration":{"Days":1},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 development-user development-password-change-me
+        mc mb --ignore-existing local/printing-kiosk-private
+        mc anonymous set none local/printing-kiosk-private
+        mc version suspend local/printing-kiosk-private
+        printf '%s\n' "$$LIFECYCLE_JSON" | mc ilm rule import local/printing-kiosk-private
+        mc admin user info local printing-kiosk-api >/dev/null 2>&1 || mc admin user add local printing-kiosk-api development-api-secret-change-me
+        printf '%s\n' "$$API_POLICY_JSON" > /tmp/api-policy.json
+        mc admin policy info local printing-kiosk-api >/dev/null 2>&1 || mc admin policy create local printing-kiosk-api /tmp/api-policy.json
+        mc admin policy attach local printing-kiosk-api --user printing-kiosk-api
+    restart: "no"
 
 volumes:
   postgres_data:

@@ -46,8 +46,13 @@ export async function authenticateKiosk(
     throw new ApiError(403, "INSUFFICIENT_SCOPE", "The kiosk credential lacks this scope.");
   }
 
-  await database.kioskCredential.update({
-    where: { id: credential.id },
+  // Polling routes authenticate frequently. Persisting this heartbeat at most
+  // once per minute avoids a database write for every status poll.
+  await database.kioskCredential.updateMany({
+    where: {
+      id: credential.id,
+      OR: [{ lastUsedAt: null }, { lastUsedAt: { lte: new Date(now.getTime() - 60_000) } }]
+    },
     data: { lastUsedAt: now }
   });
 

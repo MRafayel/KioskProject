@@ -2,17 +2,18 @@ import { connect } from "node:net";
 
 import type { Environment } from "@printing-kiosk/config";
 
+import type { ObjectStore } from "./modules/files/object-store.js";
+
 export async function checkInfrastructure(
-  environment: Environment
+  environment: Environment,
+  objectStore: ObjectStore
 ): Promise<Record<string, "ok" | "failed">> {
   const databaseUrl = new URL(environment.DATABASE_URL);
   const redisUrl = new URL(environment.REDIS_URL);
-  const objectStorageReadyUrl = new URL("/minio/health/ready", environment.S3_ENDPOINT);
-
   const [postgres, redis, objectStorage] = await Promise.all([
     checkTcp(databaseUrl.hostname, numberPort(databaseUrl, 5432)),
     checkTcp(redisUrl.hostname, numberPort(redisUrl, 6379)),
-    checkHttp(objectStorageReadyUrl)
+    checkObjectStore(objectStore)
   ]);
 
   return { postgres, redis, objectStorage };
@@ -37,13 +38,10 @@ function checkTcp(host: string, port: number): Promise<"ok" | "failed"> {
   });
 }
 
-async function checkHttp(url: URL): Promise<"ok" | "failed"> {
+async function checkObjectStore(objectStore: ObjectStore): Promise<"ok" | "failed"> {
   try {
-    const response = await fetch(url, {
-      method: "GET",
-      signal: AbortSignal.timeout(750)
-    });
-    return response.ok ? "ok" : "failed";
+    await objectStore.checkReady(AbortSignal.timeout(750));
+    return "ok";
   } catch {
     return "failed";
   }

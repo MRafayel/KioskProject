@@ -407,21 +407,29 @@ client state assignments; and writing audit separately from the transaction.
 
 ### Phase 3 — QR and mobile upload
 
+**Status:** complete for the bounded one-file MVP on 2026-07-15. See
+`docs/PHASE_3_STATUS.md` for implementation and verification evidence.
+
 **Objective:** securely move one allowed file from a phone into quarantine.
 
 **Build:** render the returned QR URL; responsive join page; fragment-token
-exchange into a scoped HttpOnly cookie; strip the fragment from history; stream
-multipart data; enforce count/byte/type limits; private random object keys;
-progress/list/delete; rate-limited manual-code claim.
+exchange into a session-specific HttpOnly cookie; strip the fragment from
+history; stream multipart data; enforce count/byte/type limits; private random
+object keys; progress/list/delete; exact-origin and CSRF enforcement.
 
-**Tools:** qrcode, @fastify/multipart, AWS S3 client, MinIO, file-type,
+The numeric fallback claim was deliberately deferred: the kiosk does not show
+the code until a kiosk-approved claim flow, abuse controls, and operational
+recovery design exist. Phase 3 uses QR claim only.
+
+**Tools:** qrcode.react, @fastify/multipart, AWS S3 client, MinIO, bounded
+in-house magic-signature validation,
 React/Vite, XHR upload progress.
 
 **Modules:** apps/mobile-upload/src/features/join and upload;
-services/api/src/modules/upload-access and files;
-packages/file-processing/src/validation.
+services/api/src/modules/mobile-access and files; packages/file-processing/src.
 
-**Endpoints:** POST /v1/mobile-auth/exchange; POST /v1/mobile-auth/code-claims;
+**Endpoints:** POST /v1/mobile-auth/exchange; GET
+/v1/mobile-auth/:publicSessionId/context;
 POST/GET /v1/sessions/:sessionId/files; DELETE
 /v1/sessions/:sessionId/files/:fileId.
 
@@ -432,7 +440,10 @@ size/count, expired/revoked/claimed token, two phones, interruption/partial
 cleanup, object privacy, and a real phone on the same Wi-Fi.
 
 **Done:** a phone can scan, upload, list, and delete a synthetic file; neither
-the raw token nor customer filename becomes a storage path or log field.
+the raw token nor customer filename becomes a storage path or log field. The
+kiosk polls a safe file projection as a temporary Phase 3 transport. Files
+remain `QUARANTINED` until Phase 5 deep validation; Phase 4 replaces polling
+with sequenced real-time delivery and snapshot recovery.
 
 **Avoid:** base64 file JSON, public buckets, query-string tokens, whole-file
 memory buffering, path use of filenames, and marking partial data READY.
@@ -793,7 +804,7 @@ expires. A late capture enters refund/recovery handling.
 Use a URL such as:
 
 ~~~text
-https://upload.example.test/s/ps_7Jk2mQf9Cw#t=u_example-256-bit-random-value
+https://upload.example.test/s/ps_7Jk2mQf9Cw4nT8x#t=u_example-256-bit-random-value
 ~~~
 
 - ps_... is an opaque public ID with at least 128 bits of randomness.
@@ -817,8 +828,8 @@ https://upload.example.test/s/ps_7Jk2mQf9Cw#t=u_example-256-bit-random-value
 4. Server consumes the grant and issues a random scoped cookie:
 
 ~~~text
-Set-Cookie: pk_upload=opaque; HttpOnly; Secure; SameSite=Strict;
-Path=/v1/sessions/session-id; Max-Age=900
+Set-Cookie: pk_upload_<session-id-without-dashes>=opaque;
+HttpOnly; Secure; SameSite=Strict; Path=/v1; Max-Age=600
 ~~~
 
 5. Browser removes the fragment and fetches a limited session snapshot.
@@ -904,22 +915,26 @@ Authorization: Bearer development-device-token
 Idempotency-Key: 6db7...
 Content-Type: application/json
 
-{"locale":"en-AM"}
+{"locale":"en"}
 ~~~
 
 ~~~json
 {
   "session": {
-    "id": "0190efb7-...",
-    "publicId": "ps_7Jk2mQf9Cw",
+    "id": "0190efb7-0000-7000-8000-000000000001",
+    "publicId": "ps_7Jk2mQf9Cw4nT8x",
     "kioskId": "k_01J",
+    "locale": "en",
     "state": "WAITING_FOR_UPLOAD",
     "version": 1,
-    "expiresAt": "2026-07-12T10:15:00Z"
+    "expiresAt": "2026-07-12T10:15:00Z",
+    "hardExpiresAt": "2026-07-12T10:35:00Z",
+    "createdAt": "2026-07-12T10:05:00Z",
+    "canceledAt": null
   },
   "upload": {
     "shortCode": "48392174",
-    "qrUrl": "https://upload.example.test/s/ps_7Jk2mQf9Cw#t=u_not-real"
+    "qrUrl": "https://upload.example.test/s/ps_7Jk2mQf9Cw4nT8x#t=u_not-real"
   }
 }
 ~~~
@@ -939,22 +954,24 @@ Authorization: Bearer device-token
 
 ~~~json
 {
-  "id":"0190efb7-...",
-  "state":"CONFIGURING",
-  "version":7,
-  "expiresAt":"2026-07-12T10:15:00Z",
-  "files":[{
-    "id":"f_01J",
-    "displayName":"Document 1.pdf",
-    "status":"READY",
-    "pageCount":3
-  }],
-  "settings":{"revision":2,"copies":1,"outputMode":"MONOCHROME"}
+  "session": {
+    "id":"0190efb7-0000-7000-8000-000000000001",
+    "publicId":"ps_7Jk2mQf9Cw4nT8x",
+    "kioskId":"k_01J",
+    "locale":"en",
+    "state":"WAITING_FOR_UPLOAD",
+    "version":1,
+    "expiresAt":"2026-07-12T10:15:00Z",
+    "hardExpiresAt":"2026-07-12T10:35:00Z",
+    "createdAt":"2026-07-12T10:05:00Z",
+    "canceledAt":null
+  }
 }
 ~~~
 
-Auth: owning kiosk or a limited mobile projection via scoped cookie. Validate
-ownership and non-cleaned status. Errors: 401, 404, 410.
+Auth: owning kiosk. The mobile client gets its limited projection from the
+mobile context route and lists files separately. Validate ownership and
+non-cleaned status. Errors: 401, 404, 410.
 
 ### 10.4 Join with QR grant
 
@@ -964,44 +981,60 @@ Origin: https://upload.example.test
 Content-Type: application/json
 
 {
-  "publicSessionId":"ps_7Jk2mQf9Cw",
+  "publicSessionId":"ps_7Jk2mQf9Cw4nT8x",
   "uploadToken":"u_not-a-real-secret",
-  "clientNonce":"browser-random-value"
+  "clientNonce":"0190efb7-0000-7000-8000-000000000010"
 }
 ~~~
 
 ~~~json
 {
-  "sessionId":"0190efb7-...",
-  "state":"WAITING_FOR_UPLOAD",
-  "expiresAt":"2026-07-12T10:15:00Z"
+  "session": {
+    "id":"0190efb7-0000-7000-8000-000000000001",
+    "publicId":"ps_7Jk2mQf9Cw4nT8x",
+    "locale":"en",
+    "state":"WAITING_FOR_UPLOAD",
+    "version":1,
+    "expiresAt":"2026-07-12T10:15:00Z",
+    "hardExpiresAt":"2026-07-12T10:35:00Z"
+  },
+  "csrfToken":"c_not-a-real-secret",
+  "limits": {
+    "maxFiles":1,
+    "maxFileBytes":52428800,
+    "maxTotalBytes":52428800,
+    "allowedMimeTypes":["application/pdf","image/jpeg","image/png"]
+  }
 }
 ~~~
 
 Auth: raw one-time grant, replaced by Set-Cookie. Validate exact origin, digest,
 unused/unexpired state and uploader claim atomically. Errors: 401
-INVALID_UPLOAD_GRANT, 409 ALREADY_CLAIMED, 410, 429.
+INVALID_UPLOAD_GRANT, 409 UPLOAD_GRANT_ALREADY_CLAIMED, 410, 429.
 
 ### 10.5 Upload a file
 
 ~~~http
-POST /v1/sessions/0190efb7-.../files
-Cookie: pk_upload=opaque
+POST /v1/sessions/0190efb7-0000-7000-8000-000000000001/files
+Cookie: pk_upload_0190efb7000070008000000000000001=opaque
 X-CSRF-Token: ...
-Idempotency-Key: phone-file-123
+X-Client-File-Id: 0190efb7-0000-7000-8000-000000000011
+X-File-Size: 182430
+Idempotency-Key: 0190efb7-0000-7000-8000-000000000012
 Content-Type: multipart/form-data
 
-clientFileId=phone-local-123
 file=@synthetic.pdf
 ~~~
 
 ~~~json
 {
   "file":{
-    "id":"f_01J",
-    "displayName":"Document 1.pdf",
+    "id":"0190efb7-0000-7000-8000-000000000002",
+    "ordinal":0,
     "status":"QUARANTINED",
-    "sizeBytes":182430
+    "kind":"PDF",
+    "sizeBytes":182430,
+    "createdAt":"2026-07-12T10:06:00Z"
   }
 }
 ~~~
@@ -1017,19 +1050,19 @@ operations, but never skip server-side finalization and validation.
 ### 10.6 List and delete files
 
 ~~~http
-GET /v1/sessions/0190efb7-.../files
-Cookie: pk_upload=opaque
+GET /v1/sessions/0190efb7-0000-7000-8000-000000000001/files
+Cookie: pk_upload_0190efb7000070008000000000000001=opaque
 ~~~
 
 ~~~json
-{"items":[{"id":"f_01J","displayName":"Document 1.pdf","status":"READY","pageCount":3,"ordinal":0}]}
+{"items":[{"id":"0190efb7-0000-7000-8000-000000000002","ordinal":0,"status":"QUARANTINED","kind":"PDF","sizeBytes":182430,"createdAt":"2026-07-12T10:06:00Z"}]}
 ~~~
 
 ~~~http
-DELETE /v1/sessions/0190efb7-.../files/f_01J
-Cookie: pk_upload=opaque
+DELETE /v1/sessions/0190efb7-0000-7000-8000-000000000001/files/0190efb7-0000-7000-8000-000000000002
+Cookie: pk_upload_0190efb7000070008000000000000001=opaque
 X-CSRF-Token: ...
-Idempotency-Key: delete-f_01J
+Idempotency-Key: 0190efb7-0000-7000-8000-000000000013
 ~~~
 
 GET requires owning kiosk/mobile claim; errors 401, 404, 410. DELETE returns
@@ -2569,11 +2602,12 @@ Find the LAN IP:
 ipconfig getifaddr en0
 ~~~
 
-If it is 192.168.1.50, set the development public/mobile/API origins to that
-host, bind only the mobile/API development listeners to 0.0.0.0 temporarily,
-restart them, permit ports 3000 and 5174 in the Mac firewall, and configure
-exact CORS origin. Guest Wi-Fi client isolation may block device-to-device
-traffic.
+If it is 192.168.1.50, set only `UPLOAD_ORIGIN` and
+`PUBLIC_UPLOAD_ORIGIN` to `https://192.168.1.50:5174`. Keep the API on
+`127.0.0.1:3000`; the mobile Vite server proxies `/v1` to it. Expose only port
+5174 through the Mac firewall. Do not expose PostgreSQL, Redis, MinIO, the API,
+or the kiosk agent to the LAN. Guest Wi-Fi client isolation may still block
+device-to-device traffic.
 
 Basic HTTP can test a synthetic upload if the development profile explicitly
 disables Secure cookies. For the real QR/cookie/security behavior, use HTTPS.
@@ -2588,8 +2622,9 @@ mkcert -cert-file .certs/dev.pem \
   localhost 127.0.0.1 ::1 192.168.1.50
 ~~~
 
-Configure Vite and Fastify with those files and use
-https://192.168.1.50:5174. The phone must trust the local mkcert root CA.
+Configure the mobile Vite server with those files and use
+https://192.168.1.50:5174. Fastify remains HTTP on loopback behind Vite's
+`/v1` proxy. The phone must trust the local mkcert root CA.
 Alternatively use an authenticated development tunnel with synthetic files;
 remember that it exposes a development server outside the laptop. Never use a
 development tunnel as production infrastructure.

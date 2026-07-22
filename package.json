@@ -18,7 +18,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:integration": "vitest run tests/integration --passWithNoTests",
-    "test:e2e": "pnpm --filter @printing-kiosk/kiosk test:e2e && vitest run tests/e2e --passWithNoTests",
+    "test:e2e": "pnpm --filter @printing-kiosk/kiosk test:e2e && pnpm --filter @printing-kiosk/mobile-upload test:e2e && vitest run tests/e2e --passWithNoTests",
     "infra:up": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml up -d",
     "infra:down": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml down",
     "infra:status": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml ps",

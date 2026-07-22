@@ -138,7 +138,7 @@ export class SessionService {
               where: {
                 OR: [
                   { tokenDigest: candidate.tokenDigest },
-                  { shortCodeDigest: candidate.shortCodeDigest }
+                  { shortCodeDigest: candidate.shortCodeDigest, status: "ACTIVE" }
                 ]
               },
               select: { id: true }
@@ -159,6 +159,7 @@ export class SessionService {
                 locale: input.locale,
                 state: "WAITING_FOR_UPLOAD",
                 stateVersion: 1,
+                eventSequence: 1,
                 idleExpiresAt,
                 hardExpiresAt,
                 createdAt: now,
@@ -335,11 +336,13 @@ export class SessionService {
               input.expectedVersion
             );
             const now = this.options.clock.now();
+            const nextEventSequence = session.eventSequence + 1;
             const update = await transaction.printSession.updateMany({
               where: { id: session.id, stateVersion: input.expectedVersion },
               data: {
                 state: next.state,
                 stateVersion: next.version,
+                eventSequence: nextEventSequence,
                 terminalReason: "CUSTOMER_CANCELED",
                 canceledAt: now,
                 updatedAt: now
@@ -348,9 +351,28 @@ export class SessionService {
             if (update.count !== 1) throw staleVersion(input.expectedVersion, session.stateVersion);
 
             await transaction.sessionUploadGrant.updateMany({
-              where: { sessionId: session.id, status: "ACTIVE" },
+              where: { sessionId: session.id, status: { in: ["ACTIVE", "CLAIMED"] } },
               data: { status: "REVOKED", revokedAt: now }
             });
+            await Promise.all([
+              transaction.mobileClient.updateMany({
+                where: { sessionId: session.id, status: "ACTIVE" },
+                data: { status: "REVOKED", revokedAt: now }
+              }),
+              transaction.uploadedFile.updateMany({
+                where: {
+                  sessionId: session.id,
+                  quarantineObjectKey: { not: null },
+                  status: { in: ["QUARANTINED", "DELETE_PENDING"] }
+                },
+                data: {
+                  status: "DELETE_PENDING",
+                  deleteRequestedAt: now,
+                  cleanupDueAt: now,
+                  cleanupErrorCode: null
+                }
+              })
+            ]);
 
             const canceled = await transaction.printSession.findUniqueOrThrow({
               where: { id: session.id }
@@ -377,7 +399,7 @@ export class SessionService {
                   id: this.options.random.uuid(now),
                   aggregateType: "PRINT_SESSION",
                   aggregateId: session.id,
-                  sequence: next.version,
+                  sequence: nextEventSequence,
                   type: "session.canceled",
                   payload: { sessionId: session.id, state: next.state, version: next.version }
                 }
@@ -442,17 +464,23 @@ export class SessionService {
 
     const session = await client.printSession.findFirst({
       where: { id: replay.resourceId, kioskId },
-      include: { uploadGrant: true }
+      include: {
+        uploadGrants: {
+          where: { status: "ACTIVE" },
+          orderBy: { createdAt: "desc" },
+          take: 1
+        }
+      }
     });
     if (!session) throw sessionNotFound();
+    const uploadGrant = session.uploadGrants[0];
 
     const now = this.options.clock.now();
     if (
       sessionHasExpired(session, now) ||
-      !session.uploadGrant ||
-      session.uploadGrant.status !== "ACTIVE" ||
-      session.uploadGrant.revokedAt ||
-      now.getTime() >= session.uploadGrant.expiresAt.getTime()
+      !uploadGrant ||
+      uploadGrant.revokedAt ||
+      now.getTime() >= uploadGrant.expiresAt.getTime()
     ) {
       throw new ApiError(410, "SESSION_UPLOAD_GRANT_EXPIRED", "The upload grant has expired.");
     }
@@ -484,8 +512,8 @@ export class SessionService {
     const tokenDigest = digestUploadValue(secrets.uploadToken, this.options.uploadTokenPepper);
     const shortCodeDigest = digestUploadValue(secrets.shortCode, this.options.uploadTokenPepper);
     if (
-      !safelyEqualHexDigests(tokenDigest, session.uploadGrant.tokenDigest) ||
-      !safelyEqualHexDigests(shortCodeDigest, session.uploadGrant.shortCodeDigest)
+      !safelyEqualHexDigests(tokenDigest, uploadGrant.tokenDigest) ||
+      !safelyEqualHexDigests(shortCodeDigest, uploadGrant.shortCodeDigest)
     ) {
       throw new ApiError(
         409,
@@ -632,6 +660,7 @@ async function expireSession(
     kioskId: string;
     state: string;
     stateVersion: number;
+    eventSequence: number;
   },
   now: Date,
   credentialId: string,
@@ -643,21 +672,42 @@ async function expireSession(
     "EXPIRED",
     session.stateVersion
   );
+  const nextEventSequence = session.eventSequence + 1;
 
   await transaction.printSession.update({
     where: { id: session.id },
     data: {
       state: next.state,
       stateVersion: next.version,
+      eventSequence: nextEventSequence,
       terminalReason: "IDLE_TIMEOUT",
       expiredAt: now,
       updatedAt: now
     }
   });
   await transaction.sessionUploadGrant.updateMany({
-    where: { sessionId: session.id, status: "ACTIVE" },
+    where: { sessionId: session.id, status: { in: ["ACTIVE", "CLAIMED"] } },
     data: { status: "EXPIRED", revokedAt: now }
   });
+  await Promise.all([
+    transaction.mobileClient.updateMany({
+      where: { sessionId: session.id, status: "ACTIVE" },
+      data: { status: "EXPIRED", revokedAt: now }
+    }),
+    transaction.uploadedFile.updateMany({
+      where: {
+        sessionId: session.id,
+        quarantineObjectKey: { not: null },
+        status: { in: ["QUARANTINED", "DELETE_PENDING"] }
+      },
+      data: {
+        status: "DELETE_PENDING",
+        deleteRequestedAt: now,
+        cleanupDueAt: now,
+        cleanupErrorCode: null
+      }
+    })
+  ]);
   await transaction.auditEvent.create({
     data: {
       id: random.uuid(now),
@@ -677,7 +727,7 @@ async function expireSession(
       id: random.uuid(now),
       aggregateType: "PRINT_SESSION",
       aggregateId: session.id,
-      sequence: next.version,
+      sequence: nextEventSequence,
       type: "session.expired",
       payload: { sessionId: session.id, state: next.state, version: next.version }
     }

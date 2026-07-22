@@ -1,9 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, useNavigate, useParams } from "react-router-dom";
 
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import { calculatePrintSummary, formatPrice } from "../features/session/model.js";
+import {
+  calculatePrintSummary,
+  fileExtension,
+  formatPrice,
+  isReadyFile
+} from "../features/session/model.js";
 import { closeKioskSession } from "../features/session/sessionService.js";
 
 const PROTOTYPE_STEP_DELAY_MS = 1_200;
@@ -22,7 +27,7 @@ export function PaymentScreen() {
     return () => window.clearTimeout(timer);
   }, [navigate, state.outcome]);
 
-  if (state.files.length === 0) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(state.files[0])) return <Navigate to="/upload" replace />;
 
   return (
     <TerminalProgress
@@ -48,7 +53,7 @@ export function PrintingScreen() {
     return () => window.clearTimeout(timer);
   }, [navigate, state.outcome]);
 
-  if (state.files.length === 0) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(state.files[0])) return <Navigate to="/upload" replace />;
 
   return (
     <TerminalProgress
@@ -68,7 +73,7 @@ export function FailureScreen() {
   const { failureType } = useParams();
   const paymentFailure = failureType === "payment";
 
-  if (state.files.length === 0) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(state.files[0])) return <Navigate to="/upload" replace />;
 
   return (
     <div className="terminal-state terminal-state--error">
@@ -117,13 +122,25 @@ export function CompleteScreen() {
   const { messages, numberLocale, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useNavigate();
+  const [cleanupStatus, setCleanupStatus] = useState<"idle" | "closing" | "failed">("idle");
 
-  if (state.files.length === 0) return <Navigate to="/" replace />;
+  const file = state.files[0];
+  if (!isReadyFile(file)) return <Navigate to="/" replace />;
 
   const summary = calculatePrintSummary(state.files, state.settings);
 
-  const finish = () => {
-    if (state.session) void closeKioskSession(state.session).catch(() => undefined);
+  const finish = async () => {
+    const session = state.session;
+    if (!session || cleanupStatus === "closing") return;
+
+    setCleanupStatus("closing");
+    try {
+      await closeKioskSession(session);
+    } catch {
+      setCleanupStatus("failed");
+      return;
+    }
+
     dispatch({ type: "RESET" });
     resetLocale();
     void navigate("/", { replace: true });
@@ -140,7 +157,9 @@ export function CompleteScreen() {
       <dl className="completion-summary">
         <div>
           <dt>{messages.status.printed}</dt>
-          <dd>{state.files[0]?.name}</dd>
+          <dd>
+            {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+          </dd>
         </div>
         <div>
           <dt>{messages.status.paid}</dt>
@@ -151,8 +170,23 @@ export function CompleteScreen() {
           <dd>{messages.status.deletionScheduled}</dd>
         </div>
       </dl>
-      <button className="button button--primary" type="button" onClick={finish}>
-        {messages.status.finish}
+      {cleanupStatus === "failed" ? (
+        <div className="cleanup-recovery" role="alert">
+          <strong>{messages.common.cleanupPendingTitle}</strong>
+          <span>{messages.common.cleanupPendingDescription}</span>
+        </div>
+      ) : null}
+      <button
+        className="button button--primary"
+        type="button"
+        onClick={() => void finish()}
+        disabled={cleanupStatus === "closing"}
+      >
+        {cleanupStatus === "failed"
+          ? messages.common.retryCleanup
+          : cleanupStatus === "closing"
+            ? messages.common.cleanupInProgress
+            : messages.status.finish}
       </button>
     </div>
   );

@@ -88,6 +88,55 @@ describe("kiosk agent session facade", () => {
     });
   });
 
+  it("forwards the kiosk-owned file snapshot without exposing the device credential", async () => {
+    const environment = loadEnvironment({
+      NODE_ENV: "test",
+      API_ORIGIN: "https://api.example.test",
+      DEV_KIOSK_API_KEY: "test-kiosk-api-key-000000"
+    });
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const upstreamBody = {
+      items: [
+        {
+          id: "01900000-0000-7000-8000-000000000011",
+          ordinal: 0,
+          status: "QUARANTINED",
+          kind: "PDF",
+          sizeBytes: 2048,
+          createdAt: "2030-01-01T00:00:00.000Z"
+        }
+      ]
+    };
+    const app = await buildAgent(environment, {
+      upstreamFetch: (input, init) => {
+        requests.push({ url: String(input), init });
+        return Promise.resolve(
+          new Response(JSON.stringify(upstreamBody), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+    });
+    openApps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/sessions/01900000-0000-7000-8000-000000000010/files"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual(upstreamBody);
+    expect(requests[0]?.url).toBe(
+      "https://api.example.test/v1/sessions/01900000-0000-7000-8000-000000000010/files"
+    );
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
+      "Bearer test-kiosk-api-key-000000"
+    );
+    expect(response.body).not.toContain(environment.DEV_KIOSK_API_KEY);
+  });
+
   it("forwards cancel conditions without declaring an empty JSON body", async () => {
     const environment = loadEnvironment({
       NODE_ENV: "test",

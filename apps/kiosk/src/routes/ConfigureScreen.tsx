@@ -4,8 +4,10 @@ import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
   calculatePrintSummary,
+  fileExtension,
   formatFileSize,
   formatPrice,
+  isReadyFile,
   type Orientation,
   type PrintSettings
 } from "../features/session/model.js";
@@ -16,7 +18,7 @@ export function ConfigureScreen() {
   const navigate = useNavigate();
   const file = state.files[0];
 
-  if (!file) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(file)) return <Navigate to="/upload" replace />;
 
   const summary = calculatePrintSummary(state.files, state.settings);
   const update = (settings: Partial<PrintSettings>) =>
@@ -53,7 +55,9 @@ export function ConfigureScreen() {
             PDF
           </div>
           <div>
-            <strong>{file.name}</strong>
+            <strong>
+              {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+            </strong>
             <span>
               {messages.upload.fileMeta(
                 file.pageCount,
