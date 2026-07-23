@@ -1,3 +1,4 @@
+import { uploadedFileSnapshotSchema } from "@printing-kiosk/contracts";
 import type { PrismaClient } from "@printing-kiosk/database";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
@@ -197,7 +198,7 @@ export class FileJanitor {
     for (const file of pending) {
       try {
         if (!file.quarantineObjectKey) {
-          await this.finishCleanup(file.id, Boolean(file.deleteRequestedAt), now);
+          await this.finishCleanup(file.id, file.sessionId, now);
           continue;
         }
 
@@ -219,7 +220,7 @@ export class FileJanitor {
 
         try {
           await this.options.objectStore.deleteObject({ key: file.quarantineObjectKey });
-          await this.finishCleanup(file.id, Boolean(file.deleteRequestedAt), now);
+          await this.finishCleanup(file.id, file.sessionId, now);
         } catch {
           const attempts = file.cleanupAttempts + 1;
           await this.options.database.uploadedFile.updateMany({
@@ -245,27 +246,83 @@ export class FileJanitor {
     });
   }
 
-  private async finishCleanup(fileId: string, customerDeletion: boolean, now: Date): Promise<void> {
-    await this.options.database.uploadedFile.updateMany({
-      where: { id: fileId, status: { in: ["DELETE_PENDING", "DELETING"] } },
-      data: customerDeletion
-        ? {
-            status: "DELETED",
-            quarantineObjectKey: null,
-            contentSha256: null,
-            cleanupDueAt: null,
-            cleanupErrorCode: null,
-            deletedAt: now,
-            updatedAt: now
-          }
+  private async finishCleanup(fileId: string, sessionId: string, now: Date): Promise<void> {
+    await this.options.database.$transaction(async (transaction) => {
+      const rows = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "print_sessions" WHERE "id" = ${sessionId}::uuid FOR UPDATE
+      `;
+      if (rows.length === 0) return;
+
+      const session = await transaction.printSession.findUnique({
+        where: { id: sessionId },
+        select: { id: true, eventSequence: true }
+      });
+      const file = await transaction.uploadedFile.findFirst({
+        where: { id: fileId, sessionId }
+      });
+      if (!session || !file || (file.status !== "DELETE_PENDING" && file.status !== "DELETING")) {
+        return;
+      }
+
+      const customerDeletion = Boolean(file.deleteRequestedAt);
+      const targetStatus = customerDeletion ? "DELETED" : "REJECTED";
+      const updated = await transaction.uploadedFile.updateMany({
+        where: {
+          id: file.id,
+          sessionId: session.id,
+          status: { in: ["DELETE_PENDING", "DELETING"] }
+        },
+        data: customerDeletion
+          ? {
+              status: targetStatus,
+              quarantineObjectKey: null,
+              contentSha256: null,
+              cleanupDueAt: null,
+              cleanupErrorCode: null,
+              deletedAt: now,
+              updatedAt: now
+            }
+          : {
+              status: targetStatus,
+              quarantineObjectKey: null,
+              contentSha256: null,
+              cleanupDueAt: null,
+              cleanupErrorCode: null,
+              updatedAt: now
+            }
+      });
+      if (updated.count !== 1) return;
+
+      const nextSequence = session.eventSequence + 1;
+      const payload = customerDeletion
+        ? { sessionId: session.id, fileId: file.id }
         : {
-            status: "REJECTED",
-            quarantineObjectKey: null,
-            contentSha256: null,
-            cleanupDueAt: null,
-            cleanupErrorCode: null,
-            updatedAt: now
+            sessionId: session.id,
+            file: uploadedFileSnapshotSchema.parse({
+              id: file.id,
+              ordinal: file.ordinal,
+              status: targetStatus,
+              kind: file.kind,
+              sizeBytes: file.sizeBytes,
+              createdAt: file.createdAt.toISOString()
+            })
+          };
+      await Promise.all([
+        transaction.printSession.update({
+          where: { id: session.id },
+          data: { eventSequence: nextSequence, updatedAt: now }
+        }),
+        transaction.outboxEvent.create({
+          data: {
+            id: this.options.random.uuid(now),
+            aggregateType: "PRINT_SESSION",
+            aggregateId: session.id,
+            sequence: nextSequence,
+            type: customerDeletion ? "file.deleted" : "file.rejected",
+            payload
           }
+        })
+      ]);
     });
   }
 

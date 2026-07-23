@@ -7,6 +7,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
+import type { SessionEvent } from "@printing-kiosk/contracts";
+
 import { LanguageProvider } from "../features/i18n/LanguageProvider.js";
 import { PrototypeSessionProvider } from "../features/session/PrototypeSessionProvider.js";
 import { initialPrototypeState, type PrototypeState } from "../features/session/model.js";
@@ -237,6 +239,82 @@ describe("kiosk prototype journey", () => {
     expect(screen.queryByText(/scan documents|xerox|color printing/i)).not.toBeInTheDocument();
   });
 
+  it("ends an active screen when a live session-canceled event arrives", async () => {
+    const eventSources = installFakeEventSource();
+    window.sessionStorage.setItem("printing-kiosk.pending-create", "private-create-key");
+    window.sessionStorage.setItem(
+      `printing-kiosk.pending-cancel.${testSession.id}`,
+      "private-cancel-key"
+    );
+    renderKiosk({
+      initialEntries: ["/configure"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture]
+      }
+    });
+    expect(screen.getByRole("heading", { name: "Ընտրեք տպման կարգավորումները" })).toBeVisible();
+    const source = latestOpenEventSource(eventSources);
+
+    act(() => {
+      source.open();
+      source.message(sessionCreatedEvent());
+      source.message(sessionTerminalEvent(2, "session.canceled", "CANCELED"));
+    });
+
+    expect(await screen.findByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
+    expect(source.closed).toBe(true);
+    expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).toBeNull();
+    expect(
+      window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${testSession.id}`)
+    ).toBeNull();
+  });
+
+  it("ends a stale active session when expiration is replayed before the stream opens", async () => {
+    const eventSources = installFakeEventSource();
+    renderKiosk({
+      initialEntries: ["/upload"],
+      initialState: { ...initialPrototypeState, session: testSession }
+    });
+    expect(await screen.findByRole("heading", { name: "Վերբեռնեք փաստաթուղթը" })).toBeVisible();
+    const source = latestOpenEventSource(eventSources);
+
+    act(() => {
+      source.message(sessionCreatedEvent());
+      source.message(sessionTerminalEvent(2, "session.expired", "EXPIRED"));
+    });
+
+    expect(await screen.findByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
+    expect(source.opened).toBe(false);
+    expect(source.closed).toBe(true);
+  });
+
+  it("refreshes the active file snapshot for a session-wide file event", async () => {
+    const eventSources = installFakeEventSource();
+    const fetchMock = vi.mocked(fetch);
+    renderKiosk({
+      initialEntries: ["/upload"],
+      initialState: { ...initialPrototypeState, session: testSession }
+    });
+    expect(await screen.findByText("Փաստաթուղթ 1.pdf")).toBeVisible();
+    const source = latestOpenEventSource(eventSources);
+    const fileRequestsBefore = fetchMock.mock.calls.filter(([input]) =>
+      requestUrl(input).endsWith("/files")
+    ).length;
+
+    act(() => {
+      source.message(sessionCreatedEvent());
+      source.message(fileUploadedEvent(2));
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([input]) => requestUrl(input).endsWith("/files")).length
+      ).toBeGreaterThan(fileRequestsBefore);
+    });
+  });
+
   it("retains the session and cancellation key until secure cleanup is confirmed", async () => {
     cancelFailuresRemaining = 1;
     const user = userEvent.setup();
@@ -435,4 +513,101 @@ function renderKiosk({
       </QueryClientProvider>
     </LanguageProvider>
   );
+}
+
+function requestUrl(input: string | URL | Request): string {
+  return typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+}
+
+class FakeEventSource {
+  public onopen: ((event: Event) => void) | null = null;
+  public onerror: ((event: Event) => void) | null = null;
+  public onmessage: ((event: MessageEvent) => void) | null = null;
+  public closed = false;
+  public opened = false;
+
+  public open(): void {
+    this.opened = true;
+    this.onopen?.(new Event("open"));
+  }
+
+  public message(event: SessionEvent): void {
+    this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(event) }));
+  }
+
+  public close(): void {
+    this.closed = true;
+  }
+}
+
+function installFakeEventSource(): FakeEventSource[] {
+  const sources: FakeEventSource[] = [];
+  vi.stubGlobal(
+    "EventSource",
+    class {
+      public constructor() {
+        const source = new FakeEventSource();
+        sources.push(source);
+        return source;
+      }
+    }
+  );
+  return sources;
+}
+
+function latestOpenEventSource(sources: FakeEventSource[]): FakeEventSource {
+  const source = [...sources].reverse().find((candidate) => !candidate.closed);
+  if (!source) throw new Error("ACTIVE_EVENT_SOURCE_REQUIRED");
+  return source;
+}
+
+function sessionCreatedEvent(): SessionEvent {
+  return {
+    id: "01900000-0000-7000-8000-000000000081",
+    sessionId: testSession.id,
+    sequence: 1,
+    type: "session.created",
+    payload: {
+      sessionId: testSession.id,
+      state: "WAITING_FOR_UPLOAD",
+      version: 1
+    },
+    occurredAt: "2030-01-01T00:00:00.000Z"
+  };
+}
+
+function sessionTerminalEvent(
+  sequence: number,
+  type: "session.canceled" | "session.expired",
+  state: "CANCELED" | "EXPIRED"
+): SessionEvent {
+  return {
+    id: `01900000-0000-7000-8000-${String(81 + sequence).padStart(12, "0")}`,
+    sessionId: testSession.id,
+    sequence,
+    type,
+    payload: { sessionId: testSession.id, state, version: 2 },
+    occurredAt: "2030-01-01T00:00:01.000Z"
+  };
+}
+
+function fileUploadedEvent(sequence: number): SessionEvent {
+  return {
+    id: `01900000-0000-7000-8000-${String(90 + sequence).padStart(12, "0")}`,
+    sessionId: testSession.id,
+    sequence,
+    type: "file.uploaded",
+    payload: {
+      sessionId: testSession.id,
+      file: {
+        id: readyFixture.id,
+        ordinal: 0,
+        status: "QUARANTINED",
+        kind: "PDF",
+        sizeBytes: readyFixture.sizeBytes,
+        createdAt: "2030-01-01T00:00:00.000Z"
+      }
+    },
+    occurredAt: "2030-01-01T00:00:01.000Z"
+  };
 }

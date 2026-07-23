@@ -155,7 +155,12 @@ export class FileService {
       input.stream.resume();
       inspection.destroy();
       const rejection = mapUploadFailure(error);
-      await this.rejectAndClean(reservation.file.id, reservation.file.objectKey, rejection.code);
+      await this.rejectAndClean(
+        reservation.file.id,
+        reservation.file.sessionId,
+        reservation.file.objectKey,
+        rejection.code
+      );
       throw rejection.error;
     } finally {
       input.stream.off("error", abortFromSourceError);
@@ -422,6 +427,23 @@ export class FileService {
                 updatedAt: now
               }
             });
+            const nextSequence = session.eventSequence + 1;
+            await Promise.all([
+              transaction.printSession.update({
+                where: { id: session.id },
+                data: { eventSequence: nextSequence, updatedAt: now }
+              }),
+              transaction.outboxEvent.create({
+                data: {
+                  id: this.options.random.uuid(now),
+                  aggregateType: "PRINT_SESSION",
+                  aggregateId: session.id,
+                  sequence: nextSequence,
+                  type: "upload.started",
+                  payload: { sessionId: session.id, file: toFileSnapshot(file) }
+                }
+              })
+            ]);
 
             return {
               file: {
@@ -559,7 +581,12 @@ export class FileService {
     );
   }
 
-  private async rejectAndClean(fileId: string, objectKey: string, rejectionCode: string) {
+  private async rejectAndClean(
+    fileId: string,
+    sessionId: string,
+    objectKey: string,
+    rejectionCode: string
+  ) {
     const now = this.options.clock.now();
     const claimed = await this.options.database.uploadedFile.updateMany({
       where: { id: fileId, status: "UPLOADING" },
@@ -575,17 +602,47 @@ export class FileService {
 
     try {
       await this.options.objectStore.deleteObject({ key: objectKey });
-      await this.options.database.uploadedFile.updateMany({
-        where: { id: fileId, status: "DELETE_PENDING" },
-        data: {
-          status: "REJECTED",
-          quarantineObjectKey: null,
-          contentSha256: null,
-          cleanupDueAt: null,
-          cleanupErrorCode: null,
-          updatedAt: now
-        }
-      });
+      await this.options.database.$transaction(
+        async (transaction) => {
+          await lockSession(transaction, sessionId);
+          const session = await transaction.printSession.findUniqueOrThrow({
+            where: { id: sessionId }
+          });
+          const updated = await transaction.uploadedFile.updateMany({
+            where: { id: fileId, sessionId, status: "DELETE_PENDING" },
+            data: {
+              status: "REJECTED",
+              quarantineObjectKey: null,
+              contentSha256: null,
+              cleanupDueAt: null,
+              cleanupErrorCode: null,
+              updatedAt: now
+            }
+          });
+          if (updated.count !== 1) return;
+          const file = await transaction.uploadedFile.findUniqueOrThrow({
+            where: { id: fileId }
+          });
+          const nextSequence = session.eventSequence + 1;
+          await Promise.all([
+            transaction.printSession.update({
+              where: { id: session.id },
+              data: { eventSequence: nextSequence, updatedAt: now }
+            }),
+            transaction.outboxEvent.create({
+              data: {
+                id: this.options.random.uuid(now),
+                aggregateType: "PRINT_SESSION",
+                aggregateId: session.id,
+                sequence: nextSequence,
+                type: "file.rejected",
+                payload: { sessionId: session.id, file: toFileSnapshot(file) }
+              }
+            })
+          ]);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      );
     } catch {
       await this.options.database.uploadedFile.updateMany({
         where: { id: fileId, status: "DELETE_PENDING" },

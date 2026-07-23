@@ -3,20 +3,28 @@ import { z } from "zod";
 
 import { mobileExchangeRequestSchema, publicSessionIdSchema } from "@printing-kiosk/contracts";
 
+import type { SessionEventSource } from "../realtime/session-event-bus.js";
 import { ApiError } from "../sessions/errors.js";
 import type { MobileAccessService, MobileCookie } from "./service.js";
 
 export const MOBILE_COOKIE_NAME_PREFIX = "pk_upload_";
 const publicSessionParamsSchema = z.object({ publicSessionId: publicSessionIdSchema });
+const MAX_STREAMS_PER_MOBILE_CLIENT = 2;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export function registerMobileAccessRoutes(
   app: FastifyInstance,
   dependencies: {
     mobileAccess: MobileAccessService;
+    sessionEvents: SessionEventSource;
     uploadOrigin: string;
     secureCookie: boolean;
+    streamLimiter?: MobileSessionStreamLimiter;
   }
 ): void {
+  const streamLimiter =
+    dependencies.streamLimiter ?? new MobileSessionStreamLimiter(MAX_STREAMS_PER_MOBILE_CLIENT);
+
   app.post(
     "/v1/mobile-auth/exchange",
     {
@@ -57,6 +65,100 @@ export function registerMobileAccessRoutes(
         .send(dependencies.mobileAccess.context(identity));
     }
   );
+
+  app.get(
+    "/v1/mobile-auth/:publicSessionId/events/stream",
+    {
+      // Public venues often place several phones behind one NAT address.
+      // Per-client concurrency and credential expiry bound open resources.
+      config: { rateLimit: { max: 120, timeWindow: "1 minute" } }
+    },
+    async (request, reply) => {
+      const params = publicSessionParamsSchema.parse(request.params);
+      const sessionId = await dependencies.mobileAccess.resolveSessionId(params.publicSessionId);
+      const identity = await dependencies.mobileAccess.authenticate(
+        request.cookies[mobileCookieName(sessionId)],
+        sessionId
+      );
+      const releaseStream = streamLimiter.acquire(identity.clientId);
+
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "cache-control": "no-store, no-cache, must-revalidate",
+        connection: "keep-alive",
+        "content-type": "text/event-stream; charset=utf-8",
+        "x-accel-buffering": "no"
+      });
+      reply.raw.write("retry: 5000\n: connected\n\n");
+
+      let cleaned = false;
+      let unsubscribe: () => void = () => undefined;
+      const credentialExpiresIn = Math.min(
+        MAX_TIMER_DELAY_MS,
+        Math.max(0, identity.expiresAt.getTime() - Date.now())
+      );
+      const heartbeat = setInterval(() => {
+        if (!reply.raw.destroyed) reply.raw.write(": heartbeat\n\n");
+      }, 15_000);
+      heartbeat.unref?.();
+      const credentialExpiry = setTimeout(() => {
+        cleanup();
+        if (!reply.raw.destroyed) reply.raw.end();
+      }, credentialExpiresIn);
+      credentialExpiry.unref?.();
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        clearInterval(heartbeat);
+        clearTimeout(credentialExpiry);
+        unsubscribe();
+        releaseStream();
+      };
+
+      unsubscribe = dependencies.sessionEvents.subscribe(sessionId, (event) => {
+        if (event.type !== "session.canceled" && event.type !== "session.expired") return;
+        if (!reply.raw.destroyed) {
+          reply.raw.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+          cleanup();
+          reply.raw.end();
+        }
+      });
+      request.raw.once("close", cleanup);
+      reply.raw.once("close", cleanup);
+      reply.raw.once("error", cleanup);
+    }
+  );
+}
+
+export class MobileSessionStreamLimiter {
+  private readonly activeByClient = new Map<string, number>();
+
+  public constructor(private readonly maximumPerClient: number) {
+    if (!Number.isInteger(maximumPerClient) || maximumPerClient < 1) {
+      throw new Error("INVALID_MOBILE_STREAM_LIMIT");
+    }
+  }
+
+  public acquire(clientId: string): () => void {
+    const active = this.activeByClient.get(clientId) ?? 0;
+    if (active >= this.maximumPerClient) {
+      throw new ApiError(
+        429,
+        "MOBILE_STREAM_LIMIT_REACHED",
+        "Too many realtime connections are open for this mobile session."
+      );
+    }
+    this.activeByClient.set(clientId, active + 1);
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.activeByClient.get(clientId) ?? 1) - 1;
+      if (remaining > 0) this.activeByClient.set(clientId, remaining);
+      else this.activeByClient.delete(clientId);
+    };
+  }
 }
 
 export function assertMobileOrigin(request: FastifyRequest, expectedOrigin: string): void {

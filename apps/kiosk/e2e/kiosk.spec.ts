@@ -85,6 +85,63 @@ test("offers a safe cancel path while an uploaded file is quarantined", async ({
   await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeVisible();
 });
 
+test("returns safely to welcome when an expired session is replayed", async ({ page }) => {
+  await page.addInitScript(() => {
+    const sessionId = "01900000-0000-7000-8000-000000000020";
+    class ReplayEventSource {
+      public onopen: ((event: Event) => void) | null = null;
+      public onerror: ((event: Event) => void) | null = null;
+      public onmessage: ((event: MessageEvent) => void) | null = null;
+
+      public constructor() {
+        queueMicrotask(() => {
+          this.onopen?.(new Event("open"));
+          this.emit({
+            id: "01900000-0000-7000-8000-000000000091",
+            sessionId,
+            sequence: 1,
+            type: "session.created",
+            payload: { sessionId, state: "WAITING_FOR_UPLOAD", version: 1 },
+            occurredAt: "2030-01-01T00:00:00.000Z"
+          });
+          this.emit({
+            id: "01900000-0000-7000-8000-000000000092",
+            sessionId,
+            sequence: 2,
+            type: "session.expired",
+            payload: { sessionId, state: "EXPIRED", version: 2 },
+            occurredAt: "2030-01-01T00:00:01.000Z"
+          });
+          Reflect.set(window, "__terminalReplayDelivered", true);
+        });
+      }
+
+      public close(): void {
+        return;
+      }
+
+      private emit(event: unknown): void {
+        this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(event) }));
+      }
+    }
+
+    Object.defineProperty(window, "EventSource", {
+      configurable: true,
+      value: ReplayEventSource
+    });
+  });
+
+  await page.goto("/");
+  await switchToEnglish(page);
+  await page.getByRole("button", { name: "Start printing" }).click();
+
+  await expect
+    .poll(() => page.evaluate(() => Boolean(Reflect.get(window, "__terminalReplayDelivered"))))
+    .toBe(true);
+  await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeVisible();
+  await expect(page.getByRole("timer")).toHaveCount(0);
+});
+
 test("has keyboard-visible focus and no serious accessibility violations", async ({ page }) => {
   await page.goto("/");
   await page.keyboard.press("Tab");

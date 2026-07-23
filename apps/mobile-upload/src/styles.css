@@ -206,10 +206,27 @@ h1 {
   background: #0a8b61;
 }
 
-.expiration {
+.connected-pill--closed {
+  border-color: #efc6c8;
+  color: #a42c35;
+  background: #fff3f3;
+}
+
+.connected-pill--closed span {
+  background: #c33b45;
+}
+
+.session-detail {
   margin: 0.7rem 0 1.75rem;
   color: #6b7d91;
   font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.session-detail--closed {
+  max-width: 32rem;
+  color: #a42c35;
+  font-weight: 650;
 }
 
 .privacy-note {

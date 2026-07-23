@@ -1,17 +1,39 @@
 import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
+import { createDatabaseClient } from "@printing-kiosk/database";
 
 import { buildApp } from "./app.js";
 import { createS3ObjectStore } from "./modules/files/object-store.js";
+import { RealtimeGateway } from "./modules/realtime/gateway.js";
+import { LocalSessionEventBus } from "./modules/realtime/session-event-bus.js";
+import { SystemClock } from "./modules/sessions/crypto.js";
 import { checkInfrastructure } from "./readiness.js";
 
 loadWorkspaceEnvironmentFile();
 const environment = loadEnvironment();
 const objectStore = createS3ObjectStore(environment);
+const database = createDatabaseClient(environment.DATABASE_URL);
+const clock = new SystemClock();
+const sessionEvents = new LocalSessionEventBus();
 const app = await buildApp({
   environment,
   logger: true,
   objectStore,
+  database,
+  clock,
+  sessionEvents,
   readinessCheck: () => checkInfrastructure(environment, objectStore)
+});
+const realtime = new RealtimeGateway(
+  app.server,
+  database,
+  clock,
+  environment,
+  app.log,
+  sessionEvents
+);
+app.addHook("onClose", async () => {
+  await realtime.close();
+  await database.$disconnect();
 });
 
 const shutdown = async (signal: string) => {

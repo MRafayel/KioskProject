@@ -33,6 +33,7 @@ model Kiosk {
   credentials         KioskCredential[]
   sessions            PrintSession[]
   auditEvents         AuditEvent[]
+  sessionEvents       SessionEvent[]
 
   @@index([status])
   @@index([lastSeenAt])
@@ -78,6 +79,7 @@ model PrintSession {
   uploadedFiles  UploadedFile[]
   auditEvents    AuditEvent[]
   outboxEvents   OutboxEvent[]
+  sessionEvents  SessionEvent[]
 
   @@index([kioskId, createdAt])
   @@index([state, idleExpiresAt])
@@ -189,13 +191,35 @@ model OutboxEvent {
   payload         Json
   status          String       @default("PENDING") @db.VarChar(24)
   publishAttempts Int          @default(0) @map("publish_attempts")
+  availableAt     DateTime     @default(now()) @map("available_at")
+  lockedAt        DateTime?    @map("locked_at")
+  claimToken      String?      @map("claim_token") @db.Uuid
+  lastErrorCode   String?      @map("last_error_code") @db.VarChar(80)
   createdAt       DateTime     @default(now()) @map("created_at")
   publishedAt     DateTime?    @map("published_at")
   session         PrintSession @relation(fields: [aggregateId], references: [id], onDelete: Cascade)
 
   @@unique([aggregateId, sequence])
-  @@index([status, createdAt])
+  @@index([status, availableAt, createdAt])
   @@map("outbox_events")
+}
+
+model SessionEvent {
+  id         String       @id @db.Uuid
+  sessionId  String       @map("session_id") @db.Uuid
+  kioskId    String       @map("kiosk_id") @db.VarChar(64)
+  sequence   Int
+  type       String       @db.VarChar(100)
+  payload    Json
+  occurredAt DateTime     @map("occurred_at")
+  createdAt  DateTime     @default(now()) @map("created_at")
+  session    PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kiosk      Kiosk        @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, sequence])
+  @@index([kioskId, occurredAt])
+  @@index([sessionId, sequence])
+  @@map("session_events")
 }
 
 model IdempotencyRecord {

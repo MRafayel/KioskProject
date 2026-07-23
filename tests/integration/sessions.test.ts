@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
 
+import { io, type Socket } from "socket.io-client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { loadEnvironment, loadWorkspaceEnvironmentFile } from "../../packages/config/src/index.js";
+import {
+  SESSION_EVENT_SOCKET_NAME,
+  sessionEventReplayResponseSchema,
+  sessionEventSchema
+} from "../../packages/contracts/src/events.js";
 import { createSessionResponseSchema } from "../../packages/contracts/src/sessions.js";
 import {
   listUploadedFilesResponseSchema,
@@ -11,11 +17,20 @@ import {
 } from "../../packages/contracts/src/uploads.js";
 import { createDatabaseClient } from "../../packages/database/src/index.js";
 import { buildApp } from "../../services/api/src/app.js";
-import { createS3ObjectStore } from "../../services/api/src/modules/files/object-store.js";
+import { FileJanitor } from "../../services/api/src/modules/files/janitor.js";
 import {
+  createS3ObjectStore,
+  type ObjectStore
+} from "../../services/api/src/modules/files/object-store.js";
+import { RealtimeGateway } from "../../services/api/src/modules/realtime/gateway.js";
+import { LocalSessionEventBus } from "../../services/api/src/modules/realtime/session-event-bus.js";
+import {
+  CryptoRandomSource,
+  SystemClock,
   digestIdempotencyKey,
   digestUploadValue
 } from "../../services/api/src/modules/sessions/crypto.js";
+import { OutboxPublisher } from "../../services/worker/src/jobs/publish-outbox.js";
 
 const integrationKioskId = "kiosk_integration_001";
 const integrationCredentialId = "integration-kiosk-credential";
@@ -641,7 +656,201 @@ describe.sequential("authoritative print sessions", () => {
         select: { sequence: true }
       })
     ).map((event) => event.sequence);
-    expect(eventSequences).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(eventSequences).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("records exactly one durable rejection event when janitors recover an interrupted upload", async () => {
+    const clock = new MutableClock(new Date("2030-01-01T00:00:00.000Z"));
+    const app = await createTestApp(clock);
+    const created = createSessionResponseSchema.parse(
+      (await createSession(app, "phase4-interrupted-upload")).json()
+    );
+    const exchange = await exchangeMobile(
+      app,
+      created.session.publicId,
+      requireUploadToken(created.upload.qrUrl),
+      "01900000-0000-7000-8000-000000000061"
+    );
+    expect(exchange.response.statusCode).toBe(200);
+    const client = await database.mobileClient.findFirstOrThrow({
+      where: { sessionId: created.session.id }
+    });
+    const fileId = "01900000-0000-7000-8000-000000000062";
+    const objectKey = `quarantine/v1/${created.session.id}/${fileId}/interrupted-recovery-token`;
+    await database.uploadedFile.create({
+      data: {
+        id: fileId,
+        sessionId: created.session.id,
+        uploadedByClientId: client.id,
+        clientFileId: "01900000-0000-7000-8000-000000000063",
+        ordinal: 0,
+        displayName: "Document 1",
+        status: "UPLOADING",
+        declaredMime: "application/pdf",
+        reservedBytes: 16,
+        quarantineObjectKey: objectKey,
+        createdAt: clock.current,
+        updatedAt: clock.current
+      }
+    });
+
+    clock.current = new Date(
+      clock.current.getTime() + (environment.UPLOAD_TIMEOUT_SECONDS + 31) * 1_000
+    );
+    const cleanupStore = new ControlledObjectStore();
+    const errors: Array<{ error: unknown; operation: string }> = [];
+    const janitors = [
+      createFileJanitor(clock, cleanupStore, errors),
+      createFileJanitor(clock, cleanupStore, errors)
+    ];
+    await Promise.all(janitors.map(async (janitor) => janitor.runOnce()));
+    await Promise.all(janitors.map(async (janitor) => janitor.runOnce()));
+
+    const rejected = await database.uploadedFile.findUniqueOrThrow({ where: { id: fileId } });
+    expect(rejected).toMatchObject({
+      status: "REJECTED",
+      rejectionCode: "UPLOAD_INTERRUPTED",
+      quarantineObjectKey: null,
+      contentSha256: null
+    });
+    const events = await database.outboxEvent.findMany({
+      where: { aggregateId: created.session.id, type: "file.rejected" }
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sequence: 3,
+      payload: {
+        sessionId: created.session.id,
+        file: {
+          id: fileId,
+          ordinal: 0,
+          status: "REJECTED",
+          kind: null,
+          sizeBytes: null,
+          createdAt: "2030-01-01T00:00:00.000Z"
+        }
+      }
+    });
+    expect(JSON.stringify(events[0]?.payload)).not.toContain(objectKey);
+    await expect(
+      database.printSession.findUniqueOrThrow({ where: { id: created.session.id } })
+    ).resolves.toMatchObject({ eventSequence: 3 });
+    expect(errors).toEqual([]);
+  });
+
+  it("records one durable deletion event after deferred object cleanup and preserves delete replay", async () => {
+    const clock = new MutableClock(new Date("2030-01-01T00:00:00.000Z"));
+    const cleanupStore = new ControlledObjectStore();
+    const app = await buildApp({ environment, database, objectStore: cleanupStore, clock });
+    openApps.push(app);
+    const created = createSessionResponseSchema.parse(
+      (await createSession(app, "phase4-deferred-deletion")).json()
+    );
+    const exchange = await exchangeMobile(
+      app,
+      created.session.publicId,
+      requireUploadToken(created.upload.qrUrl),
+      "01900000-0000-7000-8000-000000000071"
+    );
+    expect(exchange.response.statusCode).toBe(200);
+    const pdf = Buffer.from("%PDF-1.4\n%%EOF\n", "utf8");
+    const uploaded = uploadFileResponseSchema.parse(
+      (
+        await uploadMultipart(app, {
+          sessionId: created.session.id,
+          cookieHeader: exchange.cookieHeader,
+          csrfToken: exchange.context.csrfToken,
+          clientFileId: "01900000-0000-7000-8000-000000000072",
+          idempotencyKey: "phase4-deferred-upload",
+          filename: "private-customer-name.pdf",
+          mime: "application/pdf",
+          contents: pdf
+        })
+      ).json()
+    );
+    const stored = await database.uploadedFile.findUniqueOrThrow({
+      where: { id: uploaded.file.id }
+    });
+    if (!stored.quarantineObjectKey) throw new Error("EXPECTED_PRIVATE_OBJECT_KEY");
+    cleanupStore.failNextDeletes(1);
+
+    const idempotencyKey = "phase4-deferred-delete";
+    const deferred = await deleteMobileFile(
+      app,
+      created.session.id,
+      stored.id,
+      exchange.cookieHeader,
+      exchange.context.csrfToken,
+      idempotencyKey
+    );
+    expect(deferred.statusCode).toBe(503);
+    expect(deferred.json()).toMatchObject({ error: { code: "FILE_DELETE_DEFERRED" } });
+    await expect(
+      database.uploadedFile.findUniqueOrThrow({ where: { id: stored.id } })
+    ).resolves.toMatchObject({
+      status: "DELETE_PENDING",
+      quarantineObjectKey: stored.quarantineObjectKey
+    });
+
+    clock.current = new Date(clock.current.getTime() + 16_000);
+    const errors: Array<{ error: unknown; operation: string }> = [];
+    const janitors = [
+      createFileJanitor(clock, cleanupStore, errors),
+      createFileJanitor(clock, cleanupStore, errors)
+    ];
+    await Promise.all(janitors.map(async (janitor) => janitor.runOnce()));
+    await Promise.all(janitors.map(async (janitor) => janitor.runOnce()));
+
+    await expect(
+      database.uploadedFile.findUniqueOrThrow({ where: { id: stored.id } })
+    ).resolves.toMatchObject({
+      status: "DELETED",
+      quarantineObjectKey: null,
+      contentSha256: null
+    });
+    const events = await database.outboxEvent.findMany({
+      where: { aggregateId: created.session.id, type: "file.deleted" }
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sequence: 5,
+      payload: { sessionId: created.session.id, fileId: stored.id }
+    });
+    expect(JSON.stringify(events[0]?.payload)).not.toContain(stored.quarantineObjectKey);
+    expect(cleanupStore.hasObject(stored.quarantineObjectKey)).toBe(false);
+    expect(
+      (
+        await deleteMobileFile(
+          app,
+          created.session.id,
+          stored.id,
+          exchange.cookieHeader,
+          exchange.context.csrfToken,
+          idempotencyKey
+        )
+      ).statusCode
+    ).toBe(204);
+    expect(
+      (
+        await deleteMobileFile(
+          app,
+          created.session.id,
+          stored.id,
+          exchange.cookieHeader,
+          exchange.context.csrfToken,
+          idempotencyKey
+        )
+      ).statusCode
+    ).toBe(204);
+    await expect(
+      database.outboxEvent.count({
+        where: { aggregateId: created.session.id, type: "file.deleted" }
+      })
+    ).resolves.toBe(1);
+    await expect(
+      database.printSession.findUniqueOrThrow({ where: { id: created.session.id } })
+    ).resolves.toMatchObject({ eventSequence: 5 });
+    expect(errors).toEqual([]);
   });
 
   it("rejects a spoofed file, removes its bytes, and revokes mobile access on cancel", async () => {
@@ -741,6 +950,54 @@ describe.sequential("authoritative print sessions", () => {
     );
     expect(canceled.statusCode).toBe(200);
 
+    const filesAtCancellation = await database.uploadedFile.findMany({
+      where: { sessionId: created.session.id },
+      orderBy: { id: "asc" },
+      select: {
+        id: true,
+        clientFileId: true,
+        status: true,
+        quarantineObjectKey: true
+      }
+    });
+    const canceledUploadClientFileId = "01900000-0000-7000-8000-000000000055";
+    const uploadAfterCancel = await uploadMultipart(app, {
+      sessionId: created.session.id,
+      cookieHeader: exchange.cookieHeader,
+      csrfToken: exchange.context.csrfToken,
+      clientFileId: canceledUploadClientFileId,
+      idempotencyKey: "phase3-upload-after-cancel",
+      filename: "must-not-be-accepted.pdf",
+      mime: "application/pdf",
+      contents: Buffer.from("%PDF-1.4\n%%EOF\n", "utf8")
+    });
+    expect(uploadAfterCancel.statusCode).toBe(401);
+    expect(uploadAfterCancel.json()).toMatchObject({
+      error: { code: "INVALID_MOBILE_SESSION" }
+    });
+    await expect(
+      database.uploadedFile.findUnique({
+        where: {
+          sessionId_clientFileId: {
+            sessionId: created.session.id,
+            clientFileId: canceledUploadClientFileId
+          }
+        }
+      })
+    ).resolves.toBeNull();
+    await expect(
+      database.uploadedFile.findMany({
+        where: { sessionId: created.session.id },
+        orderBy: { id: "asc" },
+        select: {
+          id: true,
+          clientFileId: true,
+          status: true,
+          quarantineObjectKey: true
+        }
+      })
+    ).resolves.toEqual(filesAtCancellation);
+
     const revokedContext = await app.inject({
       method: "GET",
       url: `/v1/mobile-auth/${created.session.publicId}/context`,
@@ -804,6 +1061,97 @@ describe.sequential("authoritative print sessions", () => {
         }
       })
     ).rejects.toThrow();
+  });
+
+  it("delivers a committed event and replays the same event after reconnect", async () => {
+    const sessionEvents = new LocalSessionEventBus();
+    const app = await buildApp({ environment, database, objectStore, sessionEvents });
+    const gateway = new RealtimeGateway(
+      app.server,
+      database,
+      new SystemClock(),
+      environment,
+      silentRealtimeLogger,
+      sessionEvents
+    );
+    const publisher = new OutboxPublisher(database, environment, silentRealtimeLogger, 10);
+    let socket: Socket | undefined;
+    let unauthorizedSocket: Socket | undefined;
+
+    try {
+      const address = await app.listen({ host: "127.0.0.1", port: 0 });
+      socket = io(address, {
+        path: "/socket.io",
+        transports: ["websocket"],
+        auth: {
+          kioskId: environment.DEV_KIOSK_ID,
+          credential: environment.DEV_KIOSK_API_KEY
+        }
+      });
+      await waitForSocketConnect(socket);
+
+      unauthorizedSocket = io(address, {
+        path: "/socket.io",
+        transports: ["websocket"],
+        reconnection: false,
+        auth: {
+          kioskId: environment.DEV_KIOSK_ID,
+          credential: "invalid-kiosk-credential-000000"
+        }
+      });
+      await expect(waitForConnectError(unauthorizedSocket)).resolves.toBe("AUTHENTICATION_FAILED");
+
+      const created = createSessionResponseSchema.parse(
+        (await createSession(app, "phase4-realtime-delivery")).json()
+      );
+      const delivery = waitForSessionEvent(socket, created.session.id);
+      const mobileDelivery = waitForLocalSessionEvent(sessionEvents, created.session.id);
+
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const target = await database.outboxEvent.findUnique({
+          where: {
+            aggregateId_sequence: {
+              aggregateId: created.session.id,
+              sequence: 1
+            }
+          },
+          select: { status: true }
+        });
+        if (target?.status === "PUBLISHED") break;
+        if (!(await publisher.publishNext()))
+          await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      const received = await delivery;
+      await expect(mobileDelivery.promise).resolves.toEqual(received);
+      mobileDelivery.unsubscribe();
+      expect(received).toMatchObject({
+        sessionId: created.session.id,
+        sequence: 1,
+        type: "session.created"
+      });
+
+      socket.close();
+      socket = undefined;
+      const replayResponse = await app.inject({
+        method: "GET",
+        url: `/v1/sessions/${created.session.id}/events?after=0`,
+        headers: { authorization }
+      });
+      expect(replayResponse.statusCode).toBe(200);
+      const replay = sessionEventReplayResponseSchema.parse(replayResponse.json());
+      expect(replay.events).toEqual([received]);
+      expect(replay.latestSequence).toBe(1);
+      expect(replay.hasMore).toBe(false);
+      expect(replayResponse.body).not.toContain(environment.DEV_KIOSK_API_KEY);
+      expect(replayResponse.body).not.toContain(created.upload.qrUrl);
+    } finally {
+      socket?.close();
+      unauthorizedSocket?.close();
+      await publisher.close();
+      await gateway.close();
+      await app.close();
+    }
   });
 });
 
@@ -990,4 +1338,122 @@ class CollisionThenUniqueRandom {
     this.integerCounter += 1;
     return this.integerCounter === 1 ? 11_111_111 : 22_222_222;
   }
+}
+
+function createFileJanitor(
+  clock: MutableClock,
+  controlledObjectStore: ObjectStore,
+  errors: Array<{ error: unknown; operation: string }>
+): FileJanitor {
+  return new FileJanitor({
+    database,
+    objectStore: controlledObjectStore,
+    clock,
+    random: new CryptoRandomSource(),
+    uploadTimeoutSeconds: environment.UPLOAD_TIMEOUT_SECONDS,
+    onError: (error, operation) => errors.push({ error, operation })
+  });
+}
+
+class ControlledObjectStore implements ObjectStore {
+  private readonly objects = new Set<string>();
+  private remainingDeleteFailures = 0;
+
+  public async putObject(
+    input: Parameters<ObjectStore["putObject"]>[0]
+  ): Promise<Awaited<ReturnType<ObjectStore["putObject"]>>> {
+    for await (const _chunk of input.body) {
+      input.signal?.throwIfAborted();
+    }
+    this.objects.add(input.key);
+    return {};
+  }
+
+  public async deleteObject(input: Parameters<ObjectStore["deleteObject"]>[0]): Promise<void> {
+    input.signal?.throwIfAborted();
+    if (this.remainingDeleteFailures > 0) {
+      this.remainingDeleteFailures -= 1;
+      throw new Error("SIMULATED_OBJECT_DELETE_FAILURE");
+    }
+    this.objects.delete(input.key);
+  }
+
+  public checkReady(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    return Promise.resolve();
+  }
+
+  public failNextDeletes(count: number): void {
+    this.remainingDeleteFailures = count;
+  }
+
+  public hasObject(key: string): boolean {
+    return this.objects.has(key);
+  }
+}
+
+const silentRealtimeLogger = {
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined
+};
+
+function waitForSocketConnect(socket: Socket): Promise<void> {
+  return withTimeout(
+    new Promise((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("connect_error", reject);
+    })
+  );
+}
+
+function waitForConnectError(socket: Socket): Promise<string> {
+  return withTimeout(
+    new Promise((resolve) => {
+      socket.once("connect_error", (error) => resolve(error.message));
+    })
+  );
+}
+
+function waitForSessionEvent(socket: Socket, expectedSessionId: string) {
+  return withTimeout(
+    new Promise<ReturnType<typeof sessionEventSchema.parse>>((resolve) => {
+      socket.on(SESSION_EVENT_SOCKET_NAME, (input: unknown) => {
+        const event = sessionEventSchema.safeParse(input);
+        if (event.success && event.data.sessionId === expectedSessionId) resolve(event.data);
+      });
+    })
+  );
+}
+
+function waitForLocalSessionEvent(
+  events: LocalSessionEventBus,
+  expectedSessionId: string
+): {
+  promise: Promise<ReturnType<typeof sessionEventSchema.parse>>;
+  unsubscribe: () => void;
+} {
+  let unsubscribe = () => undefined;
+  const promise = withTimeout(
+    new Promise<ReturnType<typeof sessionEventSchema.parse>>((resolve) => {
+      unsubscribe = events.subscribe(expectedSessionId, (event) => resolve(event));
+    })
+  );
+  return { promise, unsubscribe: () => unsubscribe() };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs = 5_000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("SOCKET_TEST_TIMEOUT")), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
 }

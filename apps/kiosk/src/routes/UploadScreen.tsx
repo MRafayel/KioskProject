@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useOutletContext } from "react-router-dom";
 
+import type { KioskOutletContext } from "../components/KioskLayout.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { useSessionTimer } from "../features/session/SessionTimerProvider.js";
@@ -19,6 +20,7 @@ export function UploadScreen() {
   const { state, dispatch } = usePrototypeSession();
   const { recordActivity } = useSessionTimer();
   const navigate = useNavigate();
+  const { realtimeConnected } = useOutletContext<KioskOutletContext>();
   const sessionId = state.session?.id;
   const filesQuery = useQuery({
     queryKey: ["kiosk-session-files", sessionId],
@@ -27,7 +29,9 @@ export function UploadScreen() {
       return listKioskSessionFiles(sessionId);
     },
     enabled: Boolean(sessionId),
-    refetchInterval: 1_000,
+    // The event stream is the fast path. A slow snapshot reconciliation keeps
+    // the screen correct if a browser, agent, or network event is interrupted.
+    refetchInterval: realtimeConnected ? 15_000 : 2_000,
     refetchIntervalInBackground: false,
     gcTime: 0,
     retry: false

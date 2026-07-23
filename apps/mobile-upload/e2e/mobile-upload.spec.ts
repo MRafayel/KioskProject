@@ -39,6 +39,11 @@ test("keeps the QR bearer private through a responsive upload, delete, and refre
       return;
     }
 
+    if (path.endsWith("/events/stream")) {
+      await fulfillIdleEventStream(route);
+      return;
+    }
+
     if (path.includes("/mobile-auth/") && path.endsWith("/context")) {
       contextRequests += 1;
       expect(request.headers().cookie).toContain(`${mobileCookieName}=${mobileCookie}`);
@@ -120,7 +125,7 @@ test("keeps the QR bearer private through a responsive upload, delete, and refre
   await expect(page.locator("html")).toHaveAttribute("lang", "ru");
   await expect(page.getByRole("heading", { name: "Загрузите файл для печати" })).toBeVisible();
   expect(exchangeRequests).toBe(1);
-  expect(contextRequests).toBe(1);
+  expect(contextRequests).toBeGreaterThanOrEqual(2);
   expect(await page.evaluate(() => document.cookie)).not.toContain("pk_upload");
   expect(await browserStorageText(page)).not.toContain(uploadToken);
   expect(observedRequests.every((request) => !request.url.includes(uploadToken))).toBe(true);
@@ -130,6 +135,174 @@ test("keeps the QR bearer private through a responsive upload, delete, and refre
       .map((request) => request.url)
   ).toEqual([expect.stringContaining("/v1/mobile-auth/exchange")]);
   expect(browserErrors).toEqual([]);
+});
+
+test("stops before uploading when the kiosk has canceled the session", async ({ page }) => {
+  let canceled = false;
+  let uploadRequests = 0;
+
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (path === "/v1/mobile-auth/exchange") {
+      await fulfillJson(route, mobileContext(), {
+        "set-cookie": `${mobileCookieName}=${mobileCookie}; Path=/v1; HttpOnly; SameSite=Strict`
+      });
+      return;
+    }
+    if (path.endsWith("/events/stream")) {
+      await fulfillIdleEventStream(route);
+      return;
+    }
+    if (path.includes("/mobile-auth/") && path.endsWith("/context")) {
+      if (canceled) {
+        await fulfillJson(
+          route,
+          {
+            error: {
+              code: "INVALID_MOBILE_SESSION",
+              message: "Mobile authentication failed.",
+              requestId: "test"
+            }
+          },
+          {},
+          401
+        );
+      } else {
+        await fulfillJson(route, mobileContext());
+      }
+      return;
+    }
+    if (path === `/v1/sessions/${sessionId}/files` && request.method() === "GET") {
+      await fulfillJson(route, { items: [] });
+      return;
+    }
+    if (path === `/v1/sessions/${sessionId}/files` && request.method() === "POST") {
+      uploadRequests += 1;
+      await fulfillJson(route, { error: { code: "TEST_UPLOAD_MUST_NOT_START" } }, {}, 500);
+      return;
+    }
+    await route.fulfill({ status: 404 });
+  });
+
+  await page.goto(`/s/${publicSessionId}#t=${uploadToken}`);
+  await expect(page.getByRole("heading", { name: "Загрузите файл для печати" })).toBeVisible();
+  canceled = true;
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "synthetic.pdf",
+    mimeType: "application/pdf",
+    buffer: syntheticPdf
+  });
+
+  await expect(page.getByText("Сеанс печати завершён")).toBeVisible();
+  await expect(page.getByText(/больше не принимает файлы/)).toBeVisible();
+  await expect(page.getByText(/Сеанс доступен до/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Выбрать файл" })).toBeDisabled();
+  await expect(page.getByRole("progressbar")).toBeHidden();
+  expect(uploadRequests).toBe(0);
+});
+
+test("pushes kiosk cancellation to the phone and aborts an active upload", async ({ page }) => {
+  let releaseCancellation: () => void = () => undefined;
+  const cancellation = new Promise<void>((resolve) => {
+    releaseCancellation = resolve;
+  });
+  let markUploadStarted: () => void = () => undefined;
+  const uploadStarted = new Promise<void>((resolve) => {
+    markUploadStarted = resolve;
+  });
+  let uploadRequests = 0;
+  let failedUploadRequest = false;
+
+  page.on("requestfailed", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === `/v1/sessions/${sessionId}/files`
+    ) {
+      failedUploadRequest = true;
+    }
+  });
+
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (path === "/v1/mobile-auth/exchange") {
+      await fulfillJson(route, mobileContext(), {
+        "set-cookie": `${mobileCookieName}=${mobileCookie}; Path=/v1; HttpOnly; SameSite=Strict`
+      });
+      return;
+    }
+    if (path.endsWith("/events/stream")) {
+      await cancellation;
+      const event = {
+        id: "01900000-0000-7000-8000-000000000079",
+        sessionId,
+        sequence: 3,
+        type: "session.canceled",
+        payload: { sessionId, state: "CANCELED", version: 2 },
+        occurredAt: "2030-01-01T00:00:03.000Z"
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        headers: { "cache-control": "no-store" },
+        body: `id: 3\ndata: ${JSON.stringify(event)}\n\n`
+      });
+      return;
+    }
+    if (path.includes("/mobile-auth/") && path.endsWith("/context")) {
+      await fulfillJson(route, mobileContext());
+      return;
+    }
+    if (path === `/v1/sessions/${sessionId}/files` && request.method() === "GET") {
+      await fulfillJson(route, { items: [] });
+      return;
+    }
+    if (path === `/v1/sessions/${sessionId}/files` && request.method() === "POST") {
+      uploadRequests += 1;
+      markUploadStarted();
+      await cancellation;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      try {
+        await fulfillJson(
+          route,
+          {
+            error: {
+              code: "UPLOAD_SESSION_NOT_EDITABLE",
+              message: "This session no longer accepts files."
+            }
+          },
+          {},
+          409
+        );
+      } catch {
+        // The expected XMLHttpRequest abort can close the intercepted request first.
+      }
+      return;
+    }
+    await route.fulfill({ status: 404 });
+  });
+
+  await page.goto(`/s/${publicSessionId}#t=${uploadToken}`);
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "synthetic.pdf",
+    mimeType: "application/pdf",
+    buffer: syntheticPdf
+  });
+  await uploadStarted;
+  await expect(page.getByRole("progressbar", { name: "Передаём файл" })).toBeVisible();
+
+  releaseCancellation();
+
+  await expect(page.getByText("Сеанс печати завершён")).toBeVisible();
+  await expect(page.getByText(/больше не принимает файлы/)).toBeVisible();
+  await expect(page.getByRole("progressbar")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Выбрать файл" })).toBeDisabled();
+  await expect.poll(() => failedUploadRequest).toBe(true);
+  expect(uploadRequests).toBe(1);
 });
 
 function mobileContext() {
@@ -175,6 +348,15 @@ async function fulfillJson(
     contentType: "application/json",
     headers,
     body: JSON.stringify(body)
+  });
+}
+
+async function fulfillIdleEventStream(route: Route): Promise<void> {
+  await route.fulfill({
+    status: 200,
+    contentType: "text/event-stream",
+    headers: { "cache-control": "no-store" },
+    body: "retry: 60000\n: connected\n\n"
   });
 }
 

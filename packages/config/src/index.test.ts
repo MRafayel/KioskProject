@@ -4,9 +4,26 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { loadEnvironment, loadWorkspaceEnvironmentFile } from "./index.js";
+import { loadEnvironment, loadWorkspaceEnvironmentFile, redisConnectionOptions } from "./index.js";
 
 describe("loadEnvironment", () => {
+  it("converts Redis URLs into BullMQ-safe connection settings", () => {
+    expect(redisConnectionOptions("redis://worker:secret@localhost:6381/2")).toEqual({
+      host: "localhost",
+      port: 6381,
+      db: 2,
+      username: "worker",
+      password: "secret",
+      maxRetriesPerRequest: null
+    });
+    expect(redisConnectionOptions("rediss://cache.example.test")).toMatchObject({
+      host: "cache.example.test",
+      port: 6380,
+      db: 0,
+      tls: {}
+    });
+  });
+
   it("loads safe development defaults", () => {
     const environment = loadEnvironment({});
 
@@ -91,6 +108,29 @@ describe("loadEnvironment", () => {
       S3_SERVER_SIDE_ENCRYPTION: undefined
     };
     expect(() => loadEnvironment(withoutEncryption)).toThrow();
+  });
+
+  it("requires TLS for remote Redis while allowing a loopback production sidecar", () => {
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        REDIS_URL: "redis://cache.example.test:6379"
+      })
+    ).toThrow();
+
+    expect(
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        REDIS_URL: "redis://127.0.0.1:6379"
+      }).REDIS_URL
+    ).toBe("redis://127.0.0.1:6379");
+
+    expect(
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        REDIS_URL: "rediss://cache.example.test:6380"
+      }).REDIS_URL
+    ).toBe("rediss://cache.example.test:6380");
   });
 
   it("loads the documented root environment file from a package working directory", () => {

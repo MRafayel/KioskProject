@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: active implementation plan; Phases 0–2 complete
+Status: active implementation plan; Phases 0–4 complete
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
@@ -450,13 +450,17 @@ memory buffering, path use of filenames, and marking partial data READY.
 
 ### Phase 4 — durable real-time updates
 
+**Implementation status:** complete. See `docs/PHASE_4_STATUS.md`.
+
 **Objective:** update the kiosk quickly without making the socket authoritative.
 
 **Build:** agent-authenticated cloud Socket.IO connection; per-kiosk/session
 room; ephemeral loopback UI connection that exposes no device credential;
 transactional outbox publisher; monotonically increasing session event
-sequence; deduplication; replay endpoint; snapshot resync after gaps; throttled
-progress.
+sequence; deduplication; replay endpoint; snapshot resync after gaps;
+credential-scoped mobile SSE for terminal events; low-frequency authoritative
+phone reconciliation. Exact byte progress remains phone-local; the kiosk
+receives durable, low-frequency upload lifecycle events.
 
 **Tools:** Socket.IO client/server, PostgreSQL outbox, BullMQ publisher; Redis
 adapter only when multiple gateway instances exist.
@@ -464,20 +468,27 @@ adapter only when multiple gateway instances exist.
 **Modules:** services/api/src/modules/realtime and events;
 services/worker/src/jobs/publish-outbox; packages/contracts/src/events.
 
-**Endpoints/events:** GET /v1/sessions/:id/events?after=sequence and Socket.IO;
-mobile.connected, upload.started/progress, file.ready/rejected/deleted,
-session.expired.
+**Endpoints/events:** GET /v1/sessions/:id/events?after=sequence, authenticated
+Socket.IO for the kiosk agent, and GET
+/v1/mobile-auth/:publicSessionId/events/stream for the claimed phone;
+session.created, mobile.connected, upload.started,
+file.uploaded/rejected/deleted, session.canceled, and session.expired. Phase 5
+adds file.ready after deep validation.
 
 **Entities:** session_events and outbox_events.
 
 **Tests:** emit after commit, disconnect/reconnect/replay, duplicate/out-of-order
-event, unauthorized room, session isolation.
+event, unauthorized room, session isolation, pushed phone cancellation,
+credential expiry, bounded stream concurrency, and missed-event
+reconciliation.
 
 **Done:** an uploaded file appears promptly and the same correct state returns
 after a forced disconnect and process restart.
 
 **Avoid:** Redis Pub/Sub as durable truth, emission before commit, global
-guessable rooms, missing sequence numbers, and secrets in event payloads.
+guessable rooms, missing sequence numbers, secrets in event payloads,
+unbounded/immortal SSE connections, and using a process-local fanout bus after
+scaling beyond one API replica.
 
 ### Phase 5 — validation, normalization, and preview
 

@@ -1,4 +1,12 @@
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState
+} from "react";
 
 import { messages, numberLocales, type Locale, type MessageCatalog } from "./messages.js";
 
@@ -15,6 +23,7 @@ const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
   const [locale, setLocale] = useState<Locale>(DEFAULT_LOCALE);
+  const resetLocale = useCallback(() => setLocale(DEFAULT_LOCALE), []);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -26,9 +35,9 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       numberLocale: numberLocales[locale],
       messages: messages[locale],
       setLocale,
-      resetLocale: () => setLocale(DEFAULT_LOCALE)
+      resetLocale
     }),
-    [locale]
+    [locale, resetLocale]
   );
 
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;

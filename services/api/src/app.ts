@@ -14,8 +14,13 @@ import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
 import { registerFileRoutes } from "./modules/files/routes.js";
 import { FileService } from "./modules/files/service.js";
+import { registerEventRoutes } from "./modules/events/routes.js";
 import { registerMobileAccessRoutes } from "./modules/mobile-access/routes.js";
 import { MobileAccessService } from "./modules/mobile-access/service.js";
+import {
+  LocalSessionEventBus,
+  type SessionEventSource
+} from "./modules/realtime/session-event-bus.js";
 import {
   CryptoRandomSource,
   SystemClock,
@@ -36,6 +41,7 @@ export interface BuildAppOptions {
   clock?: Clock;
   random?: RandomSource;
   objectStore?: ObjectStore;
+  sessionEvents?: SessionEventSource;
   startBackgroundJobs?: boolean;
 }
 
@@ -90,6 +96,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const clock = options.clock ?? new SystemClock();
   const random = options.random ?? new CryptoRandomSource();
   const objectStore = options.objectStore ?? createS3ObjectStore(options.environment);
+  const sessionEvents = options.sessionEvents ?? new LocalSessionEventBus();
   const sessions = new SessionService({
     database,
     clock,
@@ -303,8 +310,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   });
 
   registerSessionRoutes(app, { database, clock, sessions });
+  registerEventRoutes(app, { database, clock });
   registerMobileAccessRoutes(app, {
     mobileAccess,
+    sessionEvents,
     uploadOrigin: options.environment.UPLOAD_ORIGIN,
     secureCookie: new URL(options.environment.UPLOAD_ORIGIN).protocol === "https:"
   });

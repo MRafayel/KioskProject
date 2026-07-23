@@ -10,7 +10,7 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "pnpm build:packages && turbo run dev",
-    "dev:kiosk": "pnpm build:packages && turbo run dev --filter=@printing-kiosk/api --filter=@printing-kiosk/kiosk-agent --filter=@printing-kiosk/kiosk --filter=@printing-kiosk/mobile-upload",
+    "dev:kiosk": "pnpm build:packages && turbo run dev --filter=@printing-kiosk/api --filter=@printing-kiosk/kiosk-agent --filter=@printing-kiosk/kiosk --filter=@printing-kiosk/mobile-upload --filter=@printing-kiosk/worker",
     "build:packages": "turbo run build --filter='./packages/*'",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -33,6 +33,7 @@
     "@types/node": "24.13.3",
     "eslint": "10.7.0",
     "prettier": "3.9.5",
+    "socket.io-client": "4.8.3",
     "turbo": "2.10.4",
     "typescript": "6.0.3",
     "typescript-eslint": "8.63.0",

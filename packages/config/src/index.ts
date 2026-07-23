@@ -175,6 +175,18 @@ const environmentSchema = z
         message: "S3_ENDPOINT must use HTTPS in production unless it is loopback-only"
       });
     }
+
+    const redisUrl = new URL(environment.REDIS_URL);
+    if (
+      redisUrl.protocol !== "rediss:" &&
+      !(redisUrl.protocol === "redis:" && isLoopbackHostname(redisUrl.hostname))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["REDIS_URL"],
+        message: "REDIS_URL must use TLS in production unless it is loopback-only"
+      });
+    }
   });
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -182,6 +194,38 @@ function isLoopbackHostname(hostname: string): boolean {
 }
 
 export type Environment = z.infer<typeof environmentSchema>;
+
+export interface RedisConnectionOptions {
+  host: string;
+  port: number;
+  db: number;
+  username?: string;
+  password?: string;
+  tls?: Record<string, never>;
+  maxRetriesPerRequest: null;
+}
+
+export function redisConnectionOptions(redisUrl: string): RedisConnectionOptions {
+  const url = new URL(redisUrl);
+  if (url.protocol !== "redis:" && url.protocol !== "rediss:") {
+    throw new Error("REDIS_URL_PROTOCOL_UNSUPPORTED");
+  }
+  const databasePath = url.pathname.replace(/^\//, "");
+  const database = databasePath ? Number(databasePath) : 0;
+  if (!Number.isInteger(database) || database < 0) {
+    throw new Error("REDIS_URL_DATABASE_INVALID");
+  }
+
+  return {
+    host: url.hostname,
+    port: url.port ? Number(url.port) : url.protocol === "rediss:" ? 6380 : 6379,
+    db: database,
+    ...(url.username ? { username: decodeURIComponent(url.username) } : {}),
+    ...(url.password ? { password: decodeURIComponent(url.password) } : {}),
+    ...(url.protocol === "rediss:" ? { tls: {} } : {}),
+    maxRetriesPerRequest: null
+  };
+}
 
 export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Environment {
   return environmentSchema.parse(source);

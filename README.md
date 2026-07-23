@@ -4,11 +4,15 @@ Privacy-first, self-service monochrome printing kiosk platform.
 
 ## Current status
 
-Phases 0–3 are complete. The repository now contains the first secure vertical
+Phases 0–4 are complete. The repository now contains the first secure vertical
 slice: the kiosk creates an authoritative session and QR link, one phone claims
 that link, PDF/JPEG/PNG bytes stream into a private quarantine bucket, and the
-kiosk observes upload status through its loopback agent. The phone can list and
-delete its file without exposing the kiosk credential or storing a raw QR token.
+kiosk receives authenticated, sequenced updates through its loopback agent.
+PostgreSQL replay and snapshot recovery restore the correct screen after a
+disconnect. The phone can list and delete its file without exposing the kiosk
+credential or storing a raw QR token. Kiosk cancellation is pushed to the
+claimed phone through an authenticated SSE stream, while the API remains the
+authority for every upload transition.
 
 Phase 3 intentionally stops at `QUARANTINED`. Deep document inspection, page
 counting, previews, and the transition to printable `READY` belong to Phase 5,
@@ -30,6 +34,8 @@ Read these documents before implementation:
   concurrency-test evidence.
 - docs/PHASE_3_STATUS.md — QR exchange, private upload, cleanup, mobile testing,
   and the exact real-phone HTTPS setup.
+- docs/PHASE_4_STATUS.md — transactional outbox, authenticated realtime relay,
+  replay recovery, migration, and verification evidence.
 - SECURITY.md — handling rules for secrets and private customer documents.
 
 ## Development commands
@@ -65,11 +71,11 @@ pnpm db:seed
 pnpm dev
 ```
 
-## Start the Phase 3 browser journey
+## Start the Phase 4 browser journey
 
-Phase 3 uses PostgreSQL, Redis, private MinIO, the API on port `3000`, the local
+Phase 4 uses PostgreSQL, Redis, private MinIO, the API on port `3000`, the local
 kiosk agent on port `3100`, the kiosk on port `5173`, and the mobile upload page
-on port `5174`.
+on port `5174`. The worker is included in `pnpm dev:kiosk`.
 
 From the repository root, run:
 

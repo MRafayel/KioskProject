@@ -22,6 +22,15 @@ export async function authenticateKiosk(
     ? authorization.slice("Bearer ".length)
     : "";
 
+  return authenticateKioskCredential(rawCredential, database, clock, requiredScope);
+}
+
+export async function authenticateKioskCredential(
+  rawCredential: string,
+  database: PrismaClient,
+  clock: Clock,
+  requiredScope: string
+): Promise<KioskIdentity> {
   if (rawCredential.length < 24 || rawCredential.length > 512) throw unauthorized();
 
   const credential = await database.kioskCredential.findUnique({

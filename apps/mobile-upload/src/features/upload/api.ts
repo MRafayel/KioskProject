@@ -1,7 +1,10 @@
 import {
   listUploadedFilesResponseSchema,
+  mobileContextResponseSchema,
+  publicSessionIdSchema,
   uploadFileResponseSchema,
   type ListUploadedFilesResponse,
+  type MobileContextResponse,
   type UploadFileResponse
 } from "@printing-kiosk/contracts";
 
@@ -14,6 +17,42 @@ export interface UploadDependencies {
   createRequest: () => XMLHttpRequest;
   randomUUID: () => string;
   timeoutMs?: number;
+}
+
+export interface UploadFileOptions {
+  dependencies?: UploadDependencies;
+  signal?: AbortSignal;
+}
+
+export async function checkMobileSession(publicSessionId: string): Promise<MobileContextResponse> {
+  const parsedPublicId = publicSessionIdSchema.safeParse(publicSessionId);
+  if (!parsedPublicId.success) throw new MobileRequestError("INVALID_UPLOAD_LINK");
+
+  let response: Response;
+  try {
+    response = await safeMobileFetch(
+      fetch,
+      `/v1/mobile-auth/${encodeURIComponent(parsedPublicId.data)}/context`,
+      {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: { accept: "application/json" }
+      }
+    );
+  } catch (error) {
+    if (error instanceof MobileRequestError) throw error;
+    throw new MobileRequestError("NETWORK_UNAVAILABLE");
+  }
+
+  if (!response.ok) throw await toMobileRequestError(response);
+
+  try {
+    return mobileContextResponseSchema.parse(await response.json());
+  } catch (error) {
+    if (error instanceof MobileRequestError) throw error;
+    throw new MobileRequestError("INVALID_SERVER_RESPONSE", response.status);
+  }
 }
 
 export async function listUploadedFiles(sessionId: string): Promise<ListUploadedFilesResponse> {
@@ -45,8 +84,9 @@ export function uploadFile(
   file: File,
   csrfToken: string,
   onProgress: (ratio: number) => void,
-  dependencies: UploadDependencies = browserUploadDependencies()
+  options: UploadFileOptions = {}
 ): Promise<UploadFileResponse> {
+  const dependencies = options.dependencies ?? browserUploadDependencies();
   const clientFileId = dependencies.randomUUID();
   const idempotencyKey = dependencies.randomUUID();
   const body = new FormData();
@@ -54,6 +94,29 @@ export function uploadFile(
 
   return new Promise((resolve, reject) => {
     const request = dependencies.createRequest();
+    let settled = false;
+    const cleanup = () => options.signal?.removeEventListener("abort", abortUpload);
+    const fail = (error: MobileRequestError) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const succeed = (result: UploadFileResponse) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const signalError = () =>
+      options.signal?.reason instanceof MobileRequestError
+        ? options.signal.reason
+        : new MobileRequestError("UPLOAD_CANCELED");
+    const abortUpload = () => {
+      request.abort();
+      fail(signalError());
+    };
+
     request.open("POST", filesPath(sessionId));
     request.withCredentials = true;
     request.timeout = dependencies.timeoutMs ?? MOBILE_UPLOAD_TIMEOUT_MS;
@@ -71,21 +134,26 @@ export function uploadFile(
 
     request.onload = () => {
       if (request.status < 200 || request.status >= 300) {
-        reject(xhrError(request));
+        fail(xhrError(request));
         return;
       }
 
       try {
         const parsed = uploadFileResponseSchema.parse(JSON.parse(request.responseText));
         onProgress(1);
-        resolve(parsed);
+        succeed(parsed);
       } catch {
-        reject(new MobileRequestError("INVALID_SERVER_RESPONSE", request.status));
+        fail(new MobileRequestError("INVALID_SERVER_RESPONSE", request.status));
       }
     };
-    request.onerror = () => reject(new MobileRequestError("NETWORK_UNAVAILABLE"));
-    request.onabort = () => reject(new MobileRequestError("UPLOAD_CANCELED"));
-    request.ontimeout = () => reject(new MobileRequestError("UPLOAD_TIMEOUT"));
+    request.onerror = () => fail(new MobileRequestError("NETWORK_UNAVAILABLE"));
+    request.onabort = () => fail(signalError());
+    request.ontimeout = () => fail(new MobileRequestError("UPLOAD_TIMEOUT"));
+    if (options.signal?.aborted) {
+      abortUpload();
+      return;
+    }
+    options.signal?.addEventListener("abort", abortUpload, { once: true });
     request.send(body);
   });
 }

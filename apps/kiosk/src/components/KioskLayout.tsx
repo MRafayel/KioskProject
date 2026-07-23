@@ -1,13 +1,19 @@
-import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { formatSessionTime, useSessionTimer } from "../features/session/SessionTimerProvider.js";
-import { closeKioskSession } from "../features/session/sessionService.js";
+import { subscribeToSessionEvents } from "../features/session/sessionEvents.js";
+import { clearStoredSessionKeys, closeKioskSession } from "../features/session/sessionService.js";
 
 type CancelStatus = "closed" | "confirming" | "closing" | "failed";
+
+export interface KioskOutletContext {
+  realtimeConnected: boolean;
+}
 
 const steps = [
   { path: "/upload" },
@@ -22,7 +28,57 @@ export function KioskLayout() {
   const { state, dispatch } = usePrototypeSession();
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [cancelStatus, setCancelStatus] = useState<CancelStatus>("closed");
+  const [connectedSessionId, setConnectedSessionId] = useState<string | null>(null);
+  const terminalSessionRef = useRef<string | null>(null);
+  const sessionId = state.session?.id;
+  const realtimeConnected = connectedSessionId === sessionId;
+
+  useEffect(() => {
+    if (!sessionId) return;
+    terminalSessionRef.current = null;
+
+    const refreshFileSnapshot = () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["kiosk-session-files", sessionId],
+        exact: true,
+        refetchType: "active"
+      });
+    };
+
+    return subscribeToSessionEvents(sessionId, {
+      onConnected: () => {
+        setConnectedSessionId(sessionId);
+        refreshFileSnapshot();
+      },
+      onDisconnected: () =>
+        setConnectedSessionId((current) => (current === sessionId ? null : current)),
+      onEvent: (event) => {
+        if (
+          event.type === "upload.started" ||
+          event.type === "file.uploaded" ||
+          event.type === "file.rejected" ||
+          event.type === "file.deleted"
+        ) {
+          refreshFileSnapshot();
+          return;
+        }
+        if (event.type !== "session.canceled" && event.type !== "session.expired") return;
+        if (terminalSessionRef.current === sessionId) return;
+
+        terminalSessionRef.current = sessionId;
+        clearStoredSessionKeys(sessionId);
+        queryClient.removeQueries({ queryKey: ["kiosk-session-files", sessionId], exact: true });
+        setConnectedSessionId((current) => (current === sessionId ? null : current));
+        setCancelStatus("closed");
+        dispatch({ type: "RESET" });
+        resetLocale();
+        void navigate("/", { replace: true });
+      },
+      onDesynchronized: refreshFileSnapshot
+    });
+  }, [dispatch, navigate, queryClient, resetLocale, sessionId]);
 
   if (!state.session) return <Navigate to="/" replace />;
 
@@ -102,7 +158,7 @@ export function KioskLayout() {
       </header>
 
       <main className="screen" id="main-content">
-        <Outlet />
+        <Outlet context={{ realtimeConnected } satisfies KioskOutletContext} />
       </main>
 
       <footer className="session-footer">

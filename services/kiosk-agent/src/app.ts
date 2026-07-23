@@ -4,10 +4,13 @@ import Fastify, { LogController, type FastifyInstance, type FastifyReply } from 
 import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 
+import type { SessionEventSource } from "./events.js";
+
 type UpstreamFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export interface BuildAgentOptions {
   upstreamFetch?: UpstreamFetch;
+  eventSource?: SessionEventSource;
 }
 
 export async function buildAgent(
@@ -93,6 +96,55 @@ export async function buildAgent(
     )
   );
 
+  app.get<{
+    Params: { sessionId: string };
+    Querystring: { after?: string };
+  }>("/v1/sessions/:sessionId/events/stream", (request, reply) => {
+    if (!options.eventSource) {
+      return reply.code(503).send({
+        error: {
+          code: "REALTIME_UNAVAILABLE",
+          message: "Realtime session updates are temporarily unavailable."
+        }
+      });
+    }
+
+    const queryAfter = parseEventCursor(request.query.after);
+    const lastEventId = parseEventCursor(singleHeader(request.headers["last-event-id"]));
+    const after =
+      queryAfter === undefined || lastEventId === undefined
+        ? undefined
+        : Math.max(queryAfter, lastEventId);
+    if (after === undefined || !UUID_PATTERN.test(request.params.sessionId)) {
+      return reply.code(400).send({
+        error: { code: "INVALID_EVENT_CURSOR", message: "The event stream request is invalid." }
+      });
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "cache-control": "no-store, no-cache, must-revalidate",
+      connection: "keep-alive",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-accel-buffering": "no"
+    });
+    reply.raw.write(": connected\n\n");
+
+    const unsubscribe = options.eventSource.subscribe(request.params.sessionId, after, (event) => {
+      if (!reply.raw.destroyed) {
+        reply.raw.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+      }
+    });
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed) reply.raw.write(": heartbeat\n\n");
+    }, 15_000);
+    heartbeat.unref?.();
+    request.raw.once("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  });
+
   app.post<{ Params: { sessionId: string } }>(
     "/v1/sessions/:sessionId/cancel",
     async (request, reply) => {
@@ -166,4 +218,13 @@ async function forwardApiResponse(
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function parseEventCursor(value: string | undefined): number | undefined {
+  if (value === undefined || value === "") return 0;
+  if (!/^\d{1,10}$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= 1_000_000_000 ? parsed : undefined;
 }

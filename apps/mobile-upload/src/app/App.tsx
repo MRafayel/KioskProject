@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { Route, Routes, useParams } from "react-router-dom";
 
 import type {
@@ -11,7 +11,13 @@ import { LanguageProvider, useLanguage } from "../features/i18n/LanguageProvider
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { interpolate, type Locale } from "../features/i18n/messages.js";
 import { MobileRequestError, type MobileBootstrapController } from "../features/join/bootstrap.js";
-import { deleteUploadedFile, listUploadedFiles, uploadFile } from "../features/upload/api.js";
+import { subscribeToMobileSessionEvents } from "../features/session/sessionEvents.js";
+import {
+  checkMobileSession,
+  deleteUploadedFile,
+  listUploadedFiles,
+  uploadFile
+} from "../features/upload/api.js";
 
 export interface AppProps {
   bootstrap: MobileBootstrapController | null;
@@ -161,14 +167,30 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [uploadSucceeded, setUploadSucceeded] = useState(false);
   const [error, setError] = useState<UploadErrorState | null>(null);
+  const [sessionAvailable, setSessionAvailable] = useState(() =>
+    isMobileUploadState(context.session.state)
+  );
+  const uploadAbortRef = useRef<AbortController | null>(null);
   const visibleFiles = files.filter((file) => file.status !== "DELETED");
   const capacityFiles = files.filter((file) =>
     ["UPLOADING", "QUARANTINED", "DELETING", "DELETE_PENDING"].includes(file.status)
   );
-  const acceptsUploads = ["WAITING_FOR_UPLOAD", "FILES_UPLOADED"].includes(context.session.state);
+  const acceptsUploads = sessionAvailable && isMobileUploadState(context.session.state);
   const currentBytes = capacityFiles.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
   const atFileLimit = capacityFiles.length >= context.limits.maxFiles;
   const busy = progress !== null || deletingId !== null;
+  const closeSession = useCallback((requestError: unknown) => {
+    const error =
+      requestError instanceof MobileRequestError
+        ? requestError
+        : new MobileRequestError("UPLOAD_SESSION_NOT_EDITABLE", 409);
+    setSessionAvailable(false);
+    setUploadSucceeded(false);
+    setError(null);
+    if (uploadAbortRef.current && !uploadAbortRef.current.signal.aborted) {
+      uploadAbortRef.current.abort(error);
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -180,14 +202,95 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       },
       (requestError: unknown) => {
         if (!active) return;
-        setError(toRequestErrorState(requestError, "list"));
+        if (isTerminalMobileSessionError(requestError)) {
+          closeSession(requestError);
+        } else {
+          setError(toRequestErrorState(requestError, "list"));
+        }
         setLoadingFiles(false);
       }
     );
     return () => {
       active = false;
     };
-  }, [context.session.id]);
+  }, [closeSession, context.session.id]);
+
+  useEffect(() => {
+    if (!sessionAvailable) return;
+
+    let active = true;
+    let checking = false;
+    let checkRequested = false;
+    const verifyAuthoritativeState = () => {
+      checkRequested = true;
+      if (checking) return;
+      checking = true;
+      void (async () => {
+        try {
+          while (active && checkRequested) {
+            checkRequested = false;
+            try {
+              const latest = await checkMobileSession(context.session.publicId);
+              if (active && !isMobileUploadState(latest.session.state)) {
+                closeSession(new MobileRequestError("UPLOAD_SESSION_NOT_EDITABLE", 409));
+                return;
+              }
+            } catch (requestError) {
+              if (active && isTerminalMobileSessionError(requestError)) {
+                closeSession(requestError);
+                return;
+              }
+            }
+          }
+        } finally {
+          checking = false;
+          // A trigger can arrive after the loop observes an empty queue but
+          // before this request releases the in-flight flag.
+          if (active && checkRequested) verifyAuthoritativeState();
+        }
+      })();
+    };
+    const reconciliationTimer = window.setInterval(
+      verifyAuthoritativeState,
+      MOBILE_SESSION_RECONCILIATION_MS
+    );
+    const unsubscribe = subscribeToMobileSessionEvents(
+      context.session.publicId,
+      context.session.id,
+      {
+        // Re-check after every connection so a terminal event that happened
+        // between authentication and subscription cannot leave stale UI.
+        onConnected: verifyAuthoritativeState,
+        // EventSource reconnects automatically. A single authoritative check
+        // distinguishes a revoked session from a transient network break.
+        onDisconnected: verifyAuthoritativeState,
+        onDesynchronized: verifyAuthoritativeState,
+        onTerminal: (event) => {
+          closeSession(
+            new MobileRequestError(
+              event.type === "session.expired"
+                ? "UPLOAD_SESSION_EXPIRED"
+                : "UPLOAD_SESSION_NOT_EDITABLE",
+              event.type === "session.expired" ? 410 : 409
+            )
+          );
+        }
+      }
+    );
+
+    return () => {
+      active = false;
+      window.clearInterval(reconciliationTimer);
+      unsubscribe();
+    };
+  }, [closeSession, context.session.id, context.session.publicId, sessionAvailable]);
+
+  useEffect(
+    () => () => {
+      uploadAbortRef.current?.abort(new MobileRequestError("UPLOAD_CANCELED"));
+    },
+    []
+  );
 
   async function refreshFiles(): Promise<void> {
     const result = await listUploadedFiles(context.session.id);
@@ -197,7 +300,7 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
   async function onFileSelected(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file || busy) return;
+    if (!file || busy || !sessionAvailable) return;
 
     setError(null);
     setUploadSucceeded(false);
@@ -223,19 +326,33 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       return;
     }
 
+    const uploadAbort = new AbortController();
+    uploadAbortRef.current = uploadAbort;
     setProgress(0);
     try {
-      await uploadFile(context.session.id, file, context.csrfToken, setProgress);
+      const latest = await checkMobileSession(context.session.publicId);
+      if (!isMobileUploadState(latest.session.state)) {
+        throw new MobileRequestError("UPLOAD_SESSION_NOT_EDITABLE", 409);
+      }
+      uploadAbort.signal.throwIfAborted();
+      await uploadFile(context.session.id, file, context.csrfToken, setProgress, {
+        signal: uploadAbort.signal
+      });
       await refreshFiles();
       setUploadSucceeded(true);
     } catch (requestError) {
-      setError(toRequestErrorState(requestError, "upload"));
-      try {
-        await refreshFiles();
-      } catch {
-        // Keep the original, more useful upload error.
+      if (isTerminalMobileSessionError(requestError)) {
+        closeSession(requestError);
+      } else {
+        setError(toRequestErrorState(requestError, "upload"));
+        try {
+          await refreshFiles();
+        } catch {
+          // Keep the original, more useful upload error.
+        }
       }
     } finally {
+      if (uploadAbortRef.current === uploadAbort) uploadAbortRef.current = null;
       setProgress(null);
     }
   }
@@ -249,7 +366,11 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       await deleteUploadedFile(context.session.id, fileId, context.csrfToken);
       await refreshFiles();
     } catch (requestError) {
-      setError(toRequestErrorState(requestError, "delete"));
+      if (isTerminalMobileSessionError(requestError)) {
+        closeSession(requestError);
+      } else {
+        setError(toRequestErrorState(requestError, "delete"));
+      }
     } finally {
       setDeletingId(null);
     }
@@ -265,11 +386,17 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
           <p className="eyebrow">{text.eyebrow}</p>
           <h1 id="upload-title">{text.title}</h1>
           <p className="intro-copy">{text.intro}</p>
-          <div className="connected-pill">
+          <div className={`connected-pill${sessionAvailable ? "" : " connected-pill--closed"}`}>
             <span aria-hidden="true" />
-            {text.sessionReady}
+            {sessionAvailable ? text.sessionReady : text.sessionClosed}
           </div>
-          <p className="expiration">{interpolate(text.expires, { time: expiration })}</p>
+          {sessionAvailable ? (
+            <p className="session-detail">{interpolate(text.expires, { time: expiration })}</p>
+          ) : (
+            <p className="session-detail session-detail--closed" role="alert">
+              {text.sessionUnavailable}
+            </p>
+          )}
           <div className="privacy-note">
             <ShieldIcon />
             <p>{text.privacy}</p>
@@ -439,6 +566,23 @@ function validateLocalFile(
   return allowed ? null : "UNSUPPORTED_FILE_TYPE";
 }
 
+function isMobileUploadState(state: string): boolean {
+  return state === "WAITING_FOR_UPLOAD" || state === "FILES_UPLOADED";
+}
+
+function isTerminalMobileSessionError(error: unknown): boolean {
+  if (!(error instanceof MobileRequestError)) return false;
+  return TERMINAL_MOBILE_SESSION_CODES.has(error.code);
+}
+
+const TERMINAL_MOBILE_SESSION_CODES = new Set([
+  "INVALID_MOBILE_SESSION",
+  "SESSION_NOT_FOUND",
+  "UPLOAD_SESSION_EXPIRED",
+  "UPLOAD_SESSION_NOT_EDITABLE"
+]);
+const MOBILE_SESSION_RECONCILIATION_MS = 30_000;
+
 type Operation = "bootstrap" | "list" | "upload" | "delete";
 type LocalizedErrorKey = "emptyFile" | "fileTooLarge" | "unsupportedFile" | "fileLimit";
 type UploadErrorState =
@@ -482,6 +626,7 @@ function getErrorMessage(
   }
   if (code.includes("CLAIMED")) return text.claimed;
   if (status === 410 || code.includes("EXPIRED")) return text.expired;
+  if (TERMINAL_MOBILE_SESSION_CODES.has(code)) return text.sessionUnavailable;
   if (status === 413 || code.includes("TOO_LARGE") || code.includes("BYTE_LIMIT")) {
     return text.fileTooLarge;
   }
@@ -494,7 +639,9 @@ function getErrorMessage(
   if (operation !== "bootstrap" && (status === 401 || status === 404)) {
     return text.sessionUnavailable;
   }
-  if (status === 409 || status === 423) return text.sessionUnavailable;
+  if (status === 409 || status === 423) {
+    return operation === "upload" ? text.uploadFailed : text.genericError;
+  }
   if (code === "NETWORK_UNAVAILABLE" || code === "REQUEST_TIMEOUT" || code === "UPLOAD_TIMEOUT") {
     return operation === "bootstrap" || operation === "list"
       ? text.connectionError

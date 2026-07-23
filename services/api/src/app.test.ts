@@ -77,6 +77,19 @@ describe("session route authentication", () => {
     expect(response.statusCode).toBe(401);
     expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
   });
+
+  it("rejects event replay without exposing whether the session exists", async () => {
+    const app = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/sessions/01900000-0000-7000-8000-000000000010/events?after=0"
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+  });
 });
 
 describe("controlled transport errors", () => {

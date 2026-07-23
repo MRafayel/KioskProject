@@ -2,8 +2,10 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { MobileRequestError } from "../join/bootstrap.js";
 import {
   MOBILE_UPLOAD_TIMEOUT_MS,
+  checkMobileSession,
   deleteUploadedFile,
   listUploadedFiles,
   uploadFile
@@ -31,8 +33,10 @@ describe("mobile file upload", () => {
       `c_${"C".repeat(43)}`,
       progress,
       {
-        createRequest: () => request as unknown as XMLHttpRequest,
-        randomUUID: () => identifiers.shift() ?? "unexpected"
+        dependencies: {
+          createRequest: () => request as unknown as XMLHttpRequest,
+          randomUUID: () => identifiers.shift() ?? "unexpected"
+        }
       }
     );
 
@@ -71,6 +75,65 @@ describe("mobile file upload", () => {
       file: { status: "QUARANTINED", kind: "PDF" }
     });
     expect(progress).toHaveBeenLastCalledWith(1);
+  });
+
+  it("aborts an active browser upload with the session error", async () => {
+    const request = new FakeRequest();
+    const controller = new AbortController();
+    const result = uploadFile(
+      "01900000-0000-7000-8000-000000000040",
+      new File(["synthetic-pdf"], "synthetic.pdf", { type: "application/pdf" }),
+      `c_${"C".repeat(43)}`,
+      vi.fn(),
+      {
+        dependencies: {
+          createRequest: () => request as unknown as XMLHttpRequest,
+          randomUUID: () => "01900000-0000-7000-8000-000000000041"
+        },
+        signal: controller.signal
+      }
+    );
+    const sessionClosed = new MobileRequestError("INVALID_MOBILE_SESSION", 401);
+
+    controller.abort(sessionClosed);
+
+    await expect(result).rejects.toBe(sessionClosed);
+    expect(request.aborted).toBe(true);
+  });
+
+  it("checks the current mobile session before a large upload", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          session: {
+            id: "01900000-0000-7000-8000-000000000044",
+            publicId: "ps_1234567890abcdef",
+            locale: "hy",
+            state: "WAITING_FOR_UPLOAD",
+            version: 1,
+            expiresAt: "2030-01-01T00:10:00.000Z",
+            hardExpiresAt: "2030-01-01T00:30:00.000Z"
+          },
+          csrfToken: `c_${"C".repeat(43)}`,
+          limits: {
+            maxFiles: 1,
+            maxFileBytes: 10_485_760,
+            maxTotalBytes: 10_485_760,
+            allowedMimeTypes: ["application/pdf", "image/jpeg", "image/png"]
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", request);
+
+    await expect(checkMobileSession("ps_1234567890abcdef")).resolves.toMatchObject({
+      session: { state: "WAITING_FOR_UPLOAD" }
+    });
+    expect(request).toHaveBeenCalledWith(
+      "/v1/mobile-auth/ps_1234567890abcdef/context",
+      expect.objectContaining({ method: "GET", credentials: "include", cache: "no-store" })
+    );
   });
 
   it("refreshes the private list with the scoped cookie", async () => {
@@ -131,6 +194,7 @@ class FakeRequest {
   public status = 0;
   public responseText = "";
   public body: Document | XMLHttpRequestBodyInit | null = null;
+  public aborted = false;
 
   public open(method: string, url: string): void {
     this.method = method;
@@ -143,5 +207,10 @@ class FakeRequest {
 
   public send(body: Document | XMLHttpRequestBodyInit | null): void {
     this.body = body;
+  }
+
+  public abort(): void {
+    this.aborted = true;
+    this.onabort?.(new ProgressEvent("abort"));
   }
 }
