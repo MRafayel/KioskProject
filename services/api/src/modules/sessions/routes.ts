@@ -4,9 +4,9 @@ import { z } from "zod";
 import { createSessionBodySchema, idempotencyKeySchema } from "@printing-kiosk/contracts";
 import type { PrismaClient } from "@printing-kiosk/database";
 
-import { authenticateKiosk } from "./auth.js";
 import type { Clock } from "./crypto.js";
 import { ApiError } from "./errors.js";
+import { kioskRateLimitKey, type KioskAuthenticationThrottle } from "./rate-limit.js";
 import type { SessionService } from "./service.js";
 
 const kioskParamsSchema = z.object({ kioskId: z.string().min(1).max(64) });
@@ -18,75 +18,109 @@ export function registerSessionRoutes(
     database: PrismaClient;
     clock: Clock;
     sessions: SessionService;
+    kioskAuthentication: KioskAuthenticationThrottle;
+    maxSessionsPerMinute?: number;
   }
 ): void {
-  app.post("/v1/kiosks/:kioskId/sessions", async (request, reply) => {
-    const identity = await authenticateKiosk(
-      request,
-      dependencies.database,
-      dependencies.clock,
-      "sessions:create"
-    );
-    const params = kioskParamsSchema.parse(request.params);
-    if (params.kioskId !== identity.kioskId) throw hiddenKiosk();
+  const maxSessionsPerMinute = dependencies.maxSessionsPerMinute ?? 10;
 
-    const body = createSessionBodySchema.parse(request.body ?? {});
-    const response = await dependencies.sessions.create({
-      kioskId: identity.kioskId,
-      credentialId: identity.credentialId,
-      locale: body.locale,
-      idempotencyKey: requireIdempotencyKey(request),
-      requestId: request.id
-    });
+  app.post(
+    "/v1/kiosks/:kioskId/sessions",
+    {
+      config: {
+        rateLimit: {
+          max: maxSessionsPerMinute,
+          timeWindow: "1 minute",
+          keyGenerator: kioskRateLimitKey
+        }
+      }
+    },
+    async (request, reply) => {
+      const identity = await dependencies.kioskAuthentication.authenticate(
+        request,
+        dependencies.database,
+        dependencies.clock,
+        "sessions:create"
+      );
+      const params = kioskParamsSchema.parse(request.params);
+      if (params.kioskId !== identity.kioskId) throw hiddenKiosk();
 
-    return reply
-      .header("cache-control", "no-store")
-      .header("etag", `"${response.session.version}"`)
-      .code(201)
-      .send(response);
-  });
+      const body = createSessionBodySchema.parse(request.body ?? {});
+      const response = await dependencies.sessions.create({
+        kioskId: identity.kioskId,
+        credentialId: identity.credentialId,
+        locale: body.locale,
+        idempotencyKey: requireIdempotencyKey(request),
+        requestId: request.id
+      });
 
-  app.get("/v1/sessions/:sessionId", async (request, reply) => {
-    const identity = await authenticateKiosk(
-      request,
-      dependencies.database,
-      dependencies.clock,
-      "sessions:read"
-    );
-    const params = sessionParamsSchema.parse(request.params);
-    const response = await dependencies.sessions.get({
-      kioskId: identity.kioskId,
-      sessionId: params.sessionId
-    });
+      return reply
+        .header("cache-control", "no-store")
+        .header("etag", `"${response.session.version}"`)
+        .code(201)
+        .send(response);
+    }
+  );
 
-    return reply
-      .header("cache-control", "no-store")
-      .header("etag", `"${response.session.version}"`)
-      .send(response);
-  });
+  app.get(
+    "/v1/sessions/:sessionId",
+    {
+      config: {
+        rateLimit: { max: 120, timeWindow: "1 minute", keyGenerator: kioskRateLimitKey }
+      }
+    },
+    async (request, reply) => {
+      const identity = await dependencies.kioskAuthentication.authenticate(
+        request,
+        dependencies.database,
+        dependencies.clock,
+        "sessions:read"
+      );
+      const params = sessionParamsSchema.parse(request.params);
+      const response = await dependencies.sessions.get({
+        kioskId: identity.kioskId,
+        sessionId: params.sessionId
+      });
 
-  app.post("/v1/sessions/:sessionId/cancel", async (request, reply) => {
-    const identity = await authenticateKiosk(
-      request,
-      dependencies.database,
-      dependencies.clock,
-      "sessions:cancel"
-    );
-    const params = sessionParamsSchema.parse(request.params);
-    const response = await dependencies.sessions.cancel({
-      kioskId: identity.kioskId,
-      credentialId: identity.credentialId,
-      sessionId: params.sessionId,
-      expectedVersion: requireSessionVersion(request),
-      idempotencyKey: requireIdempotencyKey(request),
-      requestId: request.id
-    });
+      return reply
+        .header("cache-control", "no-store")
+        .header("etag", `"${response.session.version}"`)
+        .send(response);
+    }
+  );
 
-    return reply
-      .header("cache-control", "no-store")
-      .header("etag", `"${response.session.version}"`)
-      .send(response);
-  });
+  app.post(
+    "/v1/sessions/:sessionId/cancel",
+    {
+      // The kiosk deliberately retries cancellation until cleanup is confirmed,
+      // so this allowance stays above that recovery loop.
+      config: {
+        rateLimit: { max: 20, timeWindow: "1 minute", keyGenerator: kioskRateLimitKey }
+      }
+    },
+    async (request, reply) => {
+      const identity = await dependencies.kioskAuthentication.authenticate(
+        request,
+        dependencies.database,
+        dependencies.clock,
+        "sessions:cancel"
+      );
+      const params = sessionParamsSchema.parse(request.params);
+      const response = await dependencies.sessions.cancel({
+        kioskId: identity.kioskId,
+        credentialId: identity.credentialId,
+        sessionId: params.sessionId,
+        expectedVersion: requireSessionVersion(request),
+        idempotencyKey: requireIdempotencyKey(request),
+        requestId: request.id
+      });
+
+      return reply
+        .header("cache-control", "no-store")
+        .header("etag", `"${response.session.version}"`)
+        .send(response);
+    }
+  );
 }
 
 function requireIdempotencyKey(request: FastifyRequest): string {

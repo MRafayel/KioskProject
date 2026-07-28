@@ -137,7 +137,11 @@ beforeAll(async () => {
     // so the production per-IP ceiling of 8 per minute throttles the suite
     // rather than the code under test. This only became visible once document
     // processing got fast enough to run the whole file inside one window.
-    maxMobileExchangesPerMinute: 1_000
+    maxMobileExchangesPerMinute: 1_000,
+    // Same reasoning one step earlier: every scenario opens its session through
+    // the one integration credential, and this file shares a single app, so the
+    // per-credential ceiling counts the whole suite against one allowance.
+    maxSessionsPerMinute: 1_000
   });
   await mkdir(environment.DOCUMENT_PROCESSOR_SCRATCH_DIR, {
     recursive: true,
@@ -1244,8 +1248,12 @@ async function cleanPhase5Fixtures(): Promise<void> {
       }
     }
   });
+  // Ownership scenarios open a session on the foreign kiosk too. Leaving those
+  // behind blocks the kiosk deletion in `afterAll` on its session foreign key,
+  // so the stale session survives to refuse the next run with
+  // ACTIVE_SESSION_EXISTS.
   const sessions = await database.printSession.findMany({
-    where: { kioskId },
+    where: { kioskId: { in: [kioskId, foreignKioskId] } },
     select: { id: true }
   });
   const sessionIds = sessions.map((session) => session.id);

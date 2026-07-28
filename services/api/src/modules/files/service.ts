@@ -1120,7 +1120,15 @@ function mapReservationConflict(error: unknown): unknown {
 }
 
 function isRetryableTransactionError(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034";
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") return true;
+  // The driver adapter reports a serializable conflict as its own error type
+  // instead of P2034, so matching only the latter lets two customers uploading
+  // at the same moment fail with a 500 that this retry is written to absorb.
+  return (
+    error instanceof Error &&
+    error.name === "DriverAdapterError" &&
+    error.message === "TransactionWriteConflict"
+  );
 }
 
 function hiddenSession(): ApiError {

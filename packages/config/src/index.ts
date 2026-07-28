@@ -222,6 +222,16 @@ const environmentSchema = z
       });
     }
 
+    // Every consumer parses this value as a URL. Rejecting it here keeps a typo
+    // a fast startup failure instead of a later HTTP 500 from readiness.
+    if (!isPostgresConnectionUrl(environment.DATABASE_URL)) {
+      context.addIssue({
+        code: "custom",
+        path: ["DATABASE_URL"],
+        message: "DATABASE_URL must be a postgresql:// or postgres:// URL"
+      });
+    }
+
     if (environment.NODE_ENV !== "production") return;
 
     const productionSecrets = [
@@ -372,6 +382,15 @@ function isPostgresUrl(value: string): boolean {
 
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+function isPostgresConnectionUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "postgresql:" || url.protocol === "postgres:";
+  } catch {
+    return false;
+  }
 }
 
 export type Environment = z.infer<typeof environmentSchema>;

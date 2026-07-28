@@ -29,6 +29,7 @@ import {
   type RandomSource
 } from "./modules/sessions/crypto.js";
 import { ApiError } from "./modules/sessions/errors.js";
+import { createKioskAuthenticationThrottle } from "./modules/sessions/rate-limit.js";
 import { registerSessionRoutes } from "./modules/sessions/routes.js";
 import { SessionService } from "./modules/sessions/service.js";
 
@@ -49,6 +50,12 @@ export interface BuildAppOptions {
    * only an automated suite driving many sessions from one address raises it.
    */
   maxMobileExchangesPerMinute?: number;
+  /**
+   * Per-credential ceiling on session creation. Production keeps the built-in
+   * default; only an automated suite driving many sessions through one kiosk
+   * credential raises it.
+   */
+  maxSessionsPerMinute?: number;
 }
 
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
@@ -315,8 +322,20 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     return reply.code(ready ? 200 : 503).send(response);
   });
 
-  registerSessionRoutes(app, { database, clock, sessions });
-  registerEventRoutes(app, { database, clock });
+  // One throttle across every kiosk-authenticated route, so a caller cannot
+  // spend a fresh allowance simply by guessing against a different path.
+  const kioskAuthentication = createKioskAuthenticationThrottle(app);
+
+  registerSessionRoutes(app, {
+    database,
+    clock,
+    sessions,
+    kioskAuthentication,
+    ...(options.maxSessionsPerMinute === undefined
+      ? {}
+      : { maxSessionsPerMinute: options.maxSessionsPerMinute })
+  });
+  registerEventRoutes(app, { database, clock, kioskAuthentication });
   registerMobileAccessRoutes(app, {
     mobileAccess,
     sessionEvents,
@@ -331,6 +350,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     clock,
     files,
     mobileAccess,
+    kioskAuthentication,
     uploadOrigin: options.environment.UPLOAD_ORIGIN,
     maxFileBytes: options.environment.MAX_FILE_BYTES
   });
@@ -338,6 +358,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     database,
     objectStore,
     clock,
+    kioskAuthentication,
     maxPreviewBytes: options.environment.MAX_PREVIEW_FILE_BYTES
   });
 

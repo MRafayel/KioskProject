@@ -6,9 +6,9 @@ import { z } from "zod";
 import { filePagesResponseSchema } from "@printing-kiosk/contracts";
 import type { PrismaClient } from "@printing-kiosk/database";
 
-import { authenticateKiosk } from "../sessions/auth.js";
 import type { Clock } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
+import type { KioskAuthenticationThrottle } from "../sessions/rate-limit.js";
 import type { ObjectStore } from "./object-store.js";
 
 const fileParamsSchema = z.object({
@@ -30,6 +30,7 @@ export function registerDocumentPreviewRoutes(
     database: PrismaClient;
     objectStore: ObjectStore;
     clock: Clock;
+    kioskAuthentication: KioskAuthenticationThrottle;
     maxPreviewBytes: number;
     actorRateLimiter?: PreviewActorRateLimiter;
   }
@@ -52,7 +53,7 @@ export function registerDocumentPreviewRoutes(
     },
     async (request, reply) => {
       const params = fileParamsSchema.parse(request.params);
-      const kiosk = await authenticateKiosk(
+      const kiosk = await dependencies.kioskAuthentication.authenticate(
         request,
         dependencies.database,
         dependencies.clock,
@@ -119,7 +120,7 @@ export function registerDocumentPreviewRoutes(
     async (request, reply) => {
       const params = previewParamsSchema.parse(request.params);
       const query = previewQuerySchema.parse(request.query);
-      const kiosk = await authenticateKiosk(
+      const kiosk = await dependencies.kioskAuthentication.authenticate(
         request,
         dependencies.database,
         dependencies.clock,
