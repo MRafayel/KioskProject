@@ -1,4 +1,8 @@
-import type { UploadedFileKind, UploadedFileStatus } from "@printing-kiosk/contracts";
+import type {
+  UploadedFileKind,
+  UploadedFileRejectionCode,
+  UploadedFileStatus
+} from "@printing-kiosk/contracts";
 
 export type Orientation = "PORTRAIT" | "LANDSCAPE";
 export type PrototypeOutcome = "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR";
@@ -17,14 +21,17 @@ export interface PrototypeFile {
   ordinal: number;
   name: string | null;
   kind: UploadedFileKind | null;
-  status: UploadedFileStatus | "READY";
+  status: UploadedFileStatus;
   pageCount: number | null;
+  processingRevision: number;
+  rejectionCode: UploadedFileRejectionCode | null;
   sizeBytes: number | null;
 }
 
 export type ReadyPrototypeFile = PrototypeFile & {
   status: "READY";
   pageCount: number;
+  processingRevision: number;
   sizeBytes: number;
 };
 

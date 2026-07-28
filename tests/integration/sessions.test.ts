@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 
 import { io, type Socket } from "socket.io-client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -31,6 +32,7 @@ import {
   digestUploadValue
 } from "../../services/api/src/modules/sessions/crypto.js";
 import { OutboxPublisher } from "../../services/worker/src/jobs/publish-outbox.js";
+import { assertSafeIntegrationEnvironment } from "./safety.js";
 
 const integrationKioskId = "kiosk_integration_001";
 const integrationCredentialId = "integration-kiosk-credential";
@@ -43,6 +45,7 @@ const environment = loadEnvironment({
   DEV_KIOSK_ID: integrationKioskId,
   DEV_KIOSK_API_KEY: integrationKioskApiKey
 });
+assertSafeIntegrationEnvironment(environment);
 const database = createDatabaseClient(environment.DATABASE_URL);
 const authorization = `Bearer ${environment.DEV_KIOSK_API_KEY}`;
 const objectStore = createS3ObjectStore(environment);
@@ -78,12 +81,12 @@ beforeAll(async () => {
       kioskId: integrationKioskId,
       credentialId: integrationCredentialId,
       secretDigest,
-      scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read"]
+      scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read", "files:delete"]
     },
     update: {
       kioskId: integrationKioskId,
       secretDigest,
-      scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read"],
+      scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read", "files:delete"],
       revokedAt: null,
       expiresAt: null
     }
@@ -118,13 +121,22 @@ async function cleanIntegrationSessions(): Promise<void> {
     where: { sessionId: { in: sessionIds }, quarantineObjectKey: { not: null } },
     select: { quarantineObjectKey: true }
   });
+  const storedDerivatives = await database.fileDerivative.findMany({
+    where: { file: { sessionId: { in: sessionIds } } },
+    select: { objectKey: true }
+  });
   await Promise.all(
-    storedObjects.map(async (file) => {
-      if (file.quarantineObjectKey) {
-        await objectStore.deleteObject({ key: file.quarantineObjectKey });
-      }
-    })
+    [
+      ...storedObjects.map((file) => file.quarantineObjectKey),
+      ...storedDerivatives.map((derivative) => derivative.objectKey)
+    ]
+      .filter((key): key is string => Boolean(key))
+      .map((key) => objectStore.deleteObject({ key }))
   );
+  await database.filePage.deleteMany({ where: { file: { sessionId: { in: sessionIds } } } });
+  await database.fileDerivative.deleteMany({
+    where: { file: { sessionId: { in: sessionIds } } }
+  });
   await database.uploadedFile.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.sessionUploadGrant.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.mobileClient.deleteMany({ where: { sessionId: { in: sessionIds } } });
@@ -709,7 +721,7 @@ describe.sequential("authoritative print sessions", () => {
     const rejected = await database.uploadedFile.findUniqueOrThrow({ where: { id: fileId } });
     expect(rejected).toMatchObject({
       status: "REJECTED",
-      rejectionCode: "UPLOAD_INTERRUPTED",
+      rejectionCode: "UPLOAD_FAILED",
       quarantineObjectKey: null,
       contentSha256: null
     });
@@ -783,8 +795,19 @@ describe.sequential("authoritative print sessions", () => {
       exchange.context.csrfToken,
       idempotencyKey
     );
-    expect(deferred.statusCode).toBe(503);
-    expect(deferred.json()).toMatchObject({ error: { code: "FILE_DELETE_DEFERRED" } });
+    expect(deferred.statusCode).toBe(202);
+    expect(
+      (
+        await deleteMobileFile(
+          app,
+          created.session.id,
+          stored.id,
+          exchange.cookieHeader,
+          exchange.context.csrfToken,
+          idempotencyKey
+        )
+      ).statusCode
+    ).toBe(202);
     await expect(
       database.uploadedFile.findUniqueOrThrow({ where: { id: stored.id } })
     ).resolves.toMatchObject({
@@ -850,6 +873,246 @@ describe.sequential("authoritative print sessions", () => {
     await expect(
       database.printSession.findUniqueOrThrow({ where: { id: created.session.id } })
     ).resolves.toMatchObject({ eventSequence: 5 });
+    await expect(
+      database.auditEvent.count({
+        where: {
+          sessionId: created.session.id,
+          action: "file.delete_requested",
+          outcome: "ACCEPTED"
+        }
+      })
+    ).resolves.toBe(1);
+    await expect(
+      database.auditEvent.findFirst({
+        where: {
+          sessionId: created.session.id,
+          action: "file.deleted",
+          actorType: "SYSTEM",
+          actorId: "file-janitor"
+        }
+      })
+    ).resolves.toMatchObject({
+      metadata: { fileId: stored.id, finalizedDeferredCleanup: true }
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it("settles every concurrent deletion idempotency key after direct cleanup", async () => {
+    const clock = new MutableClock(new Date("2030-01-01T00:00:00.000Z"));
+    const cleanupStore = new ControlledObjectStore();
+    const app = await buildApp({ environment, database, objectStore: cleanupStore, clock });
+    openApps.push(app);
+    const created = createSessionResponseSchema.parse(
+      (await createSession(app, "phase5-concurrent-direct-deletion")).json()
+    );
+    const exchange = await exchangeMobile(
+      app,
+      created.session.publicId,
+      requireUploadToken(created.upload.qrUrl),
+      "01900000-0000-7000-8000-000000000075"
+    );
+    const uploaded = uploadFileResponseSchema.parse(
+      (
+        await uploadMultipart(app, {
+          sessionId: created.session.id,
+          cookieHeader: exchange.cookieHeader,
+          csrfToken: exchange.context.csrfToken,
+          clientFileId: "01900000-0000-7000-8000-000000000076",
+          idempotencyKey: "phase5-concurrent-delete-upload",
+          filename: "concurrent.pdf",
+          mime: "application/pdf",
+          contents: Buffer.from("%PDF-1.4\n%%EOF\n", "utf8")
+        })
+      ).json()
+    );
+
+    const releaseDeletes = cleanupStore.pauseDeletes();
+    const firstDeletion = deleteMobileFile(
+      app,
+      created.session.id,
+      uploaded.file.id,
+      exchange.cookieHeader,
+      exchange.context.csrfToken,
+      "phase5-concurrent-delete-first"
+    );
+    try {
+      await waitForFileStatus(uploaded.file.id, "DELETING");
+      const secondDeletion = await deleteMobileFile(
+        app,
+        created.session.id,
+        uploaded.file.id,
+        exchange.cookieHeader,
+        exchange.context.csrfToken,
+        "phase5-concurrent-delete-second"
+      );
+      expect(secondDeletion.statusCode).toBe(202);
+    } finally {
+      releaseDeletes();
+    }
+
+    expect((await firstDeletion).statusCode).toBe(204);
+    expect(
+      (
+        await deleteMobileFile(
+          app,
+          created.session.id,
+          uploaded.file.id,
+          exchange.cookieHeader,
+          exchange.context.csrfToken,
+          "phase5-concurrent-delete-second"
+        )
+      ).statusCode
+    ).toBe(204);
+
+    const action = `files.delete:${created.session.id}:${uploaded.file.id}`;
+    await expect(
+      database.idempotencyRecord.findMany({
+        where: { action, resourceId: uploaded.file.id },
+        select: { responseStatus: true }
+      })
+    ).resolves.toEqual([{ responseStatus: 204 }, { responseStatus: 204 }]);
+    await expect(
+      database.outboxEvent.count({
+        where: { aggregateId: created.session.id, type: "file.deleted" }
+      })
+    ).resolves.toBe(1);
+    await expect(
+      database.auditEvent.count({
+        where: { sessionId: created.session.id, action: "file.delete_requested" }
+      })
+    ).resolves.toBe(2);
+  });
+
+  it("defers deletion of a validating file until in-flight artifact writes have settled", async () => {
+    const clock = new MutableClock(new Date("2030-01-01T00:00:00.000Z"));
+    const cleanupStore = new ControlledObjectStore();
+    const app = await buildApp({ environment, database, objectStore: cleanupStore, clock });
+    openApps.push(app);
+    const created = createSessionResponseSchema.parse(
+      (await createSession(app, "phase5-validating-delete-barrier")).json()
+    );
+    const exchange = await exchangeMobile(
+      app,
+      created.session.publicId,
+      requireUploadToken(created.upload.qrUrl),
+      "01900000-0000-7000-8000-000000000081"
+    );
+    const uploaded = uploadFileResponseSchema.parse(
+      (
+        await uploadMultipart(app, {
+          sessionId: created.session.id,
+          cookieHeader: exchange.cookieHeader,
+          csrfToken: exchange.context.csrfToken,
+          clientFileId: "01900000-0000-7000-8000-000000000082",
+          idempotencyKey: "phase5-validating-delete-upload",
+          filename: "validating.pdf",
+          mime: "application/pdf",
+          contents: Buffer.from("%PDF-1.4\n%%EOF\n", "utf8")
+        })
+      ).json()
+    );
+    const file = await database.uploadedFile.findUniqueOrThrow({
+      where: { id: uploaded.file.id }
+    });
+    if (!file.quarantineObjectKey) throw new Error("EXPECTED_QUARANTINE_KEY");
+
+    const derivativeId = "01900000-0000-7000-8000-000000000083";
+    const derivativeKey = `normalized/v1/${created.session.id}/${file.id}/r1/g1/` + "document.pdf";
+    await database.uploadedFile.update({
+      where: { id: file.id },
+      data: {
+        status: "VALIDATING",
+        processingGeneration: 1,
+        processingAttempts: 1,
+        processingClaimToken: "01900000-0000-7000-8000-000000000084",
+        processingLeaseExpiresAt: new Date(clock.current.getTime() + 180_000),
+        processingStartedAt: clock.current,
+        processingEnqueuedAt: null,
+        processingErrorCode: null,
+        malwareScanStatus: "PENDING",
+        updatedAt: clock.current
+      }
+    });
+    await database.fileDerivative.create({
+      data: {
+        id: derivativeId,
+        fileId: file.id,
+        processingRevision: 1,
+        type: "NORMALIZED_PDF",
+        status: "STAGING",
+        pageNumber: 0,
+        objectKey: derivativeKey,
+        mimeType: "application/pdf",
+        sizeBytes: 8,
+        sha256: "a".repeat(64)
+      }
+    });
+    await cleanupStore.putObject({
+      key: derivativeKey,
+      body: Readable.from(Buffer.from("%PDF-x\n", "ascii")),
+      contentType: "application/pdf"
+    });
+
+    const deferred = await deleteMobileFile(
+      app,
+      created.session.id,
+      file.id,
+      exchange.cookieHeader,
+      exchange.context.csrfToken,
+      "phase5-validating-delete"
+    );
+    expect(deferred.statusCode).toBe(202);
+    expect(
+      (
+        await deleteMobileFile(
+          app,
+          created.session.id,
+          file.id,
+          exchange.cookieHeader,
+          exchange.context.csrfToken,
+          "phase5-validating-delete"
+        )
+      ).statusCode
+    ).toBe(202);
+    const pending = await database.uploadedFile.findUniqueOrThrow({ where: { id: file.id } });
+    expect(pending).toMatchObject({
+      status: "DELETE_PENDING",
+      processingClaimToken: null,
+      processingLeaseExpiresAt: null,
+      quarantineObjectKey: file.quarantineObjectKey
+    });
+    expect(pending.cleanupDueAt?.getTime()).toBe(clock.current.getTime() + 35_000);
+
+    const errors: Array<{ error: unknown; operation: string }> = [];
+    const janitor = createFileJanitor(clock, cleanupStore, errors);
+    await janitor.runOnce();
+    expect(cleanupStore.hasObject(file.quarantineObjectKey)).toBe(true);
+    expect(cleanupStore.hasObject(derivativeKey)).toBe(true);
+
+    clock.current = new Date(clock.current.getTime() + 35_001);
+    await janitor.runOnce();
+    await expect(
+      database.uploadedFile.findUniqueOrThrow({ where: { id: file.id } })
+    ).resolves.toMatchObject({
+      status: "DELETED",
+      quarantineObjectKey: null,
+      contentSha256: null
+    });
+    expect(cleanupStore.hasObject(file.quarantineObjectKey)).toBe(false);
+    expect(cleanupStore.hasObject(derivativeKey)).toBe(false);
+    await expect(database.fileDerivative.count({ where: { fileId: file.id } })).resolves.toBe(0);
+    expect(
+      (
+        await deleteMobileFile(
+          app,
+          created.session.id,
+          file.id,
+          exchange.cookieHeader,
+          exchange.context.csrfToken,
+          "phase5-validating-delete"
+        )
+      ).statusCode
+    ).toBe(204);
     expect(errors).toEqual([]);
   });
 
@@ -883,7 +1146,7 @@ describe.sequential("authoritative print sessions", () => {
       database.uploadedFile.findFirstOrThrow({ where: { sessionId: created.session.id } })
     ).resolves.toMatchObject({
       status: "REJECTED",
-      rejectionCode: "FILE_SIGNATURE_MISMATCH",
+      rejectionCode: "UPLOAD_FAILED",
       quarantineObjectKey: null,
       contentSha256: null
     });
@@ -1358,6 +1621,8 @@ function createFileJanitor(
 class ControlledObjectStore implements ObjectStore {
   private readonly objects = new Set<string>();
   private remainingDeleteFailures = 0;
+  private deleteBarrier: Promise<void> | undefined;
+  private releaseDeleteBarrier: (() => void) | undefined;
 
   public async putObject(
     input: Parameters<ObjectStore["putObject"]>[0]
@@ -1371,11 +1636,19 @@ class ControlledObjectStore implements ObjectStore {
 
   public async deleteObject(input: Parameters<ObjectStore["deleteObject"]>[0]): Promise<void> {
     input.signal?.throwIfAborted();
+    await this.deleteBarrier;
+    input.signal?.throwIfAborted();
     if (this.remainingDeleteFailures > 0) {
       this.remainingDeleteFailures -= 1;
       throw new Error("SIMULATED_OBJECT_DELETE_FAILURE");
     }
     this.objects.delete(input.key);
+  }
+
+  public getObject(
+    _input: Parameters<ObjectStore["getObject"]>[0]
+  ): Promise<Awaited<ReturnType<ObjectStore["getObject"]>>> {
+    return Promise.reject(new Error("CONTROLLED_OBJECT_READ_NOT_IMPLEMENTED"));
   }
 
   public checkReady(signal?: AbortSignal): Promise<void> {
@@ -1387,9 +1660,34 @@ class ControlledObjectStore implements ObjectStore {
     this.remainingDeleteFailures = count;
   }
 
+  public pauseDeletes(): () => void {
+    if (this.deleteBarrier) throw new Error("DELETE_BARRIER_ALREADY_ACTIVE");
+    this.deleteBarrier = new Promise<void>((resolve) => {
+      this.releaseDeleteBarrier = resolve;
+    });
+
+    return () => {
+      this.releaseDeleteBarrier?.();
+      this.releaseDeleteBarrier = undefined;
+      this.deleteBarrier = undefined;
+    };
+  }
+
   public hasObject(key: string): boolean {
     return this.objects.has(key);
   }
+}
+
+async function waitForFileStatus(fileId: string, expectedStatus: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const file = await database.uploadedFile.findUnique({
+      where: { id: fileId },
+      select: { status: true }
+    });
+    if (file?.status === expectedStatus) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for file status ${expectedStatus}.`);
 }
 
 const silentRealtimeLogger = {

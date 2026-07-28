@@ -1,4 +1,10 @@
-import { DeleteObjectCommand, type S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  ListObjectVersionsCommand,
+  type S3Client
+} from "@aws-sdk/client-s3";
 import { PassThrough, Readable } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -187,6 +193,142 @@ describe("S3ObjectStore deletion deadlines", () => {
   });
 });
 
+describe("S3ObjectStore version-aware deletion", () => {
+  const key = "quarantine/v1/session/file/object";
+
+  it("preserves unversioned behavior while verifying that no retained versions exist", async () => {
+    const transport = scriptedDeletionClient([{}]);
+    const store = new S3ObjectStore({
+      bucket: "private-test-bucket",
+      client: transport.client
+    });
+
+    await expect(store.deleteObject({ key })).resolves.toBeUndefined();
+
+    expect(transport.calls).toHaveLength(2);
+    expect(transport.calls[0]).toBeInstanceOf(DeleteObjectCommand);
+    expect(transport.calls[1]).toBeInstanceOf(ListObjectVersionsCommand);
+    expect((transport.calls[1] as ListObjectVersionsCommand).input).toEqual({
+      Bucket: "private-test-bucket",
+      Prefix: key
+    });
+  });
+
+  it("removes every exact-key version and delete marker across paginated listings", async () => {
+    const transport = scriptedDeletionClient([
+      {
+        Versions: [
+          { Key: key, VersionId: "version-2" },
+          { Key: `${key}-neighbor`, VersionId: "neighbor-version" }
+        ],
+        IsTruncated: true,
+        NextKeyMarker: key,
+        NextVersionIdMarker: "version-1"
+      },
+      {
+        Versions: [{ Key: key, VersionId: "version-1" }],
+        DeleteMarkers: [{ Key: key, VersionId: "delete-marker-1" }]
+      },
+      {}
+    ]);
+    const store = new S3ObjectStore({
+      bucket: "private-test-bucket",
+      client: transport.client
+    });
+
+    await expect(store.deleteObject({ key })).resolves.toBeUndefined();
+
+    const listCommands = transport.calls.filter(
+      (command): command is ListObjectVersionsCommand =>
+        command instanceof ListObjectVersionsCommand
+    );
+    expect(listCommands).toHaveLength(3);
+    expect(listCommands[1]?.input).toEqual({
+      Bucket: "private-test-bucket",
+      Prefix: key,
+      KeyMarker: key,
+      VersionIdMarker: "version-1"
+    });
+    expect(listCommands[2]?.input).toEqual({
+      Bucket: "private-test-bucket",
+      Prefix: key
+    });
+
+    const batchDelete = transport.calls.find(
+      (command): command is DeleteObjectsCommand => command instanceof DeleteObjectsCommand
+    );
+    expect(batchDelete?.input).toEqual({
+      Bucket: "private-test-bucket",
+      Delete: {
+        Objects: [
+          { Key: key, VersionId: "version-2" },
+          { Key: key, VersionId: "version-1" },
+          { Key: key, VersionId: "delete-marker-1" }
+        ],
+        Quiet: true
+      }
+    });
+  });
+
+  it("fails closed when object storage reports that any version deletion failed", async () => {
+    const transport = scriptedDeletionClient(
+      [[{ Key: key, VersionId: "version-1" }], {}],
+      [{ Errors: [{ Code: "AccessDenied", Key: key, VersionId: "version-1" }] }]
+    );
+    const store = new S3ObjectStore({
+      bucket: "private-test-bucket",
+      client: transport.client
+    });
+
+    await expect(store.deleteObject({ key })).rejects.toThrow("OBJECT_VERSION_DELETE_FAILED");
+  });
+});
+
+describe("S3ObjectStore authenticated reads", () => {
+  it("returns a stream only with bounded authoritative metadata", async () => {
+    const body = Readable.from([Buffer.from("RIFF0000WEBP", "ascii")]);
+    const calls: unknown[] = [];
+    const client = {
+      send(command: unknown) {
+        calls.push(command);
+        return Promise.resolve({
+          Body: body,
+          ContentLength: 12,
+          ContentType: "image/webp",
+          ETag: "preview-etag"
+        });
+      }
+    } as unknown as S3Client;
+    const store = new S3ObjectStore({ bucket: "private-test-bucket", client });
+
+    await expect(store.getObject({ key: "previews/v1/session/file/page-1.webp" })).resolves.toEqual(
+      {
+        body,
+        contentLength: 12,
+        contentType: "image/webp",
+        etag: "preview-etag"
+      }
+    );
+    expect(calls[0]).toBeInstanceOf(GetObjectCommand);
+  });
+
+  it("fails closed when object storage omits content length", async () => {
+    const client = {
+      send() {
+        return Promise.resolve({
+          Body: Readable.from([Buffer.from("private")]),
+          ContentType: "image/webp"
+        });
+      }
+    } as unknown as S3Client;
+    const store = new S3ObjectStore({ bucket: "private-test-bucket", client });
+
+    await expect(store.getObject({ key: "previews/v1/session/file/page-1.webp" })).rejects.toThrow(
+      "OBJECT_LENGTH_INVALID"
+    );
+  });
+});
+
 function blockingS3Client(): {
   client: S3Client;
   calls: Array<{ command: unknown; signal: AbortSignal }>;
@@ -210,6 +352,42 @@ function blockingS3Client(): {
           { once: true }
         );
       });
+    }
+  };
+
+  return { client: client as unknown as S3Client, calls };
+}
+
+interface VersionListing {
+  Versions?: Array<{ Key?: string; VersionId?: string }>;
+  DeleteMarkers?: Array<{ Key?: string; VersionId?: string }>;
+  IsTruncated?: boolean;
+  NextKeyMarker?: string;
+  NextVersionIdMarker?: string;
+}
+
+function scriptedDeletionClient(
+  listings: Array<VersionListing | Array<{ Key?: string; VersionId?: string }>>,
+  deleteResponses: Array<{ Errors?: unknown[] }> = []
+): { client: S3Client; calls: unknown[] } {
+  const calls: unknown[] = [];
+  const pendingListings = listings.map((listing) =>
+    Array.isArray(listing) ? { Versions: listing } : listing
+  );
+  const pendingDeleteResponses = [...deleteResponses];
+  const client = {
+    send(command: unknown) {
+      calls.push(command);
+      if (command instanceof DeleteObjectCommand) return Promise.resolve({});
+      if (command instanceof ListObjectVersionsCommand) {
+        const response = pendingListings.shift();
+        if (!response) return Promise.reject(new Error("UNEXPECTED_VERSION_LIST"));
+        return Promise.resolve(response);
+      }
+      if (command instanceof DeleteObjectsCommand) {
+        return Promise.resolve(pendingDeleteResponses.shift() ?? {});
+      }
+      return Promise.reject(new Error("UNEXPECTED_S3_COMMAND"));
     }
   };
 

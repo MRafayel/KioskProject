@@ -23,18 +23,22 @@ afterEach(async () => {
 });
 
 describe("mobile session event stream", () => {
-  it("authenticates the HttpOnly-cookie scope and emits only the terminal event", async () => {
+  it("emits authorized file changes and closes only after a terminal event", async () => {
     const authenticate = vi.fn().mockResolvedValue({
       clientId: "01900000-0000-7000-8000-000000000093",
       sessionId,
       expiresAt: new Date(Date.now() + 60_000)
     });
     const unsubscribe = vi.fn();
+    const fileEvent = deletedEvent();
     const terminalEvent = canceledEvent();
     const sessionEvents: SessionEventSource = {
       subscribe: (subscribedSessionId, listener) => {
         expect(subscribedSessionId).toBe(sessionId);
-        queueMicrotask(() => listener(terminalEvent));
+        queueMicrotask(() => {
+          listener(fileEvent);
+          listener(terminalEvent);
+        });
         return unsubscribe;
       }
     };
@@ -62,6 +66,8 @@ describe("mobile session event stream", () => {
     expect(response.headers["content-type"]).toContain("text/event-stream");
     expect(response.headers["cache-control"]).toContain("no-store");
     expect(authenticate).toHaveBeenCalledWith(mobileCookie, sessionId);
+    expect(response.body).toContain(`id: ${fileEvent.sequence}`);
+    expect(response.body).toContain(`"type":"file.deleted"`);
     expect(response.body).toContain(`id: ${terminalEvent.sequence}`);
     expect(response.body).toContain(`"type":"session.canceled"`);
     expect(response.body).not.toContain(mobileCookie);
@@ -156,5 +162,19 @@ function canceledEvent(): SessionEvent {
     type: "session.canceled",
     payload: { sessionId, state: "CANCELED", version: 2 },
     occurredAt: "2030-01-01T00:00:03.000Z"
+  };
+}
+
+function deletedEvent(): SessionEvent {
+  return {
+    id: "01900000-0000-7000-8000-000000000095",
+    sessionId,
+    sequence: 2,
+    type: "file.deleted",
+    payload: {
+      sessionId,
+      fileId: "01900000-0000-7000-8000-000000000096"
+    },
+    occurredAt: "2030-01-01T00:00:02.000Z"
   };
 }

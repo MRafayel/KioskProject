@@ -116,7 +116,7 @@ test("keeps the QR bearer private through a responsive upload, delete, and refre
     "Файл передан и уже отображается на терминале печати"
   );
   await expect(page.getByText("Документ 1", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Принят · проверяется/)).toBeVisible();
+  await expect(page.getByText(/Принят · ожидает безопасной проверки/)).toBeVisible();
 
   await page.getByRole("button", { name: "Удалить" }).click();
   await expect(page.getByText("Вы пока не передали ни одного файла.")).toBeVisible();
@@ -332,6 +332,9 @@ function fileSnapshot() {
     ordinal: 0,
     status: "QUARANTINED",
     kind: "PDF",
+    pageCount: null,
+    processingRevision: 1,
+    rejectionCode: null,
     sizeBytes: syntheticPdf.byteLength,
     createdAt: "2030-01-01T00:00:00.000Z"
   };

@@ -1,0 +1,17 @@
+*
+
+!.npmrc
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!services/
+services/*
+!services/document-processor/
+!services/document-processor/**
+
+**/node_modules
+**/.turbo
+**/dist
+**/coverage
+**/*.log

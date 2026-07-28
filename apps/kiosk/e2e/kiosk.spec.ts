@@ -19,6 +19,9 @@ test.beforeEach(async ({ page }) => {
               ordinal: 0,
               status: "QUARANTINED",
               kind: "PDF",
+              pageCount: null,
+              processingRevision: 1,
+              rejectionCode: null,
               sizeBytes: 2_400_000,
               createdAt: "2030-01-01T00:00:00.000Z"
             }
@@ -66,12 +69,71 @@ test("receives the phone upload while keeping unvalidated settings locked", asyn
 
   await expect(page.getByText("Document 1.pdf")).toBeVisible();
   await expect(page.getByText("4829 1357")).toHaveCount(0);
-  await expect(page.getByText("Received — checking file safety").first()).toBeVisible();
+  await expect(page.getByText("Received — waiting for a secure check").first()).toBeVisible();
   await expect(page.getByText(/8 pages/i)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
   await expect(page.getByRole("button", { name: /simulate phone upload/i })).toHaveCount(0);
   await expect(page.locator(".session-footer")).toBeInViewport();
   await expectNoHorizontalOverflow(page);
+});
+
+test("shows an image file kind in the ready document settings card", async ({ page }) => {
+  const fileId = "01900000-0000-7000-8000-000000000021";
+  await page.route("**/agent/v1/sessions/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith("/files")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              id: fileId,
+              ordinal: 0,
+              status: "READY",
+              kind: "JPEG",
+              pageCount: 1,
+              processingRevision: 1,
+              rejectionCode: null,
+              sizeBytes: 2_400_000,
+              createdAt: "2030-01-01T00:00:00.000Z"
+            }
+          ]
+        })
+      });
+      return;
+    }
+    if (pathname.endsWith(`/${fileId}/pages`)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          fileId,
+          processingRevision: 1,
+          pageCount: 1,
+          items: [
+            {
+              pageNumber: 1,
+              widthPixels: 850,
+              heightPixels: 1200,
+              previewAvailable: false
+            }
+          ]
+        })
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await switchToEnglish(page);
+  await page.getByRole("button", { name: "Start printing" }).click();
+  await expect(page.getByRole("button", { name: /Continue to print settings/i })).toBeEnabled();
+  await page.getByRole("button", { name: /Continue to print settings/i }).click();
+
+  await expect(page.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
+  await expect(page.locator(".file-card--compact .file-card__icon")).toHaveText("JPEG");
 });
 
 test("offers a safe cancel path while an uploaded file is quarantined", async ({ page }) => {
@@ -186,7 +248,7 @@ test("keeps Russian and Armenian meaningful across the active session", async ({
   await expect(page.getByRole("heading", { name: "Վերբեռնեք փաստաթուղթը" })).toBeVisible();
   await expect(page.getByText("Փաստաթուղթ 1.pdf")).toBeVisible();
   await expect(
-    page.getByText("Ֆայլը ստացվել է․ անվտանգության ստուգում է կատարվում").first()
+    page.getByText("Ֆայլը ստացվել է և սպասում է անվտանգ ստուգման").first()
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Անցնել տպման կարգավորումներին" })).toBeDisabled();
 });

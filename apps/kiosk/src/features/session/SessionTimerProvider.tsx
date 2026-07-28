@@ -8,8 +8,8 @@ import {
   useRef,
   useState
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
 
+import { useKioskLocation, useKioskNavigate } from "../../app/router.js";
 import { useLanguage } from "../i18n/LanguageProvider.js";
 import { usePrototypeSession } from "./PrototypeSessionProvider.js";
 import { closeKioskSession } from "./sessionService.js";
@@ -29,8 +29,8 @@ const SessionTimerContext = createContext<SessionTimerContextValue | null>(null)
 export function SessionTimerProvider({ children }: { children: ReactNode }) {
   const { messages, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
-  const location = useLocation();
-  const navigate = useNavigate();
+  const location = useKioskLocation();
+  const navigate = useKioskNavigate();
   const deadlineRef = useRef(0);
   const closureStatusRef = useRef<ClosureStatus>("idle");
   const [remainingSeconds, setRemainingSeconds] = useState(SESSION_DURATION_SECONDS);
@@ -101,7 +101,9 @@ export function SessionTimerProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    const activityEvents = ["pointerdown", "keydown", "kiosk-activity"] as const;
+    // Only direct customer input extends the deadline. Route changes reset it
+    // through this effect, while polling, validation, and realtime events do not.
+    const activityEvents = ["pointerdown", "keydown"] as const;
     activityEvents.forEach((eventName) => window.addEventListener(eventName, recordActivity));
     const timer = window.setInterval(tick, 250);
 

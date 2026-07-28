@@ -1,0 +1,26 @@
+{
+  "name": "@printing-kiosk/document-processor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pdfkit": "0.19.1",
+    "sharp": "0.35.3",
+    "tar-stream": "3.2.0"
+  },
+  "scripts": {
+    "bench": "tsx bench/run.ts",
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "lint": "eslint src",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src"
+  },
+  "devDependencies": {
+    "@types/pdfkit": "0.17.6",
+    "@types/tar-stream": "3.1.4",
+    "tsx": "4.23.0",
+    "typescript": "6.0.3"
+  }
+}

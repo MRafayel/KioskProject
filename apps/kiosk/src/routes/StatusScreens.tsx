@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Navigate, useNavigate, useParams } from "react-router-dom";
 
+import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
@@ -16,7 +16,7 @@ const PROTOTYPE_STEP_DELAY_MS = 1_200;
 export function PaymentScreen() {
   const { messages } = useLanguage();
   const { state } = usePrototypeSession();
-  const navigate = useNavigate();
+  const navigate = useKioskNavigate();
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -27,7 +27,7 @@ export function PaymentScreen() {
     return () => window.clearTimeout(timer);
   }, [navigate, state.outcome]);
 
-  if (!isReadyFile(state.files[0])) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
 
   return (
     <TerminalProgress
@@ -42,7 +42,7 @@ export function PaymentScreen() {
 export function PrintingScreen() {
   const { messages } = useLanguage();
   const { state } = usePrototypeSession();
-  const navigate = useNavigate();
+  const navigate = useKioskNavigate();
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -53,7 +53,7 @@ export function PrintingScreen() {
     return () => window.clearTimeout(timer);
   }, [navigate, state.outcome]);
 
-  if (!isReadyFile(state.files[0])) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
 
   return (
     <TerminalProgress
@@ -66,14 +66,13 @@ export function PrintingScreen() {
   );
 }
 
-export function FailureScreen() {
+export function FailureScreen({ failureType }: { failureType: "payment" | "printer" }) {
   const { messages } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
-  const navigate = useNavigate();
-  const { failureType } = useParams();
+  const navigate = useKioskNavigate();
   const paymentFailure = failureType === "payment";
 
-  if (!isReadyFile(state.files[0])) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
 
   return (
     <div className="terminal-state terminal-state--error">
@@ -121,11 +120,11 @@ export function FailureScreen() {
 export function CompleteScreen() {
   const { messages, numberLocale, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
-  const navigate = useNavigate();
+  const navigate = useKioskNavigate();
   const [cleanupStatus, setCleanupStatus] = useState<"idle" | "closing" | "failed">("idle");
 
   const file = state.files[0];
-  if (!isReadyFile(file)) return <Navigate to="/" replace />;
+  if (!isReadyFile(file)) return <KioskRedirect to="/" />;
 
   const summary = calculatePrintSummary(state.files, state.settings);
 

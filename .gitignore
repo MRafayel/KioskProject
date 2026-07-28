@@ -49,6 +49,7 @@ Thumbs.db
 *.log
 logs/
 tmp/
+.tmp/
 temp/
 *.tmp
 

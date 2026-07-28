@@ -16,10 +16,11 @@
   "scripts": {
     "build": "pnpm generate && tsc -p tsconfig.json",
     "generate": "prisma generate",
-    "lint": "eslint src prisma.config.ts",
+    "lint": "eslint src scripts prisma.config.ts",
     "migrate": "prisma migrate deploy",
     "migrate:dev": "prisma migrate dev",
     "seed": "tsx prisma/seed.ts",
+    "verify:phase5-upgrade": "node scripts/verify-phase5-upgrade.mjs",
     "typecheck": "pnpm generate && tsc -p tsconfig.json --noEmit",
     "test": "vitest run src --passWithNoTests"
   },

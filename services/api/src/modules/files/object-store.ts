@@ -1,4 +1,13 @@
-import { DeleteObjectCommand, HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  ListObjectVersionsCommand,
+  S3Client,
+  type DeleteMarkerEntry,
+  type ObjectVersion
+} from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import type { Readable } from "node:stream";
 
@@ -6,6 +15,8 @@ import type { Environment } from "@printing-kiosk/config";
 
 const MULTIPART_PART_SIZE_BYTES = 5 * 1024 * 1024;
 const OBJECT_OPERATION_TIMEOUT_MS = 10_000;
+const MAX_VERSION_DELETE_PASSES = 3;
+const MAX_VERSION_DELETE_BATCH_SIZE = 1_000;
 
 export interface PutObjectInput {
   key: string;
@@ -23,8 +34,21 @@ export interface DeleteObjectInput {
   signal?: AbortSignal;
 }
 
+export interface GetObjectInput {
+  key: string;
+  signal?: AbortSignal;
+}
+
+export interface GetObjectResult {
+  body: Readable;
+  contentLength: number;
+  contentType?: string;
+  etag?: string;
+}
+
 export interface ObjectStore {
   putObject(input: PutObjectInput): Promise<PutObjectResult>;
+  getObject(input: GetObjectInput): Promise<GetObjectResult>;
   deleteObject(input: DeleteObjectInput): Promise<void>;
   checkReady(signal?: AbortSignal): Promise<void>;
 }
@@ -88,6 +112,9 @@ export class S3ObjectStore implements ObjectStore {
   public async deleteObject(input: DeleteObjectInput): Promise<void> {
     const signal = withDeadline(input.signal);
     signal.throwIfAborted();
+
+    // Delete the current object first. This removes an unversioned object and,
+    // for a versioned bucket, creates a delete marker that is removed below.
     await this.client.send(
       new DeleteObjectCommand({
         Bucket: this.bucket,
@@ -95,6 +122,67 @@ export class S3ObjectStore implements ObjectStore {
       }),
       { abortSignal: signal }
     );
+
+    let deletePasses = 0;
+    while (true) {
+      signal.throwIfAborted();
+      const versions = await listExactObjectVersions(this.client, this.bucket, input.key, signal);
+      if (versions.length === 0) return;
+      if (deletePasses >= MAX_VERSION_DELETE_PASSES) {
+        throw new Error("OBJECT_VERSION_DELETE_RECONCILIATION_EXHAUSTED");
+      }
+
+      for (let index = 0; index < versions.length; index += MAX_VERSION_DELETE_BATCH_SIZE) {
+        signal.throwIfAborted();
+        const batch = versions.slice(index, index + MAX_VERSION_DELETE_BATCH_SIZE);
+        const response = await this.client.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: {
+              Objects: batch.map((versionId) => ({
+                Key: input.key,
+                VersionId: versionId
+              })),
+              Quiet: true
+            }
+          }),
+          { abortSignal: signal }
+        );
+        if (response.Errors && response.Errors.length > 0) {
+          throw new Error("OBJECT_VERSION_DELETE_FAILED");
+        }
+      }
+      deletePasses += 1;
+    }
+  }
+
+  public async getObject(input: GetObjectInput): Promise<GetObjectResult> {
+    const signal = withDeadline(input.signal);
+    signal.throwIfAborted();
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: input.key
+      }),
+      { abortSignal: signal }
+    );
+    if (!response.Body || typeof response.Body !== "object" || !("pipe" in response.Body)) {
+      throw new Error("OBJECT_BODY_UNAVAILABLE");
+    }
+    if (
+      response.ContentLength === undefined ||
+      !Number.isSafeInteger(response.ContentLength) ||
+      response.ContentLength < 0
+    ) {
+      throw new Error("OBJECT_LENGTH_INVALID");
+    }
+
+    return {
+      body: response.Body,
+      contentLength: response.ContentLength,
+      ...(response.ContentType ? { contentType: response.ContentType } : {}),
+      ...(response.ETag ? { etag: response.ETag } : {})
+    };
   }
 
   public async checkReady(signal?: AbortSignal): Promise<void> {
@@ -146,4 +234,59 @@ function withDeadline(signal?: AbortSignal): AbortSignal {
 
 function asError(reason: unknown, fallback: string): Error {
   return reason instanceof Error ? reason : new Error(fallback);
+}
+
+async function listExactObjectVersions(
+  client: S3Client,
+  bucket: string,
+  key: string,
+  signal: AbortSignal
+): Promise<string[]> {
+  const versionIds = new Set<string>();
+  const seenCursors = new Set<string>();
+  let keyMarker: string | undefined;
+  let versionIdMarker: string | undefined;
+
+  while (true) {
+    signal.throwIfAborted();
+    const response = await client.send(
+      new ListObjectVersionsCommand({
+        Bucket: bucket,
+        Prefix: key,
+        ...(keyMarker ? { KeyMarker: keyMarker } : {}),
+        ...(versionIdMarker ? { VersionIdMarker: versionIdMarker } : {})
+      }),
+      { abortSignal: signal }
+    );
+
+    collectExactVersionIds(response.Versions, key, versionIds);
+    collectExactVersionIds(response.DeleteMarkers, key, versionIds);
+
+    if (!response.IsTruncated) return [...versionIds];
+
+    if (!response.NextKeyMarker) {
+      throw new Error("OBJECT_VERSION_LIST_PAGINATION_INVALID");
+    }
+    const nextCursor = `${response.NextKeyMarker}\0${response.NextVersionIdMarker ?? ""}`;
+    if (seenCursors.has(nextCursor)) {
+      throw new Error("OBJECT_VERSION_LIST_PAGINATION_INVALID");
+    }
+    seenCursors.add(nextCursor);
+    keyMarker = response.NextKeyMarker;
+    versionIdMarker = response.NextVersionIdMarker;
+  }
+}
+
+function collectExactVersionIds(
+  entries: Array<ObjectVersion | DeleteMarkerEntry> | undefined,
+  key: string,
+  versionIds: Set<string>
+): void {
+  for (const entry of entries ?? []) {
+    if (entry.Key !== key) continue;
+    if (!entry.VersionId) {
+      throw new Error("OBJECT_VERSION_ID_INVALID");
+    }
+    versionIds.add(entry.VersionId);
+  }
 }

@@ -86,12 +86,12 @@ await database.kioskCredential.upsert({
     kioskId: developmentKioskId,
     credentialId: "development-kiosk-credential",
     secretDigest: credentialDigest,
-    scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read"]
+    scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read", "files:delete"]
   },
   update: {
     kioskId: developmentKioskId,
     secretDigest: credentialDigest,
-    scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read"],
+    scopes: ["sessions:create", "sessions:read", "sessions:cancel", "files:read", "files:delete"],
     revokedAt: null,
     expiresAt: null
   }

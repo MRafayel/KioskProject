@@ -4,19 +4,20 @@ Privacy-first, self-service monochrome printing kiosk platform.
 
 ## Current status
 
-Phases 0–4 are complete. The repository now contains the first secure vertical
-slice: the kiosk creates an authoritative session and QR link, one phone claims
-that link, PDF/JPEG/PNG bytes stream into a private quarantine bucket, and the
-kiosk receives authenticated, sequenced updates through its loopback agent.
-PostgreSQL replay and snapshot recovery restore the correct screen after a
-disconnect. The phone can list and delete its file without exposing the kiosk
-credential or storing a raw QR token. Kiosk cancellation is pushed to the
-claimed phone through an authenticated SSE stream, while the API remains the
-authority for every upload transition.
+Phases 0–5 are implemented to the pilot/prototype acceptance boundary. The
+repository contains the first secure document workflow: the kiosk creates an
+authoritative session and QR link, one phone claims that link, and PDF/JPEG/PNG
+bytes stream into private quarantine storage. An isolated processor performs
+malware scanning, bounded document validation, one-page-at-a-time normalization
+into a monochrome A4 PDF, and private WebP preview generation. Only a fully
+verified document becomes `READY`.
 
-Phase 3 intentionally stops at `QUARANTINED`. Deep document inspection, page
-counting, previews, and the transition to printable `READY` belong to Phase 5,
-so a real upload does not unlock print settings yet.
+The kiosk receives authenticated, sequenced updates through its loopback
+agent. PostgreSQL replay and snapshot recovery restore the correct screen after
+a disconnect. The phone can list and delete its file without exposing the
+kiosk credential or storing a raw QR token. Kiosk cancellation is pushed to
+the claimed phone through an authenticated SSE stream, while PostgreSQL
+remains authoritative for upload, processing, and cleanup transitions.
 
 The product is intentionally print-only and monochrome. Document scanning,
 photocopying/xerox, and color printing are outside scope.
@@ -36,6 +37,8 @@ Read these documents before implementation:
   and the exact real-phone HTTPS setup.
 - docs/PHASE_4_STATUS.md — transactional outbox, authenticated realtime relay,
   replay recovery, migration, and verification evidence.
+- docs/PHASE_5_STATUS.md — isolated document processing, private previews,
+  cleanup guarantees, migration, and verification evidence.
 - SECURITY.md — handling rules for secrets and private customer documents.
 
 ## Development commands
@@ -66,16 +69,19 @@ pnpm typecheck
 pnpm test
 pnpm test:e2e
 pnpm infra:up
+pnpm db:verify-phase5-upgrade
 pnpm db:migrate
 pnpm db:seed
 pnpm dev
 ```
 
-## Start the Phase 4 browser journey
+## Start the current browser journey
 
-Phase 4 uses PostgreSQL, Redis, private MinIO, the API on port `3000`, the local
-kiosk agent on port `3100`, the kiosk on port `5173`, and the mobile upload page
-on port `5174`. The worker is included in `pnpm dev:kiosk`.
+The workflow uses PostgreSQL, Redis, private MinIO, the ClamAV scanner, the
+isolated document processor behind loopback port `3200`, the API on port
+`3000`, the local kiosk agent on port `3100`, the kiosk on port `5173`, and the
+mobile upload page on port `5174`. The worker is included in
+`pnpm dev:kiosk`.
 
 From the repository root, run:
 
@@ -98,3 +104,7 @@ URL as a temporary bearer secret and close the Network panel afterward.
 Do not use `pnpm --filter @printing-kiosk/kiosk dev` for the complete journey;
 that command starts only Vite. If the agent is missing, Vite reports
 `ECONNREFUSED 127.0.0.1:3100` when the customer presses Start.
+
+Do not leave `pnpm dev:kiosk` running while executing integration tests. The
+test suite starts its own dispatcher and worker and deliberately refuses
+non-loopback infrastructure.

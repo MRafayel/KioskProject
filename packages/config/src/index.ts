@@ -4,6 +4,14 @@ import { dirname, join, resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 
+const MEBIBYTE = 1024 * 1024;
+const MAXIMUM_IMAGE_PIXELS = 200_000_000;
+const PROCESSOR_RUNTIME_HEADROOM_BYTES = 1024 * MEBIBYTE;
+// Disk working set for one 32 MiB canonical page, one bounded Poppler raster,
+// filesystem metadata, and temporary encoder output. Canonical pages are
+// deleted before the next page is decoded.
+const PROCESSOR_TRANSIENT_SCRATCH_BYTES = 96 * MEBIBYTE;
+
 const stringBooleanSchema = z
   .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
   .transform((value) => value === true || value === "true" || value === "1");
@@ -23,6 +31,7 @@ const environmentSchema = z
     DATABASE_URL: z
       .string()
       .min(1)
+      .refine(isPostgresUrl, "DATABASE_URL must be a valid PostgreSQL URL")
       .default("postgresql://printing_kiosk:development-only@localhost:5432/printing_kiosk"),
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
     OBJECT_STORAGE_DRIVER: z.literal("s3").default("s3"),
@@ -31,6 +40,8 @@ const environmentSchema = z
     S3_BUCKET: z.string().min(3).default("printing-kiosk-private"),
     S3_ACCESS_KEY_ID: z.string().min(3).default("printing-kiosk-api"),
     S3_SECRET_ACCESS_KEY: z.string().min(16).default("development-api-secret-change-me"),
+    S3_WORKER_ACCESS_KEY_ID: z.string().min(3).default("printing-kiosk-worker"),
+    S3_WORKER_SECRET_ACCESS_KEY: z.string().min(16).default("development-worker-secret-change-me"),
     S3_FORCE_PATH_STYLE: stringBooleanSchema.default(true),
     S3_SERVER_SIDE_ENCRYPTION: z.enum(["AES256", "aws:kms"]).optional(),
     S3_KMS_KEY_ID: z.string().min(1).optional(),
@@ -52,6 +63,57 @@ const environmentSchema = z
       .default(52_428_800),
     MAX_FILES_PER_SESSION: z.coerce.number().int().min(1).max(10).default(1),
     UPLOAD_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(300).default(120),
+    MAX_DOCUMENT_PAGES: z.coerce.number().int().min(1).max(1_000).default(200),
+    MAX_IMAGE_DIMENSION_PIXELS: z.coerce.number().int().min(1_000).max(100_000).default(20_000),
+    MAX_IMAGE_PIXELS: z.coerce
+      .number()
+      .int()
+      .min(1_000_000)
+      .max(MAXIMUM_IMAGE_PIXELS)
+      .default(40_000_000),
+    MAX_NORMALIZED_FILE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1_024)
+      .max(524_288_000)
+      .default(104_857_600),
+    MAX_PREVIEW_FILE_BYTES: z.coerce.number().int().min(1_024).max(20_971_520).default(2_097_152),
+    PREVIEW_MAX_WIDTH_PIXELS: z.coerce.number().int().min(320).max(10_000).default(1_600),
+    PREVIEW_MAX_HEIGHT_PIXELS: z.coerce.number().int().min(320).max(10_000).default(2_200),
+    DOCUMENT_PROCESSOR_ADAPTER: z.literal("container").default("container"),
+    DOCUMENT_PROCESSOR_IMAGE: z.string().min(1).optional(),
+    DOCUMENT_PROCESSOR_URL: z.string().url().default("http://127.0.0.1:3200"),
+    DOCUMENT_PROCESSOR_AUTH_TOKEN: z
+      .string()
+      .min(32)
+      .default("development-processor-auth-token-change-me"),
+    DOCUMENT_PROCESSOR_RESPONSE_MAX_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1_024)
+      .max(536_870_912)
+      .default(536_870_912),
+    DOCUMENT_PROCESSOR_SCRATCH_DIR: z.string().min(1).default(".tmp/document-worker"),
+    MALWARE_SCANNER_ADAPTER: z.literal("clamav").default("clamav"),
+    CLAMAV_UPDATE_CHECKS_PER_DAY: z.coerce.number().int().min(1).max(50).default(12),
+    CLAMAV_HOST: z.string().min(1).default("127.0.0.1"),
+    CLAMAV_PORT: z.coerce.number().int().min(1).max(65_535).default(3310),
+    // The current processor is intentionally single-flight. Raising worker
+    // concurrency before horizontal processor routing exists only converts
+    // valid work into PROCESSOR_BUSY retries.
+    DOCUMENT_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(1).default(1),
+    DOCUMENT_PROCESSOR_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+    DOCUMENT_PROCESSOR_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(600).default(120),
+    DOCUMENT_PROCESSOR_LEASE_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
+    DOCUMENT_PROCESSOR_MEMORY_MIB: z.coerce.number().int().min(128).max(4_096).default(3_072),
+    DOCUMENT_PROCESSOR_CPU_MILLIS: z.coerce.number().int().min(100).max(8_000).default(1_000),
+    DOCUMENT_PROCESSOR_PIDS_LIMIT: z.coerce.number().int().min(8).max(512).default(64),
+    DOCUMENT_PROCESSOR_SCRATCH_BYTES: z.coerce
+      .number()
+      .int()
+      .min(16_777_216)
+      .max(2_147_483_648)
+      .default(2_147_483_648),
     PRINTER_ADAPTER: z.literal("mock").default("mock"),
     PAYMENT_PROVIDER: z.literal("mock").default("mock")
   })
@@ -80,6 +142,68 @@ const environmentSchema = z
       });
     }
 
+    if (
+      environment.DOCUMENT_PROCESSOR_LEASE_SECONDS <= environment.DOCUMENT_PROCESSOR_TIMEOUT_SECONDS
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["DOCUMENT_PROCESSOR_LEASE_SECONDS"],
+        message: "DOCUMENT_PROCESSOR_LEASE_SECONDS must exceed DOCUMENT_PROCESSOR_TIMEOUT_SECONDS"
+      });
+    }
+
+    if (
+      environment.PREVIEW_MAX_WIDTH_PIXELS > environment.MAX_IMAGE_DIMENSION_PIXELS ||
+      environment.PREVIEW_MAX_HEIGHT_PIXELS > environment.MAX_IMAGE_DIMENSION_PIXELS
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["PREVIEW_MAX_WIDTH_PIXELS"],
+        message: "Preview dimensions must not exceed MAX_IMAGE_DIMENSION_PIXELS"
+      });
+    }
+
+    const maximumDerivativeArchiveBytes =
+      environment.MAX_NORMALIZED_FILE_BYTES +
+      environment.MAX_DOCUMENT_PAGES * environment.MAX_PREVIEW_FILE_BYTES +
+      1_048_576;
+    if (environment.DOCUMENT_PROCESSOR_RESPONSE_MAX_BYTES < maximumDerivativeArchiveBytes) {
+      context.addIssue({
+        code: "custom",
+        path: ["DOCUMENT_PROCESSOR_RESPONSE_MAX_BYTES"],
+        message:
+          "DOCUMENT_PROCESSOR_RESPONSE_MAX_BYTES must cover normalized output, every preview and archive overhead"
+      });
+    }
+
+    const minimumProcessorScratchBytes =
+      environment.DOCUMENT_PROCESSOR_RESPONSE_MAX_BYTES +
+      environment.MAX_NORMALIZED_FILE_BYTES +
+      environment.MAX_FILE_BYTES +
+      environment.MAX_DOCUMENT_PAGES * environment.MAX_PREVIEW_FILE_BYTES +
+      PROCESSOR_TRANSIENT_SCRATCH_BYTES;
+    if (environment.DOCUMENT_PROCESSOR_SCRATCH_BYTES < minimumProcessorScratchBytes) {
+      context.addIssue({
+        code: "custom",
+        path: ["DOCUMENT_PROCESSOR_SCRATCH_BYTES"],
+        message:
+          "DOCUMENT_PROCESSOR_SCRATCH_BYTES must cover source, retained previews, normalized output, response archive and one-page processing workspace"
+      });
+    }
+
+    const processorMemoryBytes = environment.DOCUMENT_PROCESSOR_MEMORY_MIB * MEBIBYTE;
+    if (
+      processorMemoryBytes <
+      environment.DOCUMENT_PROCESSOR_SCRATCH_BYTES + PROCESSOR_RUNTIME_HEADROOM_BYTES
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["DOCUMENT_PROCESSOR_MEMORY_MIB"],
+        message:
+          "DOCUMENT_PROCESSOR_MEMORY_MIB must cover tmpfs scratch plus 1024 MiB runtime headroom"
+      });
+    }
+
     if (environment.S3_KMS_KEY_ID && environment.S3_SERVER_SIDE_ENCRYPTION !== "aws:kms") {
       context.addIssue({
         code: "custom",
@@ -105,6 +229,8 @@ const environmentSchema = z
       ["UPLOAD_TOKEN_PEPPER", environment.UPLOAD_TOKEN_PEPPER],
       ["MOBILE_TOKEN_PEPPER", environment.MOBILE_TOKEN_PEPPER],
       ["S3_SECRET_ACCESS_KEY", environment.S3_SECRET_ACCESS_KEY],
+      ["S3_WORKER_SECRET_ACCESS_KEY", environment.S3_WORKER_SECRET_ACCESS_KEY],
+      ["DOCUMENT_PROCESSOR_AUTH_TOKEN", environment.DOCUMENT_PROCESSOR_AUTH_TOKEN],
       ["DEV_KIOSK_API_KEY", environment.DEV_KIOSK_API_KEY]
     ] as const;
 
@@ -132,6 +258,40 @@ const environmentSchema = z
         code: "custom",
         path: ["COOKIE_SIGNING_KEY"],
         message: "Cookie and token keys must be independent in production"
+      });
+    }
+
+    if (
+      environment.S3_ACCESS_KEY_ID === environment.S3_WORKER_ACCESS_KEY_ID ||
+      environment.S3_SECRET_ACCESS_KEY === environment.S3_WORKER_SECRET_ACCESS_KEY
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["S3_WORKER_ACCESS_KEY_ID"],
+        message: "API and processor worker object-storage credentials must be independent"
+      });
+    }
+
+    if (
+      !environment.DOCUMENT_PROCESSOR_IMAGE ||
+      !/@sha256:[0-9a-f]{64}$/u.test(environment.DOCUMENT_PROCESSOR_IMAGE)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["DOCUMENT_PROCESSOR_IMAGE"],
+        message: "Production document processor image must be pinned by sha256 digest"
+      });
+    }
+
+    const processorUrl = new URL(environment.DOCUMENT_PROCESSOR_URL);
+    if (
+      processorUrl.protocol !== "https:" &&
+      !(processorUrl.protocol === "http:" && isLoopbackHostname(processorUrl.hostname))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["DOCUMENT_PROCESSOR_URL"],
+        message: "DOCUMENT_PROCESSOR_URL must use HTTPS in production unless it is loopback-only"
       });
     }
 
@@ -187,7 +347,28 @@ const environmentSchema = z
         message: "REDIS_URL must use TLS in production unless it is loopback-only"
       });
     }
+
+    const databaseUrl = new URL(environment.DATABASE_URL);
+    if (
+      !isLoopbackHostname(databaseUrl.hostname) &&
+      databaseUrl.searchParams.get("sslmode") !== "verify-full"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["DATABASE_URL"],
+        message:
+          "Remote production DATABASE_URL must use sslmode=verify-full for certificate and hostname verification"
+      });
+    }
   });
+
+function isPostgresUrl(value: string): boolean {
+  try {
+    return ["postgres:", "postgresql:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
 
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";

@@ -3,6 +3,9 @@ import { sessionEventSchema, type SessionEvent } from "@printing-kiosk/contracts
 export interface MobileSessionEventHandlers {
   onConnected(): void;
   onDisconnected(): void;
+  onFilesChanged(
+    event: Extract<SessionEvent, { type: "file.ready" | "file.rejected" | "file.deleted" }>
+  ): void;
   onTerminal(event: Extract<SessionEvent, { type: "session.canceled" | "session.expired" }>): void;
   onDesynchronized(): void;
 }
@@ -37,6 +40,16 @@ export function subscribeToMobileSessionEvents(
     const parsed = sessionEventSchema.safeParse(input);
     if (!parsed.success || parsed.data.sessionId !== sessionId) {
       handlers.onDesynchronized();
+      return;
+    }
+    if (
+      parsed.data.type === "file.ready" ||
+      parsed.data.type === "file.rejected" ||
+      parsed.data.type === "file.deleted"
+    ) {
+      // Durable events are wakeups only. The phone never trusts event payloads
+      // as current file state; it refreshes the authorized session snapshot.
+      handlers.onFilesChanged(parsed.data);
       return;
     }
     if (parsed.data.type === "session.canceled" || parsed.data.type === "session.expired") {

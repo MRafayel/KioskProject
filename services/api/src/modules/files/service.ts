@@ -2,6 +2,7 @@ import type { Readable } from "node:stream";
 
 import {
   listUploadedFilesResponseSchema,
+  uploadedFileRejectionCodeSchema,
   uploadFileResponseSchema,
   type ListUploadedFilesResponse,
   type SessionState,
@@ -18,10 +19,18 @@ import type { MobileIdentity } from "../mobile-access/service.js";
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { digestIdempotencyKey, hashRequest } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
+import { processingArtifactCleanupDueAt } from "./cleanup-policy.js";
 import type { ObjectStore } from "./object-store.js";
 import { UploadInspectionTransform, UploadSizeLimitError } from "./upload-inspection.js";
 
-const ACTIVE_FILE_STATUSES = ["UPLOADING", "QUARANTINED", "DELETING", "DELETE_PENDING"] as const;
+const ACTIVE_FILE_STATUSES = [
+  "UPLOADING",
+  "QUARANTINED",
+  "VALIDATING",
+  "READY",
+  "DELETING",
+  "DELETE_PENDING"
+] as const;
 const VISIBLE_FILE_STATUSES = [...ACTIVE_FILE_STATUSES, "REJECTED"] as const;
 const UPLOADABLE_STATES: SessionState[] = ["WAITING_FOR_UPLOAD"];
 const MAX_TRANSACTION_ATTEMPTS = 4;
@@ -55,6 +64,29 @@ interface UploadInput {
 
 interface DeleteInput {
   identity: MobileIdentity;
+  fileId: string;
+  idempotencyKey: string;
+  requestId: string;
+}
+
+interface KioskDeleteInput {
+  kioskId: string;
+  credentialId: string;
+  sessionId: string;
+  fileId: string;
+  idempotencyKey: string;
+  requestId: string;
+}
+
+export interface FileDeletionResult {
+  statusCode: 202 | 204;
+}
+
+interface DeleteActor {
+  actorType: "MOBILE" | "KIOSK";
+  actorId: string;
+  kioskId: string;
+  sessionId: string;
   fileId: string;
   idempotencyKey: string;
   requestId: string;
@@ -158,8 +190,7 @@ export class FileService {
       await this.rejectAndClean(
         reservation.file.id,
         reservation.file.sessionId,
-        reservation.file.objectKey,
-        rejection.code
+        reservation.file.objectKey
       );
       throw rejection.error;
     } finally {
@@ -179,20 +210,40 @@ export class FileService {
     return listUploadedFilesResponseSchema.parse({ items: files.map(toFileSnapshot) });
   }
 
-  public async remove(input: DeleteInput): Promise<void> {
-    const action = `files.delete:${input.identity.sessionId}:${input.fileId}`;
-    const requestHash = hashRequest({
+  public async remove(input: DeleteInput): Promise<FileDeletionResult> {
+    return this.removeAs({
+      actorType: "MOBILE",
+      actorId: input.identity.clientId,
+      kioskId: input.identity.kioskId,
       sessionId: input.identity.sessionId,
-      fileId: input.fileId
+      fileId: input.fileId,
+      idempotencyKey: input.idempotencyKey,
+      requestId: input.requestId
     });
-    const now = this.options.clock.now();
+  }
 
+  public async removeForKiosk(input: KioskDeleteInput): Promise<FileDeletionResult> {
+    return this.removeAs({
+      actorType: "KIOSK",
+      actorId: input.credentialId,
+      kioskId: input.kioskId,
+      sessionId: input.sessionId,
+      fileId: input.fileId,
+      idempotencyKey: input.idempotencyKey,
+      requestId: input.requestId
+    });
+  }
+
+  private async removeAs(input: DeleteActor): Promise<FileDeletionResult> {
+    const action = `files.delete:${input.sessionId}:${input.fileId}`;
+    const requestHash = hashRequest({ sessionId: input.sessionId, fileId: input.fileId });
+    const now = this.options.clock.now();
     const prepared = await this.options.database.$transaction(
       async (transaction) => {
-        await lockSession(transaction, input.identity.sessionId);
+        await lockSession(transaction, input.sessionId);
         const replay = await findIdempotency(
           transaction,
-          input.identity.clientId,
+          input.actorId,
           action,
           input.idempotencyKey,
           this.options.idempotencyPepper,
@@ -200,111 +251,152 @@ export class FileService {
         );
         if (replay) {
           assertMatchingRequest(replay.requestHash, requestHash);
-          return { replay: true as const, objectKey: null };
+          return {
+            statusCode: replay.responseStatus === 204 ? (204 as const) : (202 as const),
+            objectKeys: [] as string[]
+          };
         }
 
         const file = await transaction.uploadedFile.findFirst({
-          where: { id: input.fileId, sessionId: input.identity.sessionId }
+          where: {
+            id: input.fileId,
+            sessionId: input.sessionId,
+            session: { kioskId: input.kioskId }
+          }
         });
         if (!file) throw hiddenFile();
-        if (file.status === "DELETED") {
-          await storeDeleteIdempotency(transaction, {
-            id: this.options.random.uuid(now),
-            actorId: input.identity.clientId,
-            action,
-            keyDigest: digestIdempotencyKey(
-              input.identity.clientId,
-              action,
-              input.idempotencyKey,
-              this.options.idempotencyPepper
-            ),
-            requestHash,
-            resourceId: file.id,
-            now,
-            expiresAt: addHours(now, this.options.idempotencyTtlHours)
-          });
-          return { replay: true as const, objectKey: null };
-        }
-        if (file.status === "REJECTED") {
-          const session = await transaction.printSession.findUniqueOrThrow({
-            where: { id: input.identity.sessionId }
-          });
-          const updated = await transaction.uploadedFile.updateMany({
-            where: { id: file.id, sessionId: session.id, status: "REJECTED" },
-            data: { status: "DELETED", deletedAt: now, updatedAt: now }
-          });
-          if (updated.count !== 1) throw hiddenFile();
-          const nextSequence = session.eventSequence + 1;
-          await Promise.all([
-            transaction.printSession.update({
-              where: { id: session.id },
-              data: { eventSequence: nextSequence, updatedAt: now }
-            }),
-            transaction.auditEvent.create({
-              data: {
-                id: this.options.random.uuid(now),
-                occurredAt: now,
-                actorType: "MOBILE",
-                actorId: input.identity.clientId,
-                kioskId: session.kioskId,
-                sessionId: session.id,
-                action: "file.deleted",
-                outcome: "SUCCESS",
-                requestId: input.requestId,
-                metadata: { fileId: file.id, previousStatus: "REJECTED" }
-              }
-            }),
-            transaction.outboxEvent.create({
-              data: {
-                id: this.options.random.uuid(now),
-                aggregateType: "PRINT_SESSION",
-                aggregateId: session.id,
-                sequence: nextSequence,
-                type: "file.deleted",
-                payload: { sessionId: session.id, fileId: file.id }
-              }
-            }),
-            storeDeleteIdempotency(transaction, {
-              id: this.options.random.uuid(now),
-              actorId: input.identity.clientId,
-              action,
-              keyDigest: digestIdempotencyKey(
-                input.identity.clientId,
-                action,
-                input.idempotencyKey,
-                this.options.idempotencyPepper
-              ),
-              requestHash,
-              resourceId: file.id,
-              now,
-              expiresAt: addHours(now, this.options.idempotencyTtlHours)
-            })
-          ]);
-          return { replay: true as const, objectKey: null };
-        }
         if (file.status === "UPLOADING") {
           throw new ApiError(409, "FILE_UPLOAD_IN_PROGRESS", "The file is still uploading.");
         }
-        if (!file.quarantineObjectKey) throw hiddenFile();
+        if (file.status === "DELETED") {
+          await this.storeDeletionReplay(
+            transaction,
+            input,
+            action,
+            requestHash,
+            file.id,
+            now,
+            204
+          );
+          return { statusCode: 204 as const, objectKeys: [] as string[] };
+        }
+        if (file.status === "REJECTED") {
+          await this.finalizeRejectedDeletion(transaction, input, action, requestHash, file, now);
+          return { statusCode: 204 as const, objectKeys: [] as string[] };
+        }
+        if (file.status === "VALIDATING") {
+          const deferred = await transaction.uploadedFile.updateMany({
+            where: {
+              id: file.id,
+              sessionId: input.sessionId,
+              status: "VALIDATING",
+              processingGeneration: file.processingGeneration
+            },
+            data: {
+              status: "DELETE_PENDING",
+              processingGeneration: { increment: 1 },
+              processingClaimToken: null,
+              processingLeaseExpiresAt: null,
+              processingEnqueuedAt: null,
+              deleteRequestedAt: now,
+              cleanupDueAt: processingArtifactCleanupDueAt(now),
+              cleanupErrorCode: null,
+              updatedAt: now
+            }
+          });
+          if (deferred.count !== 1) {
+            throw new ApiError(409, "FILE_STATE_CHANGED", "The file state changed. Please retry.");
+          }
+          await this.auditDeletionRequest(transaction, input, file.id, file.status, now);
+          await this.storeDeletionReplay(
+            transaction,
+            input,
+            action,
+            requestHash,
+            file.id,
+            now,
+            202
+          );
+          return { statusCode: 202 as const, objectKeys: [] as string[] };
+        }
+        if (
+          file.status === "DELETING" ||
+          (file.status === "DELETE_PENDING" &&
+            file.cleanupDueAt &&
+            file.cleanupDueAt.getTime() > now.getTime())
+        ) {
+          await transaction.uploadedFile.updateMany({
+            where: {
+              id: file.id,
+              sessionId: input.sessionId,
+              status: file.status,
+              processingGeneration: file.processingGeneration
+            },
+            data: {
+              deleteRequestedAt: now,
+              cleanupErrorCode: null,
+              updatedAt: now
+            }
+          });
+          await this.auditDeletionRequest(transaction, input, file.id, file.status, now);
+          await this.storeDeletionReplay(
+            transaction,
+            input,
+            action,
+            requestHash,
+            file.id,
+            now,
+            202
+          );
+          return { statusCode: 202 as const, objectKeys: [] as string[] };
+        }
 
-        await transaction.uploadedFile.update({
-          where: { id: file.id },
+        const derivatives = await transaction.fileDerivative.findMany({
+          where: { fileId: file.id, status: { not: "DELETED" } },
+          select: { objectKey: true }
+        });
+        const objectKeys = [
+          ...new Set([
+            ...(file.quarantineObjectKey ? [file.quarantineObjectKey] : []),
+            ...derivatives.map((derivative) => derivative.objectKey)
+          ])
+        ];
+        if (objectKeys.length === 0) throw hiddenFile();
+
+        const updated = await transaction.uploadedFile.updateMany({
+          where: {
+            id: file.id,
+            sessionId: input.sessionId,
+            status: file.status,
+            processingGeneration: file.processingGeneration
+          },
           data: {
             status: "DELETING",
+            processingGeneration: { increment: 1 },
+            processingClaimToken: null,
+            processingLeaseExpiresAt: null,
+            processingEnqueuedAt: null,
             deleteRequestedAt: now,
             cleanupDueAt: now,
             cleanupErrorCode: null,
             updatedAt: now
           }
         });
-        return { replay: false as const, objectKey: file.quarantineObjectKey };
+        if (updated.count !== 1) {
+          throw new ApiError(409, "FILE_STATE_CHANGED", "The file state changed. Please retry.");
+        }
+        // Reserve the idempotency key before object I/O. A concurrent replay
+        // sees an accepted operation instead of issuing duplicate deletes.
+        await this.auditDeletionRequest(transaction, input, file.id, file.status, now);
+        await this.storeDeletionReplay(transaction, input, action, requestHash, file.id, now, 202);
+        return { statusCode: 202 as const, objectKeys };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
     );
-    if (prepared.replay || !prepared.objectKey) return;
+    if (prepared.objectKeys.length === 0) return { statusCode: prepared.statusCode };
 
     try {
-      await this.options.objectStore.deleteObject({ key: prepared.objectKey });
+      await deleteObjectKeys(this.options.objectStore, prepared.objectKeys);
     } catch {
       await this.options.database.uploadedFile.updateMany({
         where: { id: input.fileId, status: "DELETING" },
@@ -312,13 +404,118 @@ export class FileService {
           status: "DELETE_PENDING",
           cleanupAttempts: { increment: 1 },
           cleanupDueAt: addSeconds(now, 15),
-          cleanupErrorCode: "OBJECT_DELETE_FAILED"
+          cleanupErrorCode: "OBJECT_DELETE_FAILED",
+          updatedAt: now
         }
       });
-      throw new ApiError(503, "FILE_DELETE_DEFERRED", "The file is scheduled for secure cleanup.");
+      const file = await this.options.database.uploadedFile.findUnique({
+        where: { id: input.fileId },
+        select: { status: true }
+      });
+      return { statusCode: file?.status === "DELETED" ? 204 : 202 };
     }
+    await this.finalizeDeletion(input, action, now);
+    return { statusCode: 204 };
+  }
 
-    await this.finalizeDeletion(input, action, requestHash, now);
+  private async auditDeletionRequest(
+    transaction: Prisma.TransactionClient,
+    input: DeleteActor,
+    fileId: string,
+    previousStatus: string,
+    now: Date
+  ): Promise<void> {
+    await transaction.auditEvent.create({
+      data: {
+        id: this.options.random.uuid(now),
+        occurredAt: now,
+        actorType: input.actorType,
+        actorId: input.actorId,
+        kioskId: input.kioskId,
+        sessionId: input.sessionId,
+        action: "file.delete_requested",
+        outcome: "ACCEPTED",
+        requestId: input.requestId,
+        metadata: { fileId, previousStatus }
+      }
+    });
+  }
+
+  private async storeDeletionReplay(
+    transaction: Prisma.TransactionClient,
+    input: DeleteActor,
+    action: string,
+    requestHash: string,
+    resourceId: string,
+    now: Date,
+    responseStatus: 202 | 204
+  ): Promise<void> {
+    await storeDeleteIdempotency(transaction, {
+      id: this.options.random.uuid(now),
+      actorId: input.actorId,
+      action,
+      keyDigest: digestIdempotencyKey(
+        input.actorId,
+        action,
+        input.idempotencyKey,
+        this.options.idempotencyPepper
+      ),
+      requestHash,
+      resourceId,
+      responseStatus,
+      now,
+      expiresAt: addHours(now, this.options.idempotencyTtlHours)
+    });
+  }
+
+  private async finalizeRejectedDeletion(
+    transaction: Prisma.TransactionClient,
+    input: DeleteActor,
+    action: string,
+    requestHash: string,
+    file: { id: string; status: string },
+    now: Date
+  ): Promise<void> {
+    const session = await transaction.printSession.findUniqueOrThrow({
+      where: { id: input.sessionId }
+    });
+    const updated = await transaction.uploadedFile.updateMany({
+      where: { id: file.id, sessionId: session.id, status: "REJECTED" },
+      data: { status: "DELETED", deletedAt: now, updatedAt: now }
+    });
+    if (updated.count !== 1) throw hiddenFile();
+    const nextSequence = session.eventSequence + 1;
+    await Promise.all([
+      transaction.printSession.update({
+        where: { id: session.id },
+        data: { eventSequence: nextSequence, updatedAt: now }
+      }),
+      transaction.auditEvent.create({
+        data: {
+          id: this.options.random.uuid(now),
+          occurredAt: now,
+          actorType: input.actorType,
+          actorId: input.actorId,
+          kioskId: session.kioskId,
+          sessionId: session.id,
+          action: "file.deleted",
+          outcome: "SUCCESS",
+          requestId: input.requestId,
+          metadata: { fileId: file.id, previousStatus: "REJECTED" }
+        }
+      }),
+      transaction.outboxEvent.create({
+        data: {
+          id: this.options.random.uuid(now),
+          aggregateType: "PRINT_SESSION",
+          aggregateId: session.id,
+          sequence: nextSequence,
+          type: "file.deleted",
+          payload: { sessionId: session.id, fileId: file.id }
+        }
+      }),
+      this.storeDeletionReplay(transaction, input, action, requestHash, file.id, now, 204)
+    ]);
   }
 
   private async reserveUpload(input: UploadInput): Promise<ReservedUpload> {
@@ -353,8 +550,31 @@ export class FileService {
             );
             if (replay) {
               assertMatchingRequest(replay.requestHash, requestHash);
+              const storedResponse = uploadFileResponseSchema.safeParse(replay.responseBody);
+              let replayResponse = storedResponse.success ? storedResponse.data : undefined;
+              if (!replayResponse && replay.resourceId) {
+                const legacyFile = await transaction.uploadedFile.findFirst({
+                  where: {
+                    id: replay.resourceId,
+                    sessionId: input.identity.sessionId,
+                    uploadedByClientId: input.identity.clientId
+                  }
+                });
+                if (legacyFile) {
+                  replayResponse = uploadFileResponseSchema.parse({
+                    file: toFileSnapshot(legacyFile)
+                  });
+                }
+              }
+              if (!replayResponse) {
+                throw new ApiError(
+                  409,
+                  "UPLOAD_REPLAY_UNAVAILABLE",
+                  "The previous upload result is no longer available."
+                );
+              }
               return {
-                replay: uploadFileResponseSchema.parse(replay.responseBody),
+                replay: replayResponse,
                 file: {
                   id: replay.resourceId ?? "",
                   sessionId: input.identity.sessionId,
@@ -476,123 +696,131 @@ export class FileService {
     detectedMime: string;
     extension: string;
   }): Promise<UploadFileResponse> {
-    const now = this.options.clock.now();
-    return this.options.database.$transaction(
-      async (transaction) => {
-        await lockSession(transaction, input.reservation.file.sessionId);
-        const session = await transaction.printSession.findUniqueOrThrow({
-          where: { id: input.reservation.file.sessionId }
-        });
-        const expired =
-          now.getTime() >= session.idleExpiresAt.getTime() ||
-          now.getTime() >= session.hardExpiresAt.getTime();
-        if (!UPLOADABLE_STATES.includes(session.state as SessionState) || expired) {
-          throw new ApiError(
-            expired ? 410 : 409,
-            expired ? "UPLOAD_SESSION_EXPIRED" : "UPLOAD_SESSION_NOT_EDITABLE",
-            "This session no longer accepts files."
-          );
-        }
-        const updated = await transaction.uploadedFile.updateMany({
-          where: {
-            id: input.reservation.file.id,
-            sessionId: input.reservation.file.sessionId,
-            uploadedByClientId: input.input.identity.clientId,
-            status: "UPLOADING",
-            quarantineObjectKey: input.reservation.file.objectKey
-          },
-          data: {
-            status: "QUARANTINED",
-            kind: input.kind,
-            detectedMime: input.detectedMime,
-            extension: input.extension,
-            sizeBytes: input.sizeBytes,
-            reservedBytes: input.sizeBytes,
-            contentSha256: input.sha256,
-            quarantinedAt: now,
-            updatedAt: now
-          }
-        });
-        if (updated.count !== 1) {
-          throw new ApiError(409, "FILE_UPLOAD_STATE_CHANGED", "The upload state changed.");
-        }
-
-        const stored = await transaction.uploadedFile.findUniqueOrThrow({
-          where: { id: input.reservation.file.id }
-        });
-        const response = uploadFileResponseSchema.parse({ file: toFileSnapshot(stored) });
-        const nextSequence = session.eventSequence + 1;
-        await Promise.all([
-          transaction.printSession.update({
-            where: { id: session.id },
-            data: { eventSequence: nextSequence, updatedAt: now }
-          }),
-          transaction.auditEvent.create({
-            data: {
-              id: this.options.random.uuid(now),
-              occurredAt: now,
-              actorType: "MOBILE",
-              actorId: input.input.identity.clientId,
-              kioskId: session.kioskId,
-              sessionId: session.id,
-              action: "file.quarantined",
-              outcome: "SUCCESS",
-              requestId: input.input.requestId,
-              metadata: {
-                fileId: stored.id,
-                kind: stored.kind,
-                sizeBytes: stored.sizeBytes
+    for (let attempt = 0; attempt < MAX_TRANSACTION_ATTEMPTS; attempt += 1) {
+      const now = this.options.clock.now();
+      try {
+        return await this.options.database.$transaction(
+          async (transaction) => {
+            await lockSession(transaction, input.reservation.file.sessionId);
+            const session = await transaction.printSession.findUniqueOrThrow({
+              where: { id: input.reservation.file.sessionId }
+            });
+            const expired =
+              now.getTime() >= session.idleExpiresAt.getTime() ||
+              now.getTime() >= session.hardExpiresAt.getTime();
+            if (!UPLOADABLE_STATES.includes(session.state as SessionState) || expired) {
+              throw new ApiError(
+                expired ? 410 : 409,
+                expired ? "UPLOAD_SESSION_EXPIRED" : "UPLOAD_SESSION_NOT_EDITABLE",
+                "This session no longer accepts files."
+              );
+            }
+            const updated = await transaction.uploadedFile.updateMany({
+              where: {
+                id: input.reservation.file.id,
+                sessionId: input.reservation.file.sessionId,
+                uploadedByClientId: input.input.identity.clientId,
+                status: "UPLOADING",
+                quarantineObjectKey: input.reservation.file.objectKey
+              },
+              data: {
+                status: "QUARANTINED",
+                kind: input.kind,
+                detectedMime: input.detectedMime,
+                extension: input.extension,
+                sizeBytes: input.sizeBytes,
+                reservedBytes: input.sizeBytes,
+                contentSha256: input.sha256,
+                quarantinedAt: now,
+                updatedAt: now
               }
+            });
+            if (updated.count !== 1) {
+              throw new ApiError(409, "FILE_UPLOAD_STATE_CHANGED", "The upload state changed.");
             }
-          }),
-          transaction.outboxEvent.create({
-            data: {
-              id: this.options.random.uuid(now),
-              aggregateType: "PRINT_SESSION",
-              aggregateId: session.id,
-              sequence: nextSequence,
-              type: "file.uploaded",
-              payload: { sessionId: session.id, file: response.file }
-            }
-          }),
-          transaction.idempotencyRecord.create({
-            data: {
-              id: this.options.random.uuid(now),
-              actorId: input.input.identity.clientId,
-              action: input.reservation.action,
-              keyDigest: digestIdempotencyKey(
-                input.input.identity.clientId,
-                input.reservation.action,
-                input.input.idempotencyKey,
-                this.options.idempotencyPepper
-              ),
-              requestHash: input.reservation.requestHash,
-              responseStatus: 202,
-              responseBody: response,
-              resourceId: stored.id,
-              createdAt: now,
-              expiresAt: addHours(now, this.options.idempotencyTtlHours)
-            }
-          })
-        ]);
-        return response;
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+
+            const stored = await transaction.uploadedFile.findUniqueOrThrow({
+              where: { id: input.reservation.file.id }
+            });
+            const response = uploadFileResponseSchema.parse({ file: toFileSnapshot(stored) });
+            const nextSequence = session.eventSequence + 1;
+            await Promise.all([
+              transaction.printSession.update({
+                where: { id: session.id },
+                data: { eventSequence: nextSequence, updatedAt: now }
+              }),
+              transaction.auditEvent.create({
+                data: {
+                  id: this.options.random.uuid(now),
+                  occurredAt: now,
+                  actorType: "MOBILE",
+                  actorId: input.input.identity.clientId,
+                  kioskId: session.kioskId,
+                  sessionId: session.id,
+                  action: "file.quarantined",
+                  outcome: "SUCCESS",
+                  requestId: input.input.requestId,
+                  metadata: {
+                    fileId: stored.id,
+                    kind: stored.kind,
+                    sizeBytes: stored.sizeBytes
+                  }
+                }
+              }),
+              transaction.outboxEvent.create({
+                data: {
+                  id: this.options.random.uuid(now),
+                  aggregateType: "PRINT_SESSION",
+                  aggregateId: session.id,
+                  sequence: nextSequence,
+                  type: "file.uploaded",
+                  payload: { sessionId: session.id, file: response.file }
+                }
+              }),
+              transaction.idempotencyRecord.create({
+                data: {
+                  id: this.options.random.uuid(now),
+                  actorId: input.input.identity.clientId,
+                  action: input.reservation.action,
+                  keyDigest: digestIdempotencyKey(
+                    input.input.identity.clientId,
+                    input.reservation.action,
+                    input.input.idempotencyKey,
+                    this.options.idempotencyPepper
+                  ),
+                  requestHash: input.reservation.requestHash,
+                  responseStatus: 202,
+                  responseBody: response,
+                  resourceId: stored.id,
+                  createdAt: now,
+                  expiresAt: addHours(now, this.options.idempotencyTtlHours)
+                }
+              })
+            ]);
+            return response;
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+        );
+      } catch (error) {
+        if (isRetryableTransactionError(error)) continue;
+        throw error;
+      }
+    }
+
+    throw new ApiError(
+      409,
+      "CONCURRENT_FILE_UPLOAD",
+      "The upload could not be finalized because the session changed concurrently. Please retry."
     );
   }
 
-  private async rejectAndClean(
-    fileId: string,
-    sessionId: string,
-    objectKey: string,
-    rejectionCode: string
-  ) {
+  private async rejectAndClean(fileId: string, sessionId: string, objectKey: string) {
     const now = this.options.clock.now();
     const claimed = await this.options.database.uploadedFile.updateMany({
       where: { id: fileId, status: "UPLOADING" },
       data: {
         status: "DELETE_PENDING",
-        rejectionCode,
+        rejectionCode: "UPLOAD_FAILED",
         cleanupDueAt: now,
         cleanupErrorCode: null,
         updatedAt: now
@@ -656,24 +884,46 @@ export class FileService {
     }
   }
 
-  private async finalizeDeletion(
-    input: DeleteInput,
-    action: string,
-    requestHash: string,
-    now: Date
-  ): Promise<void> {
+  private async finalizeDeletion(input: DeleteActor, action: string, now: Date): Promise<void> {
     await this.options.database.$transaction(
       async (transaction) => {
-        await lockSession(transaction, input.identity.sessionId);
+        await lockSession(transaction, input.sessionId);
         const session = await transaction.printSession.findUniqueOrThrow({
-          where: { id: input.identity.sessionId }
+          where: { id: input.sessionId }
         });
+        const current = await transaction.uploadedFile.findFirst({
+          where: { id: input.fileId, sessionId: session.id },
+          select: { status: true }
+        });
+        if (current?.status === "DELETED") {
+          await transaction.idempotencyRecord.updateMany({
+            where: {
+              action,
+              resourceId: input.fileId,
+              responseStatus: 202
+            },
+            data: { responseStatus: 204, responseBody: {} }
+          });
+          return;
+        }
+        if (current?.status !== "DELETING" && current?.status !== "DELETE_PENDING") {
+          return;
+        }
+        await transaction.filePage.deleteMany({ where: { fileId: input.fileId } });
+        await transaction.fileDerivative.deleteMany({ where: { fileId: input.fileId } });
         const updated = await transaction.uploadedFile.updateMany({
-          where: { id: input.fileId, sessionId: session.id, status: "DELETING" },
+          where: {
+            id: input.fileId,
+            sessionId: session.id,
+            status: { in: ["DELETING", "DELETE_PENDING"] }
+          },
           data: {
             status: "DELETED",
             quarantineObjectKey: null,
             contentSha256: null,
+            pageCount: null,
+            processingClaimToken: null,
+            processingLeaseExpiresAt: null,
             cleanupDueAt: null,
             cleanupErrorCode: null,
             deletedAt: now,
@@ -692,8 +942,8 @@ export class FileService {
             data: {
               id: this.options.random.uuid(now),
               occurredAt: now,
-              actorType: "MOBILE",
-              actorId: input.identity.clientId,
+              actorType: input.actorType,
+              actorId: input.actorId,
               kioskId: session.kioskId,
               sessionId: session.id,
               action: "file.deleted",
@@ -712,20 +962,13 @@ export class FileService {
               payload: { sessionId: session.id, fileId: input.fileId }
             }
           }),
-          storeDeleteIdempotency(transaction, {
-            id: this.options.random.uuid(now),
-            actorId: input.identity.clientId,
-            action,
-            keyDigest: digestIdempotencyKey(
-              input.identity.clientId,
+          transaction.idempotencyRecord.updateMany({
+            where: {
               action,
-              input.idempotencyKey,
-              this.options.idempotencyPepper
-            ),
-            requestHash,
-            resourceId: input.fileId,
-            now,
-            expiresAt: addHours(now, this.options.idempotencyTtlHours)
+              resourceId: input.fileId,
+              responseStatus: 202
+            },
+            data: { responseStatus: 204, responseBody: {} }
           })
         ]);
       },
@@ -770,6 +1013,7 @@ async function storeDeleteIdempotency(
     keyDigest: string;
     requestHash: string;
     resourceId: string;
+    responseStatus: 202 | 204;
     now: Date;
     expiresAt: Date;
   }
@@ -781,7 +1025,7 @@ async function storeDeleteIdempotency(
       action: input.action,
       keyDigest: input.keyDigest,
       requestHash: input.requestHash,
-      responseStatus: 204,
+      responseStatus: input.responseStatus,
       responseBody: {},
       resourceId: input.resourceId,
       createdAt: input.now,
@@ -806,14 +1050,21 @@ function toFileSnapshot(file: {
   status: string;
   kind: string | null;
   sizeBytes: number | null;
+  processingRevision: number;
+  pageCount: number | null;
+  rejectionCode: string | null;
   createdAt: Date;
 }): UploadedFileSnapshot {
+  const safeRejection = uploadedFileRejectionCodeSchema.safeParse(file.rejectionCode);
   return {
     id: file.id,
     ordinal: file.ordinal,
     status: file.status as UploadedFileSnapshot["status"],
     kind: file.kind as UploadedFileSnapshot["kind"],
     sizeBytes: file.sizeBytes,
+    processingRevision: file.processingRevision,
+    pageCount: file.pageCount,
+    rejectionCode: safeRejection.success ? safeRejection.data : null,
     createdAt: file.createdAt.toISOString()
   };
 }
@@ -878,6 +1129,16 @@ function hiddenSession(): ApiError {
 
 function hiddenFile(): ApiError {
   return new ApiError(404, "FILE_NOT_FOUND", "File not found.");
+}
+
+async function deleteObjectKeys(objectStore: ObjectStore, keys: readonly string[]): Promise<void> {
+  // Keep storage pressure bounded for a 200-page job while still deleting
+  // independently-addressed objects idempotently.
+  const batchSize = 5;
+  for (let index = 0; index < keys.length; index += batchSize) {
+    const batch = keys.slice(index, index + batchSize);
+    await Promise.all(batch.map((key) => objectStore.deleteObject({ key })));
+  }
 }
 
 function addHours(date: Date, hours: number): Date {

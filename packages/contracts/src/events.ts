@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { sessionStateSchema } from "./sessions.js";
-import { uploadedFileSnapshotSchema } from "./uploads.js";
+import { readyUploadedFileSnapshotSchema, uploadedFileSnapshotSchema } from "./uploads.js";
 
 const sessionIdSchema = z.string().uuid();
 const eventIdSchema = z.string().uuid();
@@ -53,6 +53,15 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       .object({
         sessionId: sessionIdSchema,
         file: uploadedFileSnapshotSchema
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("file.ready"),
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        file: readyUploadedFileSnapshotSchema
       })
       .strict()
   }),

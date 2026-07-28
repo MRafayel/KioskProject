@@ -167,24 +167,42 @@ export function registerFileRoutes(
       }
     },
     async (request, reply) => {
-      assertMobileOrigin(request, dependencies.uploadOrigin);
       const params = fileParamsSchema.parse(request.params);
+      const idempotencyKey = idempotencyKeySchema.parse(
+        requireHeader(request, "idempotency-key", "IDEMPOTENCY_KEY_REQUIRED")
+      );
+      if (request.headers.authorization) {
+        const kiosk = await authenticateKiosk(
+          request,
+          dependencies.database,
+          dependencies.clock,
+          "files:delete"
+        );
+        const deletion = await dependencies.files.removeForKiosk({
+          kioskId: kiosk.kioskId,
+          credentialId: kiosk.credentialId,
+          sessionId: params.sessionId,
+          fileId: params.fileId,
+          idempotencyKey,
+          requestId: request.id
+        });
+        return reply.header("cache-control", "no-store").code(deletion.statusCode).send();
+      }
+
+      assertMobileOrigin(request, dependencies.uploadOrigin);
       const identity = await dependencies.mobileAccess.authenticate(
         request.cookies[mobileCookieName(params.sessionId)],
         params.sessionId
       );
       dependencies.mobileAccess.assertCsrf(identity, singleHeader(request.headers["x-csrf-token"]));
-      const idempotencyKey = idempotencyKeySchema.parse(
-        requireHeader(request, "idempotency-key", "IDEMPOTENCY_KEY_REQUIRED")
-      );
 
-      await dependencies.files.remove({
+      const deletion = await dependencies.files.remove({
         identity,
         fileId: params.fileId,
         idempotencyKey,
         requestId: request.id
       });
-      return reply.header("cache-control", "no-store").code(204).send();
+      return reply.header("cache-control", "no-store").code(deletion.statusCode).send();
     }
   );
 }

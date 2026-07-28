@@ -3,7 +3,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
@@ -30,18 +29,24 @@ const readyFixture = {
   kind: "PDF" as const,
   status: "READY" as const,
   pageCount: 8,
+  processingRevision: 1,
+  rejectionCode: null,
   sizeBytes: 2_400_000
 };
 
 let listedFileStatus: string;
 let cancelFailuresRemaining: number;
 let cancelIdempotencyKeys: string[];
+let fileDeleteFailuresRemaining: number;
+let fileDeleteIdempotencyKeys: string[];
 
 beforeEach(() => {
   window.sessionStorage.clear();
   listedFileStatus = "QUARANTINED";
   cancelFailuresRemaining = 0;
   cancelIdempotencyKeys = [];
+  fileDeleteFailuresRemaining = 0;
+  fileDeleteIdempotencyKeys = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -60,6 +65,34 @@ beforeEach(() => {
         );
       }
 
+      if (url.endsWith(`/files/${readyFixture.id}/pages`)) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              fileId: readyFixture.id,
+              processingRevision: 1,
+              pageCount: 8,
+              items: Array.from({ length: 8 }, (_, index) => ({
+                pageNumber: index + 1,
+                widthPixels: 850,
+                heightPixels: 1200,
+                previewAvailable: true
+              }))
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )
+        );
+      }
+
+      if (url.endsWith(`/files/${readyFixture.id}`) && init?.method === "DELETE") {
+        fileDeleteIdempotencyKeys.push(new Headers(init.headers).get("idempotency-key") ?? "");
+        if (fileDeleteFailuresRemaining > 0) {
+          fileDeleteFailuresRemaining -= 1;
+          return Promise.reject(new TypeError("simulated file delete interruption"));
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+
       if (url.endsWith("/files")) {
         return Promise.resolve(
           new Response(
@@ -70,6 +103,9 @@ beforeEach(() => {
                   ordinal: 0,
                   status: listedFileStatus,
                   kind: "PDF",
+                  pageCount: listedFileStatus === "READY" ? 8 : null,
+                  processingRevision: 1,
+                  rejectionCode: listedFileStatus === "REJECTED" ? "DOCUMENT_MALFORMED" : null,
                   sizeBytes: 2_400_000,
                   createdAt: "2030-01-01T00:00:00.000Z"
                 }
@@ -123,7 +159,7 @@ describe("kiosk prototype journey", () => {
     expect(await screen.findByRole("heading", { name: "Upload your document" })).toBeVisible();
 
     expect(await screen.findByText("Document 1.pdf")).toBeVisible();
-    expect(screen.getAllByText("Received — checking file safety").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Received — waiting for a secure check").length).toBeGreaterThan(0);
     expect(screen.queryByText("4829 1357")).not.toBeInTheDocument();
     expect(screen.queryByText(/8 pages/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
@@ -141,24 +177,27 @@ describe("kiosk prototype journey", () => {
 
     expect(await screen.findByText("Document 1.pdf")).toBeVisible();
     expect(screen.getAllByText("File rejected").length).toBeGreaterThan(0);
-    expect(
-      screen.getByText("Remove this file on your phone and upload another document.")
-    ).toBeVisible();
+    expect(screen.getByText(/This file is damaged.*Remove this file on your phone/)).toBeVisible();
     expect(screen.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
   });
 
-  it("fails closed when the file snapshot claims an unsupported ready state", async () => {
+  it("unlocks settings only after an authoritative ready snapshot", async () => {
     listedFileStatus = "READY";
     const user = userEvent.setup();
     renderKiosk();
     await user.click(screen.getByRole("button", { name: "English" }));
     await user.click(screen.getByRole("button", { name: "Start printing" }));
 
-    expect(
-      await screen.findByText("The upload status is temporarily unavailable. We will keep trying.")
-    ).toBeVisible();
-    expect(screen.queryByText("Document 1.pdf")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
+    expect(await screen.findByText("Document 1.pdf")).toBeVisible();
+    expect(screen.getAllByText("Upload complete").length).toBeGreaterThan(0);
+    const continueButton = screen.getByRole("button", { name: /Continue to print settings/i });
+    expect(continueButton).toBeEnabled();
+    await user.click(continueButton);
+    expect(screen.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
+    expect(await screen.findByRole("img", { name: "Page 1" })).toHaveAttribute(
+      "src",
+      expect.stringContaining(`/pages/1/preview?revision=1`)
+    );
   });
 
   it("keeps the completed Phase 1 settings and checkout prototype covered with ready test data", async () => {
@@ -191,6 +230,63 @@ describe("kiosk prototype journey", () => {
     await user.click(screen.getByRole("button", { name: /Review and pay/i }));
     expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Pay $1.50" })).toBeEnabled();
+  });
+
+  it("shows the ready image kind in the compact configure file card", () => {
+    const { container } = renderKiosk({
+      initialEntries: ["/configure"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [
+          {
+            ...readyFixture,
+            name: "passport-photo.jpg",
+            kind: "JPEG"
+          }
+        ]
+      }
+    });
+
+    expect(container.querySelector(".file-card--compact .file-card__icon")).toHaveTextContent(
+      "JPEG"
+    );
+    expect(container.querySelector(".file-card--compact .file-card__icon")).not.toHaveTextContent(
+      "PDF"
+    );
+  });
+
+  it("keeps the authoritative ready file until kiosk deletion is confirmed and retries safely", async () => {
+    fileDeleteFailuresRemaining = 1;
+    const user = userEvent.setup();
+    renderKiosk({
+      initialEntries: ["/configure"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture]
+      }
+    });
+    await user.click(screen.getByRole("button", { name: "English" }));
+
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(
+      await screen.findByText("The file could not be removed. Try again before continuing.")
+    ).toBeVisible();
+    expect(screen.getByText("safe-fixture.pdf")).toBeVisible();
+    const retainedKey = window.sessionStorage.getItem(
+      `printing-kiosk.pending-file-delete.${testSession.id}.${readyFixture.id}`
+    );
+    expect(retainedKey).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await screen.findByRole("heading", { name: "Upload your document" })).toBeVisible();
+    expect(fileDeleteIdempotencyKeys).toEqual([retainedKey, retainedKey]);
+    expect(
+      window.sessionStorage.getItem(
+        `printing-kiosk.pending-file-delete.${testSession.id}.${readyFixture.id}`
+      )
+    ).toBeNull();
   });
 
   it("keeps the completed Phase 1 payment, printing, and recovery screens covered as test fixtures", async () => {
@@ -315,6 +411,78 @@ describe("kiosk prototype journey", () => {
     });
   });
 
+  it("refreshes authoritative state and unlocks settings on file.ready", async () => {
+    const eventSources = installFakeEventSource();
+    renderKiosk({
+      initialEntries: ["/upload"],
+      initialState: { ...initialPrototypeState, session: testSession }
+    });
+    expect(await screen.findByText("Փաստաթուղթ 1.pdf")).toBeVisible();
+    listedFileStatus = "READY";
+    const source = latestOpenEventSource(eventSources);
+
+    act(() => {
+      source.message(sessionCreatedEvent());
+      source.message(fileReadyEvent(2));
+    });
+
+    await vi.waitFor(() => {
+      expect(screen.getByRole("button", { name: /Անցնել տպման կարգավորումներին/i })).toBeEnabled();
+    });
+  });
+
+  it("refreshes an authoritative rejection reason without trusting the realtime payload", async () => {
+    const eventSources = installFakeEventSource();
+    renderKiosk({
+      initialEntries: ["/upload"],
+      initialState: { ...initialPrototypeState, session: testSession }
+    });
+    expect(await screen.findByText("Փաստաթուղթ 1.pdf")).toBeVisible();
+    listedFileStatus = "REJECTED";
+    const source = latestOpenEventSource(eventSources);
+
+    act(() => {
+      source.message(sessionCreatedEvent());
+      source.message(fileRejectedEvent(2));
+    });
+
+    expect(await screen.findByText(/Ֆայլը վնասված է.*Հեռախոսից հեռացրեք/)).toBeVisible();
+    expect(screen.queryByText(/վնասակար բովանդակության/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Անցնել տպման կարգավորումներին/i })).toBeDisabled();
+  });
+
+  it("does not treat validation polling or realtime file readiness as customer activity", async () => {
+    vi.useFakeTimers();
+    const eventSources = installFakeEventSource();
+    renderKiosk({
+      initialEntries: ["/upload"],
+      initialState: { ...initialPrototypeState, session: testSession }
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("timer", { name: "Մնացել է 120 վայրկյան" })).toBeVisible();
+
+    listedFileStatus = "VALIDATING";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByRole("timer", { name: "Մնացել է 110 վայրկյան" })).toBeVisible();
+
+    window.dispatchEvent(new Event("kiosk-activity"));
+    listedFileStatus = "READY";
+    const source = latestOpenEventSource(eventSources);
+    await act(async () => {
+      source.message(sessionCreatedEvent());
+      source.message(fileReadyEvent(2));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByRole("button", { name: /Անցնել տպման կարգավորումներին/i })).toBeEnabled();
+    expect(screen.getByRole("timer", { name: "Մնացել է 110 վայրկյան" })).toBeVisible();
+  });
+
   it("retains the session and cancellation key until secure cleanup is confirmed", async () => {
     cancelFailuresRemaining = 1;
     const user = userEvent.setup();
@@ -342,32 +510,6 @@ describe("kiosk prototype journey", () => {
     expect(
       window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${testSession.id}`)
     ).toBeNull();
-  });
-
-  it("holds the inactivity deadline while successful polling observes an active upload", async () => {
-    vi.useFakeTimers();
-    listedFileStatus = "UPLOADING";
-    renderKiosk({
-      initialEntries: ["/upload"],
-      initialState: { ...initialPrototypeState, session: testSession }
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(screen.getAllByText("Ֆայլը վերբեռնվում է").length).toBeGreaterThan(0);
-
-    // Keep each fake-clock advance below React's nested-update guard. In production these
-    // polling and countdown updates are naturally spread across real time.
-    for (let elapsed = 0; elapsed < 130_000; elapsed += 10_000) {
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(10_000);
-      });
-    }
-
-    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
-    expect(screen.getByRole("timer")).toHaveTextContent(/01:5[89]|02:00/);
-    expect(cancelIdempotencyKeys).toHaveLength(0);
   });
 
   it("warns on inactivity and resets the private session", async () => {
@@ -506,9 +648,7 @@ function renderKiosk({
     <LanguageProvider>
       <QueryClientProvider client={queryClient}>
         <PrototypeSessionProvider initialState={initialState}>
-          <MemoryRouter initialEntries={initialEntries}>
-            <App />
-          </MemoryRouter>
+          <App initialPath={initialEntries[0] ?? "/"} />
         </PrototypeSessionProvider>
       </QueryClientProvider>
     </LanguageProvider>
@@ -604,10 +744,61 @@ function fileUploadedEvent(sequence: number): SessionEvent {
         ordinal: 0,
         status: "QUARANTINED",
         kind: "PDF",
+        pageCount: null,
+        processingRevision: 1,
+        rejectionCode: null,
         sizeBytes: readyFixture.sizeBytes,
         createdAt: "2030-01-01T00:00:00.000Z"
       }
     },
     occurredAt: "2030-01-01T00:00:01.000Z"
+  };
+}
+
+function fileReadyEvent(sequence: number): SessionEvent {
+  return {
+    id: `01900000-0000-7000-8000-${String(95 + sequence).padStart(12, "0")}`,
+    sessionId: testSession.id,
+    sequence,
+    type: "file.ready",
+    payload: {
+      sessionId: testSession.id,
+      file: {
+        id: readyFixture.id,
+        ordinal: readyFixture.ordinal,
+        status: "READY",
+        kind: readyFixture.kind,
+        pageCount: readyFixture.pageCount,
+        processingRevision: readyFixture.processingRevision,
+        rejectionCode: null,
+        sizeBytes: readyFixture.sizeBytes,
+        createdAt: "2030-01-01T00:00:00.000Z"
+      }
+    },
+    occurredAt: "2030-01-01T00:00:02.000Z"
+  };
+}
+
+function fileRejectedEvent(sequence: number): SessionEvent {
+  return {
+    id: `01900000-0000-7000-8000-${String(98 + sequence).padStart(12, "0")}`,
+    sessionId: testSession.id,
+    sequence,
+    type: "file.rejected",
+    payload: {
+      sessionId: testSession.id,
+      file: {
+        id: readyFixture.id,
+        ordinal: readyFixture.ordinal,
+        status: "REJECTED",
+        kind: readyFixture.kind,
+        pageCount: null,
+        processingRevision: readyFixture.processingRevision,
+        rejectionCode: "MALWARE_DETECTED",
+        sizeBytes: readyFixture.sizeBytes,
+        createdAt: "2030-01-01T00:00:00.000Z"
+      }
+    },
+    occurredAt: "2030-01-01T00:00:02.000Z"
   };
 }

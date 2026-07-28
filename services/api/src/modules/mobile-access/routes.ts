@@ -11,6 +11,13 @@ export const MOBILE_COOKIE_NAME_PREFIX = "pk_upload_";
 const publicSessionParamsSchema = z.object({ publicSessionId: publicSessionIdSchema });
 const MAX_STREAMS_PER_MOBILE_CLIENT = 2;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+/**
+ * Phone-to-session handoffs are rare per real device, so a tight per-IP
+ * ceiling is the intended production behaviour. It is injectable only so an
+ * automated suite driving many sessions from one loopback address is not
+ * throttled by its own throughput.
+ */
+const MAX_MOBILE_EXCHANGES_PER_MINUTE = 8;
 
 export function registerMobileAccessRoutes(
   app: FastifyInstance,
@@ -20,15 +27,18 @@ export function registerMobileAccessRoutes(
     uploadOrigin: string;
     secureCookie: boolean;
     streamLimiter?: MobileSessionStreamLimiter;
+    maxExchangesPerMinute?: number;
   }
 ): void {
   const streamLimiter =
     dependencies.streamLimiter ?? new MobileSessionStreamLimiter(MAX_STREAMS_PER_MOBILE_CLIENT);
+  const maxExchangesPerMinute =
+    dependencies.maxExchangesPerMinute ?? MAX_MOBILE_EXCHANGES_PER_MINUTE;
 
   app.post(
     "/v1/mobile-auth/exchange",
     {
-      config: { rateLimit: { max: 8, timeWindow: "1 minute" } }
+      config: { rateLimit: { max: maxExchangesPerMinute, timeWindow: "1 minute" } }
     },
     async (request, reply) => {
       assertMobileOrigin(request, dependencies.uploadOrigin);
@@ -116,12 +126,19 @@ export function registerMobileAccessRoutes(
       };
 
       unsubscribe = dependencies.sessionEvents.subscribe(sessionId, (event) => {
-        if (event.type !== "session.canceled" && event.type !== "session.expired") return;
-        if (!reply.raw.destroyed) {
-          reply.raw.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
-          cleanup();
-          reply.raw.end();
-        }
+        const isFileChange =
+          event.type === "file.ready" ||
+          event.type === "file.rejected" ||
+          event.type === "file.deleted";
+        const isTerminal = event.type === "session.canceled" || event.type === "session.expired";
+        if (!isFileChange && !isTerminal) return;
+        if (reply.raw.destroyed) return;
+
+        reply.raw.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+        if (!isTerminal) return;
+
+        cleanup();
+        reply.raw.end();
       });
       request.raw.once("close", cleanup);
       reply.raw.once("close", cleanup);

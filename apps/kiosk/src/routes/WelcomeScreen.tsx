@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
 
+import { useKioskNavigate } from "../app/router.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
@@ -9,7 +9,7 @@ import { createKioskSession } from "../features/session/sessionService.js";
 export function WelcomeScreen() {
   const { locale, messages } = useLanguage();
   const { dispatch } = usePrototypeSession();
-  const navigate = useNavigate();
+  const navigate = useKioskNavigate();
   const createSession = useMutation({
     mutationFn: () => createKioskSession(locale),
     onSuccess: (session) => {

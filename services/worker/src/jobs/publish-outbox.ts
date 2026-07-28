@@ -248,6 +248,7 @@ function toSafeSessionEvent(input: {
   } else if (
     input.type === "upload.started" ||
     input.type === "file.uploaded" ||
+    input.type === "file.ready" ||
     input.type === "file.rejected"
   ) {
     safePayload = { sessionId, file: payload.file };

@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect } from "react";
-import { useNavigate, useOutletContext } from "react-router-dom";
 
-import type { KioskOutletContext } from "../components/KioskLayout.js";
+import type { UploadedFileRejectionCode } from "@printing-kiosk/contracts";
+
+import { useKioskNavigate } from "../app/router.js";
+import { useKioskOutletContext } from "../components/KioskLayout.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import { useSessionTimer } from "../features/session/SessionTimerProvider.js";
 import {
   fileExtension,
   formatFileSize,
@@ -18,9 +19,8 @@ import { listKioskSessionFiles } from "../features/session/sessionService.js";
 export function UploadScreen() {
   const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
-  const { recordActivity } = useSessionTimer();
-  const navigate = useNavigate();
-  const { realtimeConnected } = useOutletContext<KioskOutletContext>();
+  const navigate = useKioskNavigate();
+  const { realtimeConnected } = useKioskOutletContext();
   const sessionId = state.session?.id;
   const filesQuery = useQuery({
     queryKey: ["kiosk-session-files", sessionId],
@@ -40,8 +40,7 @@ export function UploadScreen() {
   useEffect(() => {
     if (!filesQuery.data) return;
     dispatch({ type: "FILES_SYNCED", files: filesQuery.data });
-    if (filesQuery.data.some((file) => file.status === "UPLOADING")) recordActivity();
-  }, [dispatch, filesQuery.data, filesQuery.dataUpdatedAt, recordActivity]);
+  }, [dispatch, filesQuery.data]);
 
   const file = state.files[0];
   const readyFile = isReadyFile(file);
@@ -132,7 +131,7 @@ export function UploadScreen() {
         {file && !readyFile ? (
           <p className="upload-panel__pending" role="status">
             {file.status === "REJECTED"
-              ? messages.upload.rejectedHelp
+              ? `${rejectionExplanation(file.rejectionCode, messages.upload)} ${messages.upload.rejectedHelp}`
               : messages.upload.continueUnavailable}
           </p>
         ) : null}
@@ -146,18 +145,32 @@ function fileStatusLabel(
   messages: {
     uploadComplete: string;
     fileUploading: string;
+    fileQuarantined: string;
     fileChecking: string;
     fileRejected: string;
     fileDeleting: string;
     fileDeleted: string;
   }
 ): string {
-  if (file.status === "READY") return messages.uploadComplete;
-  if (file.status === "UPLOADING") return messages.fileUploading;
-  if (file.status === "QUARANTINED") return messages.fileChecking;
-  if (file.status === "REJECTED") return messages.fileRejected;
-  if (file.status === "DELETED") return messages.fileDeleted;
-  return messages.fileDeleting;
+  switch (file.status) {
+    case "READY":
+      return messages.uploadComplete;
+    case "UPLOADING":
+      return messages.fileUploading;
+    case "QUARANTINED":
+      return messages.fileQuarantined;
+    case "VALIDATING":
+      return messages.fileChecking;
+    case "REJECTED":
+      return messages.fileRejected;
+    case "DELETING":
+    case "DELETE_PENDING":
+      return messages.fileDeleting;
+    case "DELETED":
+      return messages.fileDeleted;
+    default:
+      return unreachableStatus(file.status);
+  }
 }
 
 function statusMark(file: PrototypeFile): string {
@@ -171,4 +184,48 @@ function statusTone(file: PrototypeFile): "success" | "danger" | "pending" {
   if (file.status === "READY") return "success";
   if (file.status === "REJECTED" || file.status === "DELETED") return "danger";
   return "pending";
+}
+
+function rejectionExplanation(
+  rejectionCode: UploadedFileRejectionCode | null,
+  messages: {
+    rejectionMalware: string;
+    rejectionScanner: string;
+    rejectionEncrypted: string;
+    rejectionInvalid: string;
+    rejectionPageLimit: string;
+    rejectionLimits: string;
+    rejectionTimeout: string;
+    rejectionGeneric: string;
+  }
+): string {
+  if (!rejectionCode) return messages.rejectionGeneric;
+  switch (rejectionCode) {
+    case "MALWARE_DETECTED":
+      return messages.rejectionMalware;
+    case "MALWARE_SCAN_UNAVAILABLE":
+      return messages.rejectionScanner;
+    case "DOCUMENT_ENCRYPTED":
+      return messages.rejectionEncrypted;
+    case "DOCUMENT_MALFORMED":
+    case "UNSUPPORTED_DOCUMENT_CONTENT":
+      return messages.rejectionInvalid;
+    case "PAGE_LIMIT_EXCEEDED":
+      return messages.rejectionPageLimit;
+    case "IMAGE_DIMENSION_LIMIT_EXCEEDED":
+    case "IMAGE_PIXEL_LIMIT_EXCEEDED":
+    case "OUTPUT_SIZE_LIMIT_EXCEEDED":
+      return messages.rejectionLimits;
+    case "PROCESSING_TIMEOUT":
+      return messages.rejectionTimeout;
+    case "UPLOAD_FAILED":
+    case "PROCESSING_FAILED":
+      return messages.rejectionGeneric;
+    default:
+      return unreachableStatus(rejectionCode);
+  }
+}
+
+function unreachableStatus(status: never): never {
+  throw new Error(`UNSUPPORTED_FILE_STATUS:${String(status)}`);
 }

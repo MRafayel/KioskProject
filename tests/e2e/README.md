@@ -9,5 +9,8 @@
 
 The frontend browser tests mock their API boundary for deterministic visual and
 accessibility behavior. `pnpm test:integration` separately exercises the same
-contracts against real PostgreSQL and private MinIO. Phase 4 will add a single
-live two-context kiosk/phone journey over the sequenced event channel.
+contracts against the real local PostgreSQL, Redis, private MinIO, ClamAV, and
+isolated processor services. Realtime replay, phone cancellation, document
+validation, private preview authorization, and cleanup are covered at their
+API/worker integration boundaries rather than by sharing mutable live worker
+state with Playwright.

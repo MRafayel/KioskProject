@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { Route, Routes, useParams } from "react-router-dom";
 
 import type {
   MobileContextResponse,
+  UploadedFileRejectionCode,
   UploadedFileSnapshot,
   UploadedFileStatus
 } from "@printing-kiosk/contracts";
@@ -21,21 +21,22 @@ import {
 
 export interface AppProps {
   bootstrap: MobileBootstrapController | null;
+  publicSessionId: string | null;
 }
 
-export function App({ bootstrap }: AppProps) {
+export function App({ bootstrap, publicSessionId }: AppProps) {
   return (
     <LanguageProvider>
-      <Routes>
-        <Route path="/s/:publicSessionId" element={<SessionRoute bootstrap={bootstrap} />} />
-        <Route path="*" element={<LinkError code="INVALID_UPLOAD_LINK" />} />
-      </Routes>
+      {publicSessionId ? (
+        <SessionRoute bootstrap={bootstrap} publicSessionId={publicSessionId} />
+      ) : (
+        <LinkError code="INVALID_UPLOAD_LINK" />
+      )}
     </LanguageProvider>
   );
 }
 
-function SessionRoute({ bootstrap }: AppProps) {
-  const { publicSessionId } = useParams();
+function SessionRoute({ bootstrap, publicSessionId }: AppProps) {
   const { setLocale } = useLanguage();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<
@@ -173,7 +174,9 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
   const uploadAbortRef = useRef<AbortController | null>(null);
   const visibleFiles = files.filter((file) => file.status !== "DELETED");
   const capacityFiles = files.filter((file) =>
-    ["UPLOADING", "QUARANTINED", "DELETING", "DELETE_PENDING"].includes(file.status)
+    ["UPLOADING", "QUARANTINED", "VALIDATING", "READY", "DELETING", "DELETE_PENDING"].includes(
+      file.status
+    )
   );
   const acceptsUploads = sessionAvailable && isMobileUploadState(context.session.state);
   const currentBytes = capacityFiles.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
@@ -191,6 +194,12 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       uploadAbortRef.current.abort(error);
     }
   }, []);
+  const refreshFiles = useCallback(async (): Promise<UploadedFileSnapshot[]> => {
+    const result = await listUploadedFiles(context.session.id);
+    setFiles(result.items);
+    if (result.items.some((file) => file.status === "REJECTED")) setUploadSucceeded(false);
+    return result.items;
+  }, [context.session.id]);
 
   useEffect(() => {
     let active = true;
@@ -198,6 +207,7 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       (result) => {
         if (!active) return;
         setFiles(result.items);
+        if (result.items.some((file) => file.status === "REJECTED")) setUploadSucceeded(false);
         setLoadingFiles(false);
       },
       (requestError: unknown) => {
@@ -221,6 +231,32 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
     let active = true;
     let checking = false;
     let checkRequested = false;
+    let refreshingFiles = false;
+    let fileRefreshRequested = false;
+    const refreshAuthoritativeFiles = () => {
+      fileRefreshRequested = true;
+      if (refreshingFiles) return;
+      refreshingFiles = true;
+      void (async () => {
+        try {
+          while (active && fileRefreshRequested) {
+            fileRefreshRequested = false;
+            try {
+              await refreshFiles();
+            } catch (requestError) {
+              if (active && isTerminalMobileSessionError(requestError)) {
+                closeSession(requestError);
+                return;
+              }
+              if (active) setError(toRequestErrorState(requestError, "list"));
+            }
+          }
+        } finally {
+          refreshingFiles = false;
+          if (active && fileRefreshRequested) refreshAuthoritativeFiles();
+        }
+      })();
+    };
     const verifyAuthoritativeState = () => {
       checkRequested = true;
       if (checking) return;
@@ -250,8 +286,16 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
         }
       })();
     };
+    const reconcileAuthoritativeState = () => {
+      // SSE is a low-latency wake-up rather than durable truth for the phone.
+      // Refresh both resources after reconnects and on the periodic safety
+      // check so an event missed during a subscription race, network break, or
+      // API replica change cannot leave file status stale.
+      verifyAuthoritativeState();
+      refreshAuthoritativeFiles();
+    };
     const reconciliationTimer = window.setInterval(
-      verifyAuthoritativeState,
+      reconcileAuthoritativeState,
       MOBILE_SESSION_RECONCILIATION_MS
     );
     const unsubscribe = subscribeToMobileSessionEvents(
@@ -260,11 +304,12 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       {
         // Re-check after every connection so a terminal event that happened
         // between authentication and subscription cannot leave stale UI.
-        onConnected: verifyAuthoritativeState,
+        onConnected: reconcileAuthoritativeState,
         // EventSource reconnects automatically. A single authoritative check
         // distinguishes a revoked session from a transient network break.
-        onDisconnected: verifyAuthoritativeState,
-        onDesynchronized: verifyAuthoritativeState,
+        onDisconnected: reconcileAuthoritativeState,
+        onDesynchronized: reconcileAuthoritativeState,
+        onFilesChanged: refreshAuthoritativeFiles,
         onTerminal: (event) => {
           closeSession(
             new MobileRequestError(
@@ -283,7 +328,7 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       window.clearInterval(reconciliationTimer);
       unsubscribe();
     };
-  }, [closeSession, context.session.id, context.session.publicId, sessionAvailable]);
+  }, [closeSession, context.session.id, context.session.publicId, refreshFiles, sessionAvailable]);
 
   useEffect(
     () => () => {
@@ -291,11 +336,6 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
     },
     []
   );
-
-  async function refreshFiles(): Promise<void> {
-    const result = await listUploadedFiles(context.session.id);
-    setFiles(result.items);
-  }
 
   async function onFileSelected(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0];
@@ -338,8 +378,10 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       await uploadFile(context.session.id, file, context.csrfToken, setProgress, {
         signal: uploadAbort.signal
       });
-      await refreshFiles();
-      setUploadSucceeded(true);
+      const refreshedFiles = await refreshFiles();
+      setUploadSucceeded(
+        !refreshedFiles.some((uploadedFile) => uploadedFile.status === "REJECTED")
+      );
     } catch (requestError) {
       if (isTerminalMobileSessionError(requestError)) {
         closeSession(requestError);
@@ -520,7 +562,7 @@ function FileRow({
       <span className="file-details">
         <strong>{title}</strong>
         <small>
-          {statusLabel(file.status, text)}
+          {statusLabel(file, text)}
           {file.sizeBytes
             ? ` · ${interpolate(text.fileSize, { size: formatBytes(file.sizeBytes, locale) })}`
             : ""}
@@ -534,18 +576,58 @@ function FileRow({
 }
 
 function statusLabel(
-  status: UploadedFileStatus,
+  file: UploadedFileSnapshot,
   text: ReturnType<typeof useLanguage>["text"]
 ): string {
   const labels: Record<UploadedFileStatus, string> = {
     UPLOADING: text.statusUploading,
     QUARANTINED: text.statusQuarantined,
+    VALIDATING: text.statusValidating,
+    READY: text.statusReady,
     REJECTED: text.statusRejected,
     DELETING: text.statusDeleting,
     DELETE_PENDING: text.statusDeleting,
     DELETED: text.statusDeleted
   };
-  return labels[status];
+  const label = labels[file.status];
+  return file.status === "REJECTED"
+    ? `${label} · ${rejectionExplanation(file.rejectionCode, text)}`
+    : label;
+}
+
+function rejectionExplanation(
+  rejectionCode: UploadedFileRejectionCode | null,
+  text: ReturnType<typeof useLanguage>["text"]
+): string {
+  if (!rejectionCode) return text.rejectionGeneric;
+  switch (rejectionCode) {
+    case "MALWARE_DETECTED":
+      return text.rejectionMalware;
+    case "MALWARE_SCAN_UNAVAILABLE":
+      return text.rejectionScanner;
+    case "DOCUMENT_ENCRYPTED":
+      return text.rejectionEncrypted;
+    case "DOCUMENT_MALFORMED":
+    case "UNSUPPORTED_DOCUMENT_CONTENT":
+      return text.rejectionInvalid;
+    case "PAGE_LIMIT_EXCEEDED":
+      return text.rejectionPageLimit;
+    case "IMAGE_DIMENSION_LIMIT_EXCEEDED":
+    case "IMAGE_PIXEL_LIMIT_EXCEEDED":
+    case "OUTPUT_SIZE_LIMIT_EXCEEDED":
+      return text.rejectionLimits;
+    case "PROCESSING_TIMEOUT":
+      return text.rejectionTimeout;
+    case "UPLOAD_FAILED":
+    case "PROCESSING_FAILED":
+      return text.rejectionGeneric;
+    default:
+      return unreachableRejectionCode(rejectionCode);
+  }
+}
+
+function unreachableRejectionCode(code: never): never {
+  throw new Error(`UNSUPPORTED_REJECTION_CODE:${String(code)}`);
 }
 
 function validateLocalFile(

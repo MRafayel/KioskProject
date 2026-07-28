@@ -1,5 +1,4 @@
-import { Navigate, useNavigate } from "react-router-dom";
-
+import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
@@ -15,10 +14,10 @@ const outcomes: PrototypeOutcome[] = ["SUCCESS", "PAYMENT_DECLINED", "PRINTER_ER
 export function CheckoutScreen() {
   const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
-  const navigate = useNavigate();
+  const navigate = useKioskNavigate();
 
   const file = state.files[0];
-  if (!isReadyFile(file)) return <Navigate to="/upload" replace />;
+  if (!isReadyFile(file)) return <KioskRedirect to="/upload" />;
 
   const summary = calculatePrintSummary(state.files, state.settings);
 

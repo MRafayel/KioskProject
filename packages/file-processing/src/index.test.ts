@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { PreliminaryFileValidationError, validatePreliminaryFile } from "./index.js";
+import {
+  DocumentLimitError,
+  PreliminaryFileValidationError,
+  toPublicDocumentRejectionCode,
+  validateDeepDocumentMetadata,
+  validatePreliminaryFile
+} from "./index.js";
 
 describe("validatePreliminaryFile", () => {
   it.each([
@@ -58,6 +64,83 @@ describe("validatePreliminaryFile", () => {
           sizeBytes: 8
         }),
       "UNSUPPORTED_MEDIA_TYPE"
+    );
+  });
+});
+
+describe("validateDeepDocumentMetadata", () => {
+  const limits = {
+    maxPages: 200,
+    maxImageDimensionPixels: 20_000,
+    maxImagePixels: 40_000_000,
+    maxNormalizedBytes: 104_857_600,
+    maxPreviewBytesPerPage: 2_097_152
+  };
+
+  it("accepts bounded page, image and derivative metadata", () => {
+    expect(() =>
+      validateDeepDocumentMetadata(
+        {
+          pageCount: 2,
+          images: [
+            { widthPixels: 2_000, heightPixels: 3_000 },
+            { widthPixels: 1_200, heightPixels: 1_600 }
+          ],
+          normalizedSizeBytes: 10_000,
+          previewSizeBytes: [1_000, 1_200]
+        },
+        limits
+      )
+    ).not.toThrow();
+  });
+
+  it.each([
+    [
+      {
+        pageCount: 201,
+        images: []
+      },
+      "PAGE_LIMIT_EXCEEDED"
+    ],
+    [
+      {
+        pageCount: 1,
+        images: [{ widthPixels: 20_001, heightPixels: 1 }]
+      },
+      "IMAGE_DIMENSION_LIMIT_EXCEEDED"
+    ],
+    [
+      {
+        pageCount: 1,
+        images: [{ widthPixels: 10_000, heightPixels: 10_000 }]
+      },
+      "IMAGE_PIXEL_LIMIT_EXCEEDED"
+    ],
+    [
+      {
+        pageCount: 1,
+        images: [],
+        normalizedSizeBytes: 104_857_601
+      },
+      "OUTPUT_SIZE_LIMIT_EXCEEDED"
+    ]
+  ] as const)("rejects metadata outside resource limits", (metadata, expectedCode) => {
+    try {
+      validateDeepDocumentMetadata(metadata, limits);
+      throw new Error("EXPECTED_VALIDATION_ERROR");
+    } catch (error) {
+      expect(error).toBeInstanceOf(DocumentLimitError);
+      expect((error as DocumentLimitError).code).toBe(expectedCode);
+    }
+  });
+});
+
+describe("toPublicDocumentRejectionCode", () => {
+  it("maps known private errors and fails closed for unknown details", () => {
+    expect(toPublicDocumentRejectionCode("PDF_PASSWORD_REQUIRED")).toBe("DOCUMENT_ENCRYPTED");
+    expect(toPublicDocumentRejectionCode("PROCESSOR_TIMEOUT")).toBe("PROCESSING_TIMEOUT");
+    expect(toPublicDocumentRejectionCode("qpdf exited 139 at /private/customer.pdf")).toBe(
+      "PROCESSING_FAILED"
     );
   });
 });

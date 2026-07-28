@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: active implementation plan; Phases 0–4 complete
+Status: active implementation plan; Phases 0–5 implemented
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
@@ -495,16 +495,23 @@ scaling beyond one API replica.
 **Objective:** turn untrusted input into bounded inert previews and a canonical
 print artifact.
 
+**Implementation:** complete for the pilot/prototype boundary. See
+`docs/PHASE_5_STATUS.md` for the exact security model, operational boundaries,
+migrations, acceptance evidence, and commercial follow-up requirements.
+
 **Build:** UPLOADING to QUARANTINED to VALIDATING to READY/REJECTED workflow;
 malware scan; signature/parser checks; PDF encryption/page limits; bounded
 image decode; previews; immutable original; normalized PDF; resource-isolated
 workers; safe customer error codes.
 
-**Tools:** BullMQ, qpdf, PDF metadata/render tools, sharp, pdf-lib, ClamAV,
-container resource limits. Complete a license review before distribution.
+**Tools:** BullMQ, qpdf, Poppler, Sharp, PDFKit, ClamAV, tar-stream, private
+S3-compatible storage, and container resource limits. Complete a license review
+before distribution.
 
-**Modules:** services/worker/src/jobs/validate-file, generate-preview, and
-normalize-document; packages/file-processing; API previews module.
+**Modules:** `services/worker/src/jobs/process-document`,
+`services/worker/src/processing`, `services/worker/src/storage`,
+`services/document-processor`, `packages/file-processing`, and the API files
+and preview modules.
 
 **Endpoints:** GET session files; GET file pages; GET authenticated page
 preview. Reprocess is development/admin only.
@@ -512,8 +519,10 @@ preview. Reprocess is development/admin only.
 **Entities:** uploaded_files processing columns, file_pages, file_derivatives.
 
 **Tests:** corrupt/truncated/encrypted PDF, extreme page count/pixels, timeout,
-worker crash, shell characters in filename, preview authorization, immutable
-hash, rejection temp cleanup.
+lease loss and competing claims, shell characters in filename, preview
+authorization and digest validation, immutable source hash, malware rejection,
+rejection temp cleanup, durable `file.ready` delivery, and deletion of every
+known object.
 
 **Done:** READY means metadata, previews, and normalized PDF all exist;
 malformed input cannot crash or escape the worker.

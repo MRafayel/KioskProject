@@ -128,39 +128,98 @@ model MobileClient {
 }
 
 model UploadedFile {
-  id                  String       @id @db.Uuid
-  sessionId           String       @map("session_id") @db.Uuid
-  uploadedByClientId  String       @map("uploaded_by_client_id") @db.Uuid
-  clientFileId        String       @map("client_file_id") @db.Uuid
-  ordinal             Int
-  displayName         String       @map("display_name") @db.VarChar(160)
-  status              String       @db.VarChar(24)
-  kind                String?      @db.VarChar(12)
-  declaredMime        String?      @map("declared_mime") @db.VarChar(100)
-  detectedMime        String?      @map("detected_mime") @db.VarChar(100)
-  extension           String?      @db.VarChar(10)
-  reservedBytes       Int          @map("reserved_bytes")
-  sizeBytes           Int?         @map("size_bytes")
-  contentSha256       String?      @map("content_sha256") @db.VarChar(64)
-  quarantineObjectKey String?      @unique @map("quarantine_object_key") @db.VarChar(512)
-  rejectionCode       String?      @map("rejection_code") @db.VarChar(80)
-  cleanupAttempts     Int          @default(0) @map("cleanup_attempts")
-  cleanupDueAt        DateTime?    @map("cleanup_due_at")
-  cleanupErrorCode    String?      @map("cleanup_error_code") @db.VarChar(80)
-  createdAt           DateTime     @default(now()) @map("created_at")
-  updatedAt           DateTime     @default(now()) @updatedAt @map("updated_at")
-  quarantinedAt       DateTime?    @map("quarantined_at")
-  deleteRequestedAt   DateTime?    @map("delete_requested_at")
-  deletedAt           DateTime?    @map("deleted_at")
-  session             PrintSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
-  uploadedByClient    MobileClient @relation(fields: [uploadedByClientId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  id                       String           @id @db.Uuid
+  sessionId                String           @map("session_id") @db.Uuid
+  uploadedByClientId       String           @map("uploaded_by_client_id") @db.Uuid
+  clientFileId             String           @map("client_file_id") @db.Uuid
+  ordinal                  Int
+  displayName              String           @map("display_name") @db.VarChar(160)
+  status                   String           @db.VarChar(24)
+  kind                     String?          @db.VarChar(12)
+  declaredMime             String?          @map("declared_mime") @db.VarChar(100)
+  detectedMime             String?          @map("detected_mime") @db.VarChar(100)
+  extension                String?          @db.VarChar(10)
+  reservedBytes            Int              @map("reserved_bytes")
+  sizeBytes                Int?             @map("size_bytes")
+  contentSha256            String?          @map("content_sha256") @db.VarChar(64)
+  quarantineObjectKey      String?          @unique @map("quarantine_object_key") @db.VarChar(512)
+  rejectionCode            String?          @map("rejection_code") @db.VarChar(80)
+  processingRevision       Int              @default(1) @map("processing_revision")
+  processingGeneration     Int              @default(0) @map("processing_generation")
+  processingAttempts       Int              @default(0) @map("processing_attempts")
+  processingAvailableAt    DateTime         @default(now()) @map("processing_available_at")
+  processingEnqueuedAt     DateTime?        @map("processing_enqueued_at")
+  processingClaimToken     String?          @unique @map("processing_claim_token") @db.Uuid
+  processingLeaseExpiresAt DateTime?        @map("processing_lease_expires_at")
+  processingStartedAt      DateTime?        @map("processing_started_at")
+  processingErrorCode      String?          @map("processing_error_code") @db.VarChar(80)
+  malwareScanStatus        String           @default("PENDING") @map("malware_scan_status") @db.VarChar(24)
+  pageCount                Int?             @map("page_count")
+  cleanupAttempts          Int              @default(0) @map("cleanup_attempts")
+  cleanupDueAt             DateTime?        @map("cleanup_due_at")
+  cleanupErrorCode         String?          @map("cleanup_error_code") @db.VarChar(80)
+  createdAt                DateTime         @default(now()) @map("created_at")
+  updatedAt                DateTime         @default(now()) @updatedAt @map("updated_at")
+  quarantinedAt            DateTime?        @map("quarantined_at")
+  readyAt                  DateTime?        @map("ready_at")
+  deleteRequestedAt        DateTime?        @map("delete_requested_at")
+  deletedAt                DateTime?        @map("deleted_at")
+  session                  PrintSession     @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  uploadedByClient         MobileClient     @relation(fields: [uploadedByClientId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  pages                    FilePage[]
+  derivatives              FileDerivative[]
 
   @@unique([sessionId, clientFileId])
   @@unique([sessionId, ordinal])
   @@index([sessionId, status, ordinal])
   @@index([status, updatedAt])
+  @@index([status, processingAvailableAt, createdAt])
+  @@index([status, processingLeaseExpiresAt])
   @@index([cleanupDueAt])
   @@map("uploaded_files")
+}
+
+model FilePage {
+  id                  String         @id @db.Uuid
+  fileId              String         @map("file_id") @db.Uuid
+  processingRevision  Int            @map("processing_revision")
+  pageNumber          Int            @map("page_number")
+  widthPixels         Int            @map("width_pixels")
+  heightPixels        Int            @map("height_pixels")
+  previewDerivativeId String         @map("preview_derivative_id") @db.Uuid
+  createdAt           DateTime       @default(now()) @map("created_at")
+  file                UploadedFile   @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  previewDerivative   FileDerivative @relation("FilePagePreview", fields: [previewDerivativeId, fileId, processingRevision, pageNumber], references: [id, fileId, processingRevision, pageNumber], onDelete: Restrict)
+
+  @@unique([fileId, processingRevision, pageNumber])
+  @@unique([previewDerivativeId, fileId, processingRevision, pageNumber])
+  @@index([fileId, processingRevision])
+  @@map("file_pages")
+}
+
+model FileDerivative {
+  id                 String       @id @db.Uuid
+  fileId             String       @map("file_id") @db.Uuid
+  processingRevision Int          @map("processing_revision")
+  type               String       @db.VarChar(32)
+  status             String       @db.VarChar(24)
+  pageNumber         Int          @default(0) @map("page_number")
+  objectKey          String       @unique @map("object_key") @db.VarChar(512)
+  mimeType           String       @map("mime_type") @db.VarChar(100)
+  sizeBytes          Int          @map("size_bytes")
+  sha256             String       @db.VarChar(64)
+  widthPixels        Int?         @map("width_pixels")
+  heightPixels       Int?         @map("height_pixels")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  deletedAt          DateTime?    @map("deleted_at")
+  file               UploadedFile @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  previewForPage     FilePage?    @relation("FilePagePreview")
+
+  @@unique([id, fileId, processingRevision, pageNumber])
+  @@unique([fileId, type, processingRevision, pageNumber])
+  @@index([fileId, processingRevision, status])
+  @@index([status, createdAt])
+  @@map("file_derivatives")
 }
 
 model AuditEvent {

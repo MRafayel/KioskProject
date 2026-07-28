@@ -12,6 +12,7 @@ import { createDatabaseClient, type PrismaClient } from "@printing-kiosk/databas
 
 import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
+import { registerDocumentPreviewRoutes } from "./modules/files/previews.js";
 import { registerFileRoutes } from "./modules/files/routes.js";
 import { FileService } from "./modules/files/service.js";
 import { registerEventRoutes } from "./modules/events/routes.js";
@@ -43,6 +44,11 @@ export interface BuildAppOptions {
   objectStore?: ObjectStore;
   sessionEvents?: SessionEventSource;
   startBackgroundJobs?: boolean;
+  /**
+   * Per-IP ceiling on phone handoffs. Production keeps the built-in default;
+   * only an automated suite driving many sessions from one address raises it.
+   */
+  maxMobileExchangesPerMinute?: number;
 }
 
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
@@ -315,7 +321,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     mobileAccess,
     sessionEvents,
     uploadOrigin: options.environment.UPLOAD_ORIGIN,
-    secureCookie: new URL(options.environment.UPLOAD_ORIGIN).protocol === "https:"
+    secureCookie: new URL(options.environment.UPLOAD_ORIGIN).protocol === "https:",
+    ...(options.maxMobileExchangesPerMinute === undefined
+      ? {}
+      : { maxExchangesPerMinute: options.maxMobileExchangesPerMinute })
   });
   registerFileRoutes(app, {
     database,
@@ -324,6 +333,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     mobileAccess,
     uploadOrigin: options.environment.UPLOAD_ORIGIN,
     maxFileBytes: options.environment.MAX_FILE_BYTES
+  });
+  registerDocumentPreviewRoutes(app, {
+    database,
+    objectStore,
+    clock,
+    maxPreviewBytes: options.environment.MAX_PREVIEW_FILE_BYTES
   });
 
   return app;

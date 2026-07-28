@@ -1,7 +1,8 @@
 import { uploadedFileSnapshotSchema } from "@printing-kiosk/contracts";
-import type { PrismaClient } from "@printing-kiosk/database";
+import type { Prisma, PrismaClient } from "@printing-kiosk/database";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
+import { processingArtifactCleanupDueAt } from "./cleanup-policy.js";
 import type { ObjectStore } from "./object-store.js";
 
 const EXPIRABLE_STATES = [
@@ -113,20 +114,7 @@ export class FileJanitor {
               where: { sessionId: session.id, status: "ACTIVE" },
               data: { status: "EXPIRED", revokedAt: now }
             }),
-            transaction.uploadedFile.updateMany({
-              where: {
-                sessionId: session.id,
-                quarantineObjectKey: { not: null },
-                status: { in: ["QUARANTINED", "DELETE_PENDING"] }
-              },
-              data: {
-                status: "DELETE_PENDING",
-                deleteRequestedAt: now,
-                cleanupDueAt: now,
-                cleanupErrorCode: null,
-                updatedAt: now
-              }
-            }),
+            scheduleSessionFilesForCleanup(transaction, session.id, now),
             transaction.auditEvent.create({
               data: {
                 id: this.options.random.uuid(now),
@@ -176,7 +164,7 @@ export class FileJanitor {
       where: { status: "UPLOADING", updatedAt: { lte: staleAt } },
       data: {
         status: "DELETE_PENDING",
-        rejectionCode: "UPLOAD_INTERRUPTED",
+        rejectionCode: "UPLOAD_FAILED",
         cleanupDueAt: now,
         cleanupErrorCode: null,
         updatedAt: now
@@ -197,11 +185,6 @@ export class FileJanitor {
 
     for (const file of pending) {
       try {
-        if (!file.quarantineObjectKey) {
-          await this.finishCleanup(file.id, file.sessionId, now);
-          continue;
-        }
-
         const claimed = await this.options.database.uploadedFile.updateMany({
           where: {
             id: file.id,
@@ -211,6 +194,10 @@ export class FileJanitor {
           },
           data: {
             status: "DELETING",
+            processingGeneration: { increment: 1 },
+            processingClaimToken: null,
+            processingLeaseExpiresAt: null,
+            processingEnqueuedAt: null,
             cleanupAttempts: { increment: 1 },
             cleanupDueAt: now,
             updatedAt: now
@@ -219,7 +206,17 @@ export class FileJanitor {
         if (claimed.count !== 1) continue;
 
         try {
-          await this.options.objectStore.deleteObject({ key: file.quarantineObjectKey });
+          const derivatives = await this.options.database.fileDerivative.findMany({
+            where: { fileId: file.id, status: { not: "DELETED" } },
+            select: { objectKey: true }
+          });
+          const keys = [
+            ...new Set([
+              ...(file.quarantineObjectKey ? [file.quarantineObjectKey] : []),
+              ...derivatives.map((derivative) => derivative.objectKey)
+            ])
+          ];
+          await deleteObjectKeys(this.options.objectStore, keys);
           await this.finishCleanup(file.id, file.sessionId, now);
         } catch {
           const attempts = file.cleanupAttempts + 1;
@@ -255,7 +252,7 @@ export class FileJanitor {
 
       const session = await transaction.printSession.findUnique({
         where: { id: sessionId },
-        select: { id: true, eventSequence: true }
+        select: { id: true, kioskId: true, eventSequence: true }
       });
       const file = await transaction.uploadedFile.findFirst({
         where: { id: fileId, sessionId }
@@ -266,6 +263,8 @@ export class FileJanitor {
 
       const customerDeletion = Boolean(file.deleteRequestedAt);
       const targetStatus = customerDeletion ? "DELETED" : "REJECTED";
+      await transaction.filePage.deleteMany({ where: { fileId: file.id } });
+      await transaction.fileDerivative.deleteMany({ where: { fileId: file.id } });
       const updated = await transaction.uploadedFile.updateMany({
         where: {
           id: file.id,
@@ -277,6 +276,9 @@ export class FileJanitor {
               status: targetStatus,
               quarantineObjectKey: null,
               contentSha256: null,
+              pageCount: null,
+              processingClaimToken: null,
+              processingLeaseExpiresAt: null,
               cleanupDueAt: null,
               cleanupErrorCode: null,
               deletedAt: now,
@@ -286,6 +288,9 @@ export class FileJanitor {
               status: targetStatus,
               quarantineObjectKey: null,
               contentSha256: null,
+              pageCount: null,
+              processingClaimToken: null,
+              processingLeaseExpiresAt: null,
               cleanupDueAt: null,
               cleanupErrorCode: null,
               updatedAt: now
@@ -304,6 +309,9 @@ export class FileJanitor {
               status: targetStatus,
               kind: file.kind,
               sizeBytes: file.sizeBytes,
+              processingRevision: file.processingRevision,
+              pageCount: null,
+              rejectionCode: file.rejectionCode ?? "PROCESSING_FAILED",
               createdAt: file.createdAt.toISOString()
             })
           };
@@ -321,7 +329,32 @@ export class FileJanitor {
             type: customerDeletion ? "file.deleted" : "file.rejected",
             payload
           }
-        })
+        }),
+        ...(customerDeletion
+          ? [
+              transaction.auditEvent.create({
+                data: {
+                  id: this.options.random.uuid(now),
+                  occurredAt: now,
+                  actorType: "SYSTEM",
+                  actorId: "file-janitor",
+                  kioskId: session.kioskId,
+                  sessionId: session.id,
+                  action: "file.deleted",
+                  outcome: "SUCCESS",
+                  metadata: { fileId: file.id, finalizedDeferredCleanup: true }
+                }
+              }),
+              transaction.idempotencyRecord.updateMany({
+                where: {
+                  action: `files.delete:${session.id}:${file.id}`,
+                  resourceId: file.id,
+                  responseStatus: 202
+                },
+                data: { responseStatus: 204, responseBody: {} }
+              })
+            ]
+          : [])
       ]);
     });
   }
@@ -331,6 +364,45 @@ export class FileJanitor {
   }
 }
 
+async function deleteObjectKeys(objectStore: ObjectStore, keys: readonly string[]): Promise<void> {
+  const batchSize = 5;
+  for (let index = 0; index < keys.length; index += batchSize) {
+    await Promise.all(
+      keys.slice(index, index + batchSize).map((key) => objectStore.deleteObject({ key }))
+    );
+  }
+}
+
 function addSeconds(date: Date, seconds: number): Date {
   return new Date(date.getTime() + seconds * 1_000);
+}
+
+async function scheduleSessionFilesForCleanup(
+  transaction: Prisma.TransactionClient,
+  sessionId: string,
+  now: Date
+): Promise<void> {
+  const common = {
+    status: "DELETE_PENDING",
+    processingGeneration: { increment: 1 },
+    processingClaimToken: null,
+    processingLeaseExpiresAt: null,
+    processingEnqueuedAt: null,
+    deleteRequestedAt: now,
+    cleanupErrorCode: null,
+    updatedAt: now
+  } as const;
+
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: { in: ["DELETE_PENDING", "DELETING"] } },
+    data: common
+  });
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: { in: ["QUARANTINED", "READY"] } },
+    data: { ...common, cleanupDueAt: now }
+  });
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: "VALIDATING" },
+    data: { ...common, cleanupDueAt: processingArtifactCleanupDueAt(now) }
+  });
 }

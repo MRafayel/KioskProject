@@ -1,5 +1,7 @@
-import { Navigate, useNavigate } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 
+import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
@@ -11,36 +13,83 @@ import {
   type Orientation,
   type PrintSettings
 } from "../features/session/model.js";
+import {
+  deleteKioskSessionFile,
+  kioskPagePreviewUrl,
+  listKioskFilePages
+} from "../features/session/sessionService.js";
 
 export function ConfigureScreen() {
   const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
-  const navigate = useNavigate();
+  const navigate = useKioskNavigate();
+  const queryClient = useQueryClient();
+  const [removing, setRemoving] = useState(false);
+  const [removeFailed, setRemoveFailed] = useState(false);
   const file = state.files[0];
+  const sessionId = state.session?.id;
+  const readyFile = isReadyFile(file) ? file : null;
+  const pagesQuery = useQuery({
+    queryKey: ["kiosk-file-pages", sessionId, readyFile?.id, readyFile?.processingRevision ?? null],
+    queryFn: () => {
+      if (!sessionId || !readyFile) throw new Error("READY_FILE_REQUIRED");
+      return listKioskFilePages(sessionId, readyFile.id);
+    },
+    enabled: Boolean(sessionId && readyFile),
+    staleTime: 30_000,
+    retry: false
+  });
 
-  if (!isReadyFile(file)) return <Navigate to="/upload" replace />;
+  if (!readyFile || !sessionId) return <KioskRedirect to="/upload" />;
 
   const summary = calculatePrintSummary(state.files, state.settings);
   const update = (settings: Partial<PrintSettings>) =>
     dispatch({ type: "SETTINGS_CHANGED", settings });
-  const pageEnd = state.settings.pageEnd ?? file.pageCount;
+  const pageEnd = state.settings.pageEnd ?? readyFile.pageCount;
 
   const setPageStart = (value: number) => {
-    const nextPage = clamp(value, 1, file.pageCount);
+    const nextPage = clamp(value, 1, readyFile.pageCount);
     const nextEnd = Math.max(pageEnd, nextPage);
     update({
       pageStart: nextPage,
-      pageEnd: nextEnd === file.pageCount ? null : nextEnd
+      pageEnd: nextEnd === readyFile.pageCount ? null : nextEnd
     });
   };
 
   const setPageEnd = (value: number) => {
-    const nextPage = clamp(value, 1, file.pageCount);
+    const nextPage = clamp(value, 1, readyFile.pageCount);
     update({
       pageStart: Math.min(state.settings.pageStart, nextPage),
-      pageEnd: nextPage === file.pageCount ? null : nextPage
+      pageEnd: nextPage === readyFile.pageCount ? null : nextPage
     });
   };
+
+  const removeFile = async () => {
+    if (removing) return;
+    setRemoving(true);
+    setRemoveFailed(false);
+    try {
+      await deleteKioskSessionFile(sessionId, readyFile.id);
+      await queryClient.invalidateQueries({
+        queryKey: ["kiosk-session-files", sessionId],
+        exact: true
+      });
+      void navigate("/upload");
+    } catch {
+      // Keep the authoritative file and settings on screen. The stable
+      // idempotency key is retained so the customer can safely retry.
+      setRemoveFailed(true);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const preview =
+    pagesQuery.data?.fileId === readyFile.id &&
+    pagesQuery.data.processingRevision === readyFile.processingRevision &&
+    pagesQuery.data.pageCount === readyFile.pageCount
+      ? pagesQuery.data
+      : null;
 
   return (
     <div className="configuration-page">
@@ -52,34 +101,79 @@ export function ConfigureScreen() {
         </div>
         <article className="file-card file-card--compact">
           <div className="file-card__icon" aria-hidden="true">
-            PDF
+            {readyFile.kind ?? "FILE"}
           </div>
           <div>
             <strong>
-              {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+              {readyFile.name ??
+                messages.upload.fileName(readyFile.ordinal + 1, fileExtension(readyFile.kind))}
             </strong>
             <span>
               {messages.upload.fileMeta(
-                file.pageCount,
-                formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)
+                readyFile.pageCount,
+                formatFileSize(readyFile.sizeBytes, numberLocale, messages.units.megabytes)
               )}
             </span>
           </div>
           <button
             className="text-button"
             type="button"
-            onClick={() => {
-              dispatch({ type: "FILE_REMOVED", fileId: file.id });
-              void navigate("/upload");
-            }}
+            disabled={removing}
+            onClick={() => void removeFile()}
           >
-            {messages.configure.remove}
+            {removing ? messages.configure.removing : messages.configure.remove}
           </button>
         </article>
       </header>
+      {removeFailed ? (
+        <p className="configuration-error" role="alert">
+          {messages.configure.removeFailed}
+        </p>
+      ) : null}
 
       <div className="configuration-grid">
         <section className="settings-card" aria-labelledby="settings-title">
+          <section className="document-preview" aria-labelledby="preview-title">
+            <h2 id="preview-title">{messages.configure.previewTitle}</h2>
+            {pagesQuery.isPending ? (
+              <p className="document-preview__status" role="status">
+                {messages.configure.previewLoading}
+              </p>
+            ) : pagesQuery.isError || !preview ? (
+              <p className="document-preview__status document-preview__status--error" role="alert">
+                {messages.configure.previewUnavailable}
+              </p>
+            ) : (
+              <div className="document-preview__grid">
+                {preview.items.map((page) => (
+                  <figure className="document-preview__page" key={page.pageNumber}>
+                    {page.previewAvailable ? (
+                      <img
+                        alt={messages.configure.previewPage(page.pageNumber)}
+                        decoding="async"
+                        height={page.heightPixels}
+                        loading="lazy"
+                        src={kioskPagePreviewUrl(
+                          sessionId,
+                          readyFile.id,
+                          page.pageNumber,
+                          readyFile.processingRevision
+                        )}
+                        width={page.widthPixels}
+                      />
+                    ) : (
+                      <div
+                        className="document-preview__missing"
+                        aria-label={messages.configure.previewUnavailable}
+                      />
+                    )}
+                    <figcaption>{messages.configure.previewPage(page.pageNumber)}</figcaption>
+                  </figure>
+                ))}
+              </div>
+            )}
+          </section>
+
           <h2 id="settings-title">{messages.configure.settingsTitle}</h2>
           <div className="settings-grid">
             <fieldset className="page-range-field">
@@ -88,10 +182,10 @@ export function ConfigureScreen() {
                 <button
                   className="text-button"
                   type="button"
-                  disabled={state.settings.pageStart === 1 && pageEnd === file.pageCount}
+                  disabled={state.settings.pageStart === 1 && pageEnd === readyFile.pageCount}
                   onClick={() => update({ pageStart: 1, pageEnd: null })}
                 >
-                  {messages.configure.allPages(file.pageCount)}
+                  {messages.configure.allPages(readyFile.pageCount)}
                 </button>
               </div>
               <div className="page-range-controls">
@@ -99,7 +193,7 @@ export function ConfigureScreen() {
                   label={messages.configure.fromPage}
                   value={state.settings.pageStart}
                   minimum={1}
-                  maximum={file.pageCount}
+                  maximum={readyFile.pageCount}
                   decreaseLabel={messages.configure.decreaseFromPage}
                   increaseLabel={messages.configure.increaseFromPage}
                   onChange={setPageStart}
@@ -111,7 +205,7 @@ export function ConfigureScreen() {
                   label={messages.configure.toPage}
                   value={pageEnd}
                   minimum={1}
-                  maximum={file.pageCount}
+                  maximum={readyFile.pageCount}
                   decreaseLabel={messages.configure.decreaseToPage}
                   increaseLabel={messages.configure.increaseToPage}
                   onChange={setPageEnd}

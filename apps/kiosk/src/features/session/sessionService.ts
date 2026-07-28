@@ -1,6 +1,8 @@
 import {
   createSessionResponseSchema,
-  listUploadedFilesResponseSchema
+  filePagesResponseSchema,
+  listUploadedFilesResponseSchema,
+  type FilePagesResponse
 } from "@printing-kiosk/contracts";
 
 import type { Locale } from "../i18n/messages.js";
@@ -8,7 +10,10 @@ import type { PrototypeFile, PrototypeSession } from "./model.js";
 
 const CREATE_KEY_STORAGE = "printing-kiosk.pending-create";
 const CANCEL_KEY_PREFIX = "printing-kiosk.pending-cancel.";
+const DELETE_KEY_PREFIX = "printing-kiosk.pending-file-delete.";
 const inFlightClosures = new Map<string, Promise<void>>();
+
+export type KioskFilePages = FilePagesResponse;
 
 export async function createKioskSession(locale: Locale): Promise<PrototypeSession> {
   const idempotencyKey = getCreateIdempotencyKey(locale);
@@ -87,14 +92,75 @@ export async function listKioskSessionFiles(sessionId: string): Promise<Prototyp
     name: null,
     kind: file.kind,
     status: file.status,
-    pageCount: null,
+    pageCount: file.pageCount,
+    processingRevision: file.processingRevision,
+    rejectionCode: file.rejectionCode,
     sizeBytes: file.sizeBytes
   }));
 }
 
+export async function listKioskFilePages(
+  sessionId: string,
+  fileId: string
+): Promise<KioskFilePages> {
+  const response = await fetch(
+    `/agent/v1/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/pages`,
+    {
+      method: "GET",
+      headers: { accept: "application/json" },
+      cache: "no-store"
+    }
+  );
+
+  if (!response.ok) throw await sessionRequestError(response, "FILE_PAGES_FAILED");
+  return filePagesResponseSchema.parse(await response.json());
+}
+
+export function kioskPagePreviewUrl(
+  sessionId: string,
+  fileId: string,
+  pageNumber: number,
+  processingRevision: number
+): string {
+  const path =
+    `/agent/v1/sessions/${encodeURIComponent(sessionId)}` +
+    `/files/${encodeURIComponent(fileId)}/pages/${pageNumber}/preview`;
+  const query = new URLSearchParams({ revision: String(processingRevision) });
+  return `${path}?${query.toString()}`;
+}
+
+export async function deleteKioskSessionFile(sessionId: string, fileId: string): Promise<void> {
+  const storageKey = `${DELETE_KEY_PREFIX}${sessionId}.${fileId}`;
+  const idempotencyKey = sessionStorage.getItem(storageKey) ?? newIdempotencyKey();
+  sessionStorage.setItem(storageKey, idempotencyKey);
+
+  const response = await fetch(
+    `/agent/v1/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        accept: "application/json",
+        "idempotency-key": idempotencyKey
+      },
+      cache: "no-store"
+    }
+  );
+
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    throw await sessionRequestError(response, "FILE_DELETE_FAILED");
+  }
+  sessionStorage.removeItem(storageKey);
+}
+
 export function clearStoredSessionKeys(sessionId?: string): void {
   sessionStorage.removeItem(CREATE_KEY_STORAGE);
-  if (sessionId) sessionStorage.removeItem(`${CANCEL_KEY_PREFIX}${sessionId}`);
+  if (!sessionId) return;
+  sessionStorage.removeItem(`${CANCEL_KEY_PREFIX}${sessionId}`);
+  const deletePrefix = `${DELETE_KEY_PREFIX}${sessionId}.`;
+  for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+    const key = sessionStorage.key(index);
+    if (key?.startsWith(deletePrefix)) sessionStorage.removeItem(key);
+  }
 }
 
 function getCreateIdempotencyKey(locale: Locale): string {

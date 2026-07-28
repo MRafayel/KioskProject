@@ -65,6 +65,9 @@ describe("mobile file upload", () => {
         ordinal: 0,
         status: "QUARANTINED",
         kind: "PDF",
+        pageCount: null,
+        processingRevision: 1,
+        rejectionCode: null,
         sizeBytes: file.size,
         createdAt: "2030-01-01T00:00:00.000Z"
       }

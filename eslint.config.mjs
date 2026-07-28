@@ -21,7 +21,7 @@ export default tseslint.config(
     }
   },
   {
-    files: ["**/*.config.{js,mjs,ts}", "**/vite.config.ts"],
+    files: ["**/*.config.{js,mjs,ts}", "**/vite.config.ts", "**/scripts/**/*.mjs"],
     extends: [tseslint.configs.disableTypeChecked]
   }
 );

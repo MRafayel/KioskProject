@@ -12,6 +12,7 @@ import {
 import { Prisma, type PrismaClient } from "@printing-kiosk/database";
 import { isSessionExpired, SessionDomainError, transitionSession } from "@printing-kiosk/domain";
 
+import { processingArtifactCleanupDueAt } from "../files/cleanup-policy.js";
 import type { Clock, RandomSource } from "./crypto.js";
 import {
   deriveUploadSecrets,
@@ -359,19 +360,7 @@ export class SessionService {
                 where: { sessionId: session.id, status: "ACTIVE" },
                 data: { status: "REVOKED", revokedAt: now }
               }),
-              transaction.uploadedFile.updateMany({
-                where: {
-                  sessionId: session.id,
-                  quarantineObjectKey: { not: null },
-                  status: { in: ["QUARANTINED", "DELETE_PENDING"] }
-                },
-                data: {
-                  status: "DELETE_PENDING",
-                  deleteRequestedAt: now,
-                  cleanupDueAt: now,
-                  cleanupErrorCode: null
-                }
-              })
+              scheduleSessionFilesForCleanup(transaction, session.id, now)
             ]);
 
             const canceled = await transaction.printSession.findUniqueOrThrow({
@@ -560,6 +549,37 @@ type TransactionClient = Prisma.TransactionClient;
 type IdempotencyClient = Pick<PrismaClient, "idempotencyRecord"> | TransactionClient;
 type IdempotencyRecord = NonNullable<Awaited<ReturnType<typeof findIdempotencyRecord>>>;
 
+async function scheduleSessionFilesForCleanup(
+  transaction: TransactionClient,
+  sessionId: string,
+  now: Date
+): Promise<void> {
+  const common = {
+    status: "DELETE_PENDING",
+    processingGeneration: { increment: 1 },
+    processingClaimToken: null,
+    processingLeaseExpiresAt: null,
+    processingEnqueuedAt: null,
+    deleteRequestedAt: now,
+    cleanupErrorCode: null,
+    updatedAt: now
+  } as const;
+
+  // Repeated terminal transitions must preserve an existing future barrier.
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: { in: ["DELETE_PENDING", "DELETING"] } },
+    data: common
+  });
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: { in: ["QUARANTINED", "READY"] } },
+    data: { ...common, cleanupDueAt: now }
+  });
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: "VALIDATING" },
+    data: { ...common, cleanupDueAt: processingArtifactCleanupDueAt(now) }
+  });
+}
+
 async function lockKiosk(transaction: TransactionClient, kioskId: string): Promise<void> {
   const rows = await transaction.$queryRaw<Array<{ id: string }>>`
     SELECT "id" FROM "kiosks" WHERE "id" = ${kioskId} FOR UPDATE
@@ -694,19 +714,7 @@ async function expireSession(
       where: { sessionId: session.id, status: "ACTIVE" },
       data: { status: "EXPIRED", revokedAt: now }
     }),
-    transaction.uploadedFile.updateMany({
-      where: {
-        sessionId: session.id,
-        quarantineObjectKey: { not: null },
-        status: { in: ["QUARANTINED", "DELETE_PENDING"] }
-      },
-      data: {
-        status: "DELETE_PENDING",
-        deleteRequestedAt: now,
-        cleanupDueAt: now,
-        cleanupErrorCode: null
-      }
-    })
+    scheduleSessionFilesForCleanup(transaction, session.id, now)
   ]);
   await transaction.auditEvent.create({
     data: {

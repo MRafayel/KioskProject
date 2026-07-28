@@ -17,7 +17,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "test:integration": "vitest run tests/integration --passWithNoTests",
+    "test:integration": "vitest run tests/integration --passWithNoTests --no-file-parallelism",
     "test:e2e": "pnpm --filter @printing-kiosk/kiosk test:e2e && pnpm --filter @printing-kiosk/mobile-upload test:e2e && vitest run tests/e2e --passWithNoTests",
     "infra:up": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml up -d",
     "infra:down": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml down",
@@ -26,7 +26,8 @@
     "infra:validate": "node scripts/docker.mjs compose -f infrastructure/compose/dev.yml config --quiet",
     "db:generate": "pnpm --filter @printing-kiosk/database generate",
     "db:migrate": "pnpm --filter @printing-kiosk/database migrate",
-    "db:seed": "pnpm --filter @printing-kiosk/database seed"
+    "db:seed": "pnpm --filter @printing-kiosk/database seed",
+    "db:verify-phase5-upgrade": "pnpm --filter @printing-kiosk/database verify:phase5-upgrade"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -57,10 +57,19 @@ export interface MessageCatalog {
     refreshError: string;
     fileName: (position: number, extension: string) => string;
     fileUploading: string;
+    fileQuarantined: string;
     fileChecking: string;
     fileRejected: string;
     fileDeleting: string;
     fileDeleted: string;
+    rejectionMalware: string;
+    rejectionScanner: string;
+    rejectionEncrypted: string;
+    rejectionInvalid: string;
+    rejectionPageLimit: string;
+    rejectionLimits: string;
+    rejectionTimeout: string;
+    rejectionGeneric: string;
     fileMeta: (pageCount: number, size: string) => string;
   };
   configure: {
@@ -68,6 +77,12 @@ export interface MessageCatalog {
     title: string;
     description: string;
     remove: string;
+    removing: string;
+    removeFailed: string;
+    previewTitle: string;
+    previewLoading: string;
+    previewUnavailable: string;
+    previewPage: (pageNumber: number) => string;
     settingsTitle: string;
     pages: string;
     allPages: (pageCount: number) => string;
@@ -242,10 +257,19 @@ const english: MessageCatalog = {
     fileName: (position, extension) =>
       extension === "file" ? `Document ${position}` : `Document ${position}.${extension}`,
     fileUploading: "Upload in progress",
-    fileChecking: "Received — checking file safety",
+    fileQuarantined: "Received — waiting for a secure check",
+    fileChecking: "Checking safety and preparing page previews",
     fileRejected: "File rejected",
     fileDeleting: "Removing file",
     fileDeleted: "File removed",
+    rejectionMalware: "This file did not pass the malware safety scan.",
+    rejectionScanner: "The safety scanner is unavailable. Try again in a few minutes.",
+    rejectionEncrypted: "Password-protected documents cannot be printed.",
+    rejectionInvalid: "This file is damaged or is not a valid PDF or image.",
+    rejectionPageLimit: "This document has more pages than we can print.",
+    rejectionLimits: "This document exceeds the allowed image size limits.",
+    rejectionTimeout: "This document took too long to process safely.",
+    rejectionGeneric: "This file could not be prepared safely. Upload another file.",
     fileMeta: (pageCount, size) => `${pageCount} ${pageCount === 1 ? "page" : "pages"} · ${size}`
   },
   configure: {
@@ -253,6 +277,12 @@ const english: MessageCatalog = {
     title: "Choose print settings",
     description: "Review each option before payment. All output is black-and-white.",
     remove: "Remove",
+    removing: "Removing…",
+    removeFailed: "The file could not be removed. Try again before continuing.",
+    previewTitle: "Document preview",
+    previewLoading: "Preparing page previews…",
+    previewUnavailable: "Page previews are temporarily unavailable. Try again.",
+    previewPage: (pageNumber) => `Page ${pageNumber}`,
     settingsTitle: "Document settings",
     pages: "Pages",
     allPages: (pageCount) => `All pages (1–${pageCount})`,
@@ -414,10 +444,19 @@ const russian: MessageCatalog = {
     fileName: (position, extension) =>
       extension === "file" ? `Документ ${position}` : `Документ ${position}.${extension}`,
     fileUploading: "Файл загружается",
-    fileChecking: "Файл получен — выполняется проверка безопасности",
+    fileQuarantined: "Файл получен и ожидает безопасной проверки",
+    fileChecking: "Проверяем безопасность и готовим страницы для просмотра",
     fileRejected: "Файл отклонён",
     fileDeleting: "Удаляем файл",
     fileDeleted: "Файл удалён",
+    rejectionMalware: "Файл не прошёл проверку на вредоносное содержимое.",
+    rejectionScanner: "Проверка безопасности недоступна. Повторите попытку через несколько минут.",
+    rejectionEncrypted: "Документы, защищённые паролем, напечатать нельзя.",
+    rejectionInvalid: "Файл повреждён или не является корректным PDF-файлом либо изображением.",
+    rejectionPageLimit: "В документе больше страниц, чем можно напечатать.",
+    rejectionLimits: "Документ превышает допустимый размер изображения.",
+    rejectionTimeout: "Не удалось безопасно обработать документ за отведённое время.",
+    rejectionGeneric: "Не удалось безопасно подготовить файл. Загрузите другой документ.",
     fileMeta: (pageCount, size) =>
       `${pageCount} ${russianPlural(pageCount, "страница", "страницы", "страниц")} · ${size}`
   },
@@ -427,6 +466,12 @@ const russian: MessageCatalog = {
     description:
       "Проверьте все параметры перед оплатой. Печать выполняется только в чёрно-белом режиме.",
     remove: "Удалить",
+    removing: "Удаляем…",
+    removeFailed: "Не удалось удалить файл. Повторите попытку перед продолжением.",
+    previewTitle: "Предварительный просмотр",
+    previewLoading: "Готовим страницы для просмотра…",
+    previewUnavailable: "Предварительный просмотр временно недоступен. Повторите попытку.",
+    previewPage: (pageNumber) => `Страница ${pageNumber}`,
     settingsTitle: "Параметры документа",
     pages: "Страницы",
     allPages: (pageCount) => `Все страницы (1–${pageCount})`,
@@ -591,10 +636,19 @@ const armenian: MessageCatalog = {
     fileName: (position, extension) =>
       extension === "file" ? `Փաստաթուղթ ${position}` : `Փաստաթուղթ ${position}.${extension}`,
     fileUploading: "Ֆայլը վերբեռնվում է",
-    fileChecking: "Ֆայլը ստացվել է․ անվտանգության ստուգում է կատարվում",
+    fileQuarantined: "Ֆայլը ստացվել է և սպասում է անվտանգ ստուգման",
+    fileChecking: "Ստուգում ենք անվտանգությունը և պատրաստում էջերի նախադիտումները",
     fileRejected: "Ֆայլը մերժվել է",
     fileDeleting: "Ֆայլը հեռացվում է",
     fileDeleted: "Ֆայլը հեռացված է",
+    rejectionMalware: "Ֆայլը չի անցել վնասակար բովանդակության անվտանգության ստուգումը։",
+    rejectionScanner: "Անվտանգության ստուգումը հասանելի չէ։ Կրկնեք փորձը մի քանի րոպե անց։",
+    rejectionEncrypted: "Գաղտնաբառով պաշտպանված փաստաթղթերը հնարավոր չէ տպել։",
+    rejectionInvalid: "Ֆայլը վնասված է կամ վավեր PDF փաստաթուղթ կամ պատկեր չէ։",
+    rejectionPageLimit: "Փաստաթուղթն ունի ավելի շատ էջ, քան հնարավոր է տպել։",
+    rejectionLimits: "Փաստաթուղթը գերազանցում է պատկերի թույլատրելի սահմանները։",
+    rejectionTimeout: "Չհաջողվեց հատկացված ժամանակում անվտանգ մշակել փաստաթուղթը։",
+    rejectionGeneric: "Չհաջողվեց անվտանգ պատրաստել ֆայլը։ Վերբեռնեք մեկ այլ փաստաթուղթ։",
     fileMeta: (pageCount, size) => `${pageCount} էջ · ${size}`
   },
   configure: {
@@ -602,6 +656,12 @@ const armenian: MessageCatalog = {
     title: "Ընտրեք տպման կարգավորումները",
     description: "Վճարումից առաջ ստուգեք բոլոր ընտրանքները։ Տպագրությունը միայն սև-սպիտակ է։",
     remove: "Հեռացնել",
+    removing: "Հեռացվում է…",
+    removeFailed: "Չհաջողվեց հեռացնել ֆայլը։ Շարունակելուց առաջ փորձեք կրկին։",
+    previewTitle: "Փաստաթղթի նախադիտում",
+    previewLoading: "Պատրաստում ենք էջերի նախադիտումները…",
+    previewUnavailable: "Էջերի նախադիտումը ժամանակավորապես անհասանելի է։ Փորձեք կրկին։",
+    previewPage: (pageNumber) => `Էջ ${pageNumber}`,
     settingsTitle: "Փաստաթղթի կարգավորումներ",
     pages: "Էջեր",
     allPages: (pageCount) => `Բոլոր էջերը (1–${pageCount})`,

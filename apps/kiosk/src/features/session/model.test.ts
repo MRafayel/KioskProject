@@ -25,6 +25,8 @@ const file: PrototypeFile = {
   kind: "PDF",
   status: "READY",
   pageCount: 8,
+  processingRevision: 1,
+  rejectionCode: null,
   sizeBytes: 2_000_000
 };
 
@@ -78,7 +80,8 @@ describe("prototype session model", () => {
       ordinal: 1,
       name: null,
       status: "QUARANTINED",
-      pageCount: null
+      pageCount: null,
+      processingRevision: 1
     };
 
     expect(
@@ -93,7 +96,9 @@ describe("prototype session model", () => {
     const rejectedFile: PrototypeFile = {
       ...file,
       status: "REJECTED",
-      pageCount: null
+      pageCount: null,
+      processingRevision: 1,
+      rejectionCode: "DOCUMENT_MALFORMED"
     };
     const replacement: PrototypeFile = {
       ...file,
@@ -101,7 +106,8 @@ describe("prototype session model", () => {
       ordinal: 1,
       name: null,
       status: "QUARANTINED",
-      pageCount: null
+      pageCount: null,
+      processingRevision: 1
     };
 
     expect(
