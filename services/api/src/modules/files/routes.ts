@@ -12,9 +12,9 @@ import {
   singleHeader
 } from "../mobile-access/routes.js";
 import type { MobileAccessService } from "../mobile-access/service.js";
-import { authenticateKiosk } from "../sessions/auth.js";
 import type { Clock } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
+import type { KioskAuthenticationThrottle } from "../sessions/rate-limit.js";
 import type { FileService } from "./service.js";
 
 const sessionParamsSchema = z.object({ sessionId: z.string().uuid() });
@@ -30,6 +30,7 @@ export function registerFileRoutes(
     clock: Clock;
     files: FileService;
     mobileAccess: MobileAccessService;
+    kioskAuthentication: KioskAuthenticationThrottle;
     uploadOrigin: string;
     maxFileBytes: number;
   }
@@ -135,7 +136,7 @@ export function registerFileRoutes(
     async (request, reply) => {
       const params = sessionParamsSchema.parse(request.params);
       if (request.headers.authorization) {
-        const kiosk = await authenticateKiosk(
+        const kiosk = await dependencies.kioskAuthentication.authenticate(
           request,
           dependencies.database,
           dependencies.clock,

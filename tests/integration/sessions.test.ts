@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { DeleteObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
+
 import { io, type Socket } from "socket.io-client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -46,6 +48,17 @@ const environment = loadEnvironment({
 const database = createDatabaseClient(environment.DATABASE_URL);
 const authorization = `Bearer ${environment.DEV_KIOSK_API_KEY}`;
 const objectStore = createS3ObjectStore(environment);
+// Cleanup lists a storage prefix, which the ObjectStore contract deliberately
+// does not expose, so these tests talk to the bucket directly.
+const integrationS3Client = new S3Client({
+  endpoint: environment.S3_ENDPOINT,
+  region: environment.S3_REGION,
+  forcePathStyle: environment.S3_FORCE_PATH_STYLE,
+  credentials: {
+    accessKeyId: environment.S3_ACCESS_KEY_ID,
+    secretAccessKey: environment.S3_SECRET_ACCESS_KEY
+  }
+});
 const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
 beforeAll(async () => {
@@ -114,17 +127,7 @@ async function cleanIntegrationSessions(): Promise<void> {
     where: { sessionId: { in: sessionIds } },
     select: { id: true }
   });
-  const storedObjects = await database.uploadedFile.findMany({
-    where: { sessionId: { in: sessionIds }, quarantineObjectKey: { not: null } },
-    select: { quarantineObjectKey: true }
-  });
-  await Promise.all(
-    storedObjects.map(async (file) => {
-      if (file.quarantineObjectKey) {
-        await objectStore.deleteObject({ key: file.quarantineObjectKey });
-      }
-    })
-  );
+  await deleteObjectsUnderSessionPrefixes(sessionIds);
   await database.uploadedFile.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.sessionUploadGrant.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.mobileClient.deleteMany({ where: { sessionId: { in: sessionIds } } });
@@ -1066,15 +1069,23 @@ describe.sequential("authoritative print sessions", () => {
   it("delivers a committed event and replays the same event after reconnect", async () => {
     const sessionEvents = new LocalSessionEventBus();
     const app = await buildApp({ environment, database, objectStore, sessionEvents });
+    // The realtime queue name is a fixed constant, so a developer's running
+    // `pnpm dev` would compete for these jobs as a second BullMQ consumer and
+    // this delivery would silently go to that process instead. A dedicated
+    // Redis database keeps the test's publisher and gateway to themselves.
+    const realtimeEnvironment = {
+      ...environment,
+      REDIS_URL: withRedisDatabase(environment.REDIS_URL, 15)
+    };
     const gateway = new RealtimeGateway(
       app.server,
       database,
       new SystemClock(),
-      environment,
+      realtimeEnvironment,
       silentRealtimeLogger,
       sessionEvents
     );
-    const publisher = new OutboxPublisher(database, environment, silentRealtimeLogger, 10);
+    const publisher = new OutboxPublisher(database, realtimeEnvironment, silentRealtimeLogger, 10);
     let socket: Socket | undefined;
     let unauthorizedSocket: Socket | undefined;
 
@@ -1397,6 +1408,40 @@ const silentRealtimeLogger = {
   warn: () => undefined,
   error: () => undefined
 };
+
+/**
+ * Deletes by storage prefix rather than by the keys still recorded in the
+ * database. A finalized row has its object key scrubbed, so anything these
+ * tests leave behind would otherwise become an orphan no query can find.
+ */
+async function deleteObjectsUnderSessionPrefixes(sessionIds: string[]): Promise<void> {
+  for (const sessionId of sessionIds) {
+    let continuationToken: string | undefined;
+    do {
+      const listed = await integrationS3Client.send(
+        new ListObjectsV2Command({
+          Bucket: environment.S3_BUCKET,
+          Prefix: `quarantine/v1/${sessionId}/`,
+          ...(continuationToken ? { ContinuationToken: continuationToken } : {})
+        })
+      );
+      for (const object of listed.Contents ?? []) {
+        if (object.Key) {
+          await integrationS3Client.send(
+            new DeleteObjectCommand({ Bucket: environment.S3_BUCKET, Key: object.Key })
+          );
+        }
+      }
+      continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+    } while (continuationToken);
+  }
+}
+
+function withRedisDatabase(redisUrl: string, database: number): string {
+  const url = new URL(redisUrl);
+  url.pathname = `/${database}`;
+  return url.toString();
+}
 
 function waitForSocketConnect(socket: Socket): Promise<void> {
   return withTimeout(

@@ -28,6 +28,7 @@ import {
   type RandomSource
 } from "./modules/sessions/crypto.js";
 import { ApiError } from "./modules/sessions/errors.js";
+import { createKioskAuthenticationThrottle } from "./modules/sessions/rate-limit.js";
 import { registerSessionRoutes } from "./modules/sessions/routes.js";
 import { SessionService } from "./modules/sessions/service.js";
 
@@ -309,8 +310,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     return reply.code(ready ? 200 : 503).send(response);
   });
 
-  registerSessionRoutes(app, { database, clock, sessions });
-  registerEventRoutes(app, { database, clock });
+  // One throttle across every kiosk-authenticated route, so a caller cannot
+  // spend a fresh allowance simply by guessing against a different path.
+  const kioskAuthentication = createKioskAuthenticationThrottle(app);
+
+  registerSessionRoutes(app, { database, clock, sessions, kioskAuthentication });
+  registerEventRoutes(app, { database, clock, kioskAuthentication });
   registerMobileAccessRoutes(app, {
     mobileAccess,
     sessionEvents,
@@ -322,6 +327,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     clock,
     files,
     mobileAccess,
+    kioskAuthentication,
     uploadOrigin: options.environment.UPLOAD_ORIGIN,
     maxFileBytes: options.environment.MAX_FILE_BYTES
   });

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadEnvironment } from "@printing-kiosk/config";
@@ -5,6 +7,19 @@ import { loadEnvironment } from "@printing-kiosk/config";
 import { buildApp } from "./app.js";
 
 const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
+
+/**
+ * Answers every credential lookup with "no such credential" so authentication
+ * behaviour can be exercised without a running database.
+ */
+function noMatchingCredentialDatabase(): NonNullable<Parameters<typeof buildApp>[0]["database"]> {
+  return {
+    kioskCredential: {
+      findUnique: () => Promise.resolve(null),
+      updateMany: () => Promise.resolve({ count: 0 })
+    }
+  } as unknown as NonNullable<Parameters<typeof buildApp>[0]["database"]>;
+}
 
 afterEach(async () => {
   await Promise.all(openApps.splice(0).map(async (app) => app.close()));
@@ -89,6 +104,129 @@ describe("session route authentication", () => {
 
     expect(response.statusCode).toBe(401);
     expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+  });
+
+  it("stops answering a source that keeps presenting an unusable credential", async () => {
+    const app = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(app);
+
+    const guess = (index: number) =>
+      app.inject({
+        method: "GET",
+        url: "/v1/sessions/01900000-0000-7000-8000-000000000010/events?after=0",
+        headers: { authorization: `Bearer guessed-kiosk-credential-${index}-aaaaaaaa` }
+      });
+
+    const codes: number[] = [];
+    for (let index = 0; index < 30; index += 1) {
+      codes.push((await guess(index)).statusCode);
+    }
+
+    // Guessing stays answerable for a while, then stops costing a lookup.
+    expect(codes[0]).toBe(401);
+    expect(codes.at(-1)).toBe(429);
+    expect(codes.filter((code) => code === 401).length).toBeGreaterThan(10);
+    expect(codes.filter((code) => code === 429).length).toBeGreaterThan(0);
+  });
+
+  it("does not spend the failure allowance on requests that never present a credential", async () => {
+    const app = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(app);
+
+    // A missing credential is refused before authentication is attempted, so it
+    // must not push a legitimate kiosk toward the guessing threshold.
+    for (let index = 0; index < 30; index += 1) {
+      await app.inject({ method: "GET", url: "/health/live" });
+    }
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/sessions/01900000-0000-7000-8000-000000000010/events?after=0",
+      headers: { authorization: "Bearer guessed-kiosk-credential-final-aaaa" }
+    });
+
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("keeps serving a working credential while another source is being throttled", async () => {
+    const workingCredential = "Bearer a-working-kiosk-credential-value-1";
+    const app = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      // Accepts exactly one credential, as the real lookup would.
+      database: {
+        kioskCredential: {
+          findUnique: ({ where }: { where: { secretDigest: string } }) =>
+            Promise.resolve(
+              where.secretDigest ===
+                createHash("sha256").update("a-working-kiosk-credential-value-1").digest("hex")
+                ? {
+                    id: "credential-row",
+                    kioskId: "kiosk_dev_001",
+                    credentialId: "working-credential",
+                    scopes: ["sessions:read"],
+                    revokedAt: null,
+                    expiresAt: null,
+                    kiosk: { status: "ACTIVE" }
+                  }
+                : null
+            ),
+          updateMany: () => Promise.resolve({ count: 1 })
+        },
+        // Authenticated, but this kiosk owns no such session.
+        printSession: { findFirst: () => Promise.resolve(null) }
+      } as unknown as NonNullable<Parameters<typeof buildApp>[0]["database"]>
+    });
+    openApps.push(app);
+
+    const replay = (authorization: string) =>
+      app.inject({
+        method: "GET",
+        url: "/v1/sessions/01900000-0000-7000-8000-000000000010/events?after=0",
+        headers: { authorization }
+      });
+
+    // 404 proves the credential authenticated and the request reached the
+    // handler; 401 proves a guess was answered; 429 proves it was throttled.
+    expect((await replay(workingCredential)).statusCode).toBe(404);
+    for (let index = 0; index < 30; index += 1) {
+      await replay(`Bearer guessed-kiosk-credential-${index}-aaaaaaaa`);
+    }
+
+    // Behind a proxy every kiosk shares one apparent address, so a guesser must
+    // not be able to take the fleet down with it.
+    expect((await replay("Bearer guessed-kiosk-credential-final-aaaa")).statusCode).toBe(429);
+    expect((await replay(workingCredential)).statusCode).toBe(404);
+  });
+
+  it("limits how often one credential may ask for a new session", async () => {
+    const app = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(app);
+
+    const codes: number[] = [];
+    for (let index = 0; index < 14; index += 1) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/kiosks/kiosk_dev_001/sessions",
+        headers: {
+          authorization: "Bearer a-single-kiosk-credential-value-1234",
+          "idempotency-key": `create-attempt-${index}`
+        },
+        payload: { locale: "hy" }
+      });
+      codes.push(response.statusCode);
+    }
+
+    expect(codes).toContain(429);
+    expect(codes.indexOf(429)).toBeGreaterThanOrEqual(10);
   });
 });
 

@@ -127,6 +127,17 @@ export class RealtimeGateway {
     });
   }
 
+  /**
+   * Readiness borrows the delivery worker's own connection, so a healthy answer
+   * means the connection this process actually depends on is usable. BullMQ
+   * types only the commands it uses, so a keyspace read is the cheapest typed
+   * round-trip that still proves the server answers this client.
+   */
+  public async checkRedis(): Promise<void> {
+    const client = await this.deliveryWorker.client;
+    await client.get("printing-kiosk:readiness-probe");
+  }
+
   public async close(): Promise<void> {
     await this.deliveryWorker.close();
     await this.io.close();

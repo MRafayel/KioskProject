@@ -80,6 +80,17 @@ describe("loadEnvironment", () => {
     ).toThrow();
   });
 
+  it("rejects a DATABASE_URL that is not a PostgreSQL URL", () => {
+    expect(() => loadEnvironment({ DATABASE_URL: "not a url at all" })).toThrow();
+    expect(() =>
+      loadEnvironment({ DATABASE_URL: "mysql://localhost:3306/printing_kiosk" })
+    ).toThrow();
+    expect(
+      loadEnvironment({ DATABASE_URL: "postgres://printing_kiosk@localhost:5432/printing_kiosk" })
+        .DATABASE_URL
+    ).toBe("postgres://printing_kiosk@localhost:5432/printing_kiosk");
+  });
+
   it("does not allow the mobile credential to expire before the displayed idle deadline", () => {
     expect(() =>
       loadEnvironment({ SESSION_IDLE_TTL_MINUTES: "10", MOBILE_CLIENT_TTL_MINUTES: "9" })

@@ -14,6 +14,10 @@ const objectStore = createS3ObjectStore(environment);
 const database = createDatabaseClient(environment.DATABASE_URL);
 const clock = new SystemClock();
 const sessionEvents = new LocalSessionEventBus();
+// The gateway needs the HTTP server that buildApp creates, and readiness needs
+// the gateway's Redis connection. Readiness only runs once the server is
+// listening, by which point this holder is populated.
+const realtime: { gateway?: RealtimeGateway } = {};
 const app = await buildApp({
   environment,
   logger: true,
@@ -21,9 +25,15 @@ const app = await buildApp({
   database,
   clock,
   sessionEvents,
-  readinessCheck: () => checkInfrastructure(environment, objectStore)
+  readinessCheck: () =>
+    checkInfrastructure({
+      database,
+      objectStore,
+      redis: () =>
+        realtime.gateway?.checkRedis() ?? Promise.reject(new Error("REALTIME_GATEWAY_NOT_STARTED"))
+    })
 });
-const realtime = new RealtimeGateway(
+realtime.gateway = new RealtimeGateway(
   app.server,
   database,
   clock,
@@ -32,7 +42,7 @@ const realtime = new RealtimeGateway(
   sessionEvents
 );
 app.addHook("onClose", async () => {
-  await realtime.close();
+  await realtime.gateway?.close();
   await database.$disconnect();
 });
 

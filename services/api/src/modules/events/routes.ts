@@ -4,9 +4,9 @@ import { z } from "zod";
 import { sessionEventReplayResponseSchema, sessionEventSchema } from "@printing-kiosk/contracts";
 import type { PrismaClient } from "@printing-kiosk/database";
 
-import { authenticateKiosk } from "../sessions/auth.js";
 import type { Clock } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
+import type { KioskAuthenticationThrottle } from "../sessions/rate-limit.js";
 
 const sessionParamsSchema = z.object({ sessionId: z.string().uuid() });
 const replayQuerySchema = z.object({
@@ -16,10 +16,16 @@ const REPLAY_PAGE_SIZE = 100;
 
 export function registerEventRoutes(
   app: FastifyInstance,
-  dependencies: { database: PrismaClient; clock: Clock }
+  dependencies: {
+    database: PrismaClient;
+    clock: Clock;
+    kioskAuthentication: KioskAuthenticationThrottle;
+  }
 ): void {
+  // Replay is paged and drives reconnect recovery, so it carries no request
+  // ceiling of its own; the shared failed-authentication throttle still applies.
   app.get("/v1/sessions/:sessionId/events", async (request, reply) => {
-    const identity = await authenticateKiosk(
+    const identity = await dependencies.kioskAuthentication.authenticate(
       request,
       dependencies.database,
       dependencies.clock,

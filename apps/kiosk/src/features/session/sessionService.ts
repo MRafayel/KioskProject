@@ -10,17 +10,42 @@ const CREATE_KEY_STORAGE = "printing-kiosk.pending-create";
 const CANCEL_KEY_PREFIX = "printing-kiosk.pending-cancel.";
 const inFlightClosures = new Map<string, Promise<void>>();
 
+interface PendingCreate {
+  key: string;
+  locale: Locale;
+}
+
 export async function createKioskSession(locale: Locale): Promise<PrototypeSession> {
-  const idempotencyKey = getCreateIdempotencyKey(locale);
-  const response = await fetch("/agent/v1/sessions", {
+  // A reload loses the in-memory session while the authoritative one stays
+  // active, so the stored request is the only handle back to it. Replaying it
+  // exactly — key and original locale together — is what the API accepts; a
+  // fresh key would be refused with ACTIVE_SESSION_EXISTS until expiry.
+  const pending = readPendingCreate() ?? storePendingCreate(newIdempotencyKey(), locale);
+  const response = await postCreateSession(pending);
+
+  // 410 means that stored session is already finished. Only then is a genuinely
+  // new session correct, and it uses the language in front of the customer now.
+  if (response.status === 410) {
+    return parseCreateResponse(
+      await postCreateSession(storePendingCreate(newIdempotencyKey(), locale))
+    );
+  }
+
+  return parseCreateResponse(response);
+}
+
+async function postCreateSession(pending: PendingCreate): Promise<Response> {
+  return fetch("/agent/v1/sessions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "idempotency-key": idempotencyKey
+      "idempotency-key": pending.key
     },
-    body: JSON.stringify({ locale })
+    body: JSON.stringify({ locale: pending.locale })
   });
+}
 
+async function parseCreateResponse(response: Response): Promise<PrototypeSession> {
   if (!response.ok) throw await sessionRequestError(response, "SESSION_CREATE_FAILED");
 
   const result = createSessionResponseSchema.parse(await response.json());
@@ -97,20 +122,28 @@ export function clearStoredSessionKeys(sessionId?: string): void {
   if (sessionId) sessionStorage.removeItem(`${CANCEL_KEY_PREFIX}${sessionId}`);
 }
 
-function getCreateIdempotencyKey(locale: Locale): string {
+function readPendingCreate(): PendingCreate | null {
   const stored = sessionStorage.getItem(CREATE_KEY_STORAGE);
-  if (stored) {
-    try {
-      const pending = JSON.parse(stored) as { key?: unknown; locale?: unknown };
-      if (pending.locale === locale && typeof pending.key === "string") return pending.key;
-    } catch {
-      // Replace malformed local state with a fresh key.
-    }
-  }
+  if (!stored) return null;
 
-  const key = newIdempotencyKey();
-  sessionStorage.setItem(CREATE_KEY_STORAGE, JSON.stringify({ key, locale }));
-  return key;
+  try {
+    const pending = JSON.parse(stored) as { key?: unknown; locale?: unknown };
+    if (typeof pending.key !== "string" || !isLocale(pending.locale)) return null;
+    return { key: pending.key, locale: pending.locale };
+  } catch {
+    // Replace malformed local state with a fresh key.
+    return null;
+  }
+}
+
+function storePendingCreate(key: string, locale: Locale): PendingCreate {
+  const pending: PendingCreate = { key, locale };
+  sessionStorage.setItem(CREATE_KEY_STORAGE, JSON.stringify(pending));
+  return pending;
+}
+
+function isLocale(value: unknown): value is Locale {
+  return value === "en" || value === "ru" || value === "hy";
 }
 
 function newIdempotencyKey(): string {

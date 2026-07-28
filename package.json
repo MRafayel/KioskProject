@@ -29,6 +29,7 @@
     "db:seed": "pnpm --filter @printing-kiosk/database seed"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "3.1086.0",
     "@eslint/js": "10.0.1",
     "@types/node": "24.13.3",
     "eslint": "10.7.0",
