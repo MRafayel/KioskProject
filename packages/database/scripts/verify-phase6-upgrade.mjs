@@ -207,10 +207,10 @@ async function verifyPricingInvariants(targetUrl) {
     await client.query(
       `INSERT INTO "print_setting_revisions"
         ("id", "session_id", "revision", "copies", "duplex", "paper_size", "orientation",
-         "pages_per_sheet", "scaling", "collate", "color_mode", "selections",
+         "scaling", "collate", "color_mode", "selections",
          "selected_pages", "printed_sides", "physical_sheets", "capability_version",
          "manifest_hash", "created_by_actor_type", "created_by_actor_id")
-       VALUES ($1::uuid, $2::uuid, 1, 1, 'SIMPLEX', 'A4', 'AUTO', 1, 'FIT', true, 'MONOCHROME',
+       VALUES ($1::uuid, $2::uuid, 1, 1, 'SIMPLEX', 'A4', 'AUTO', 'FIT', true, 'MONOCHROME',
          $3::jsonb, 3, 3, 3, 1, $4, 'KIOSK', 'phase6-upgrade')`,
       [
         fixture.revisionId,
@@ -242,21 +242,23 @@ async function verifyPricingInvariants(targetUrl) {
       client,
       `INSERT INTO "print_setting_revisions"
         ("id", "session_id", "revision", "copies", "duplex", "paper_size", "orientation",
-         "pages_per_sheet", "scaling", "collate", "color_mode", "selections",
+         "scaling", "collate", "color_mode", "selections",
          "selected_pages", "printed_sides", "physical_sheets", "capability_version",
          "manifest_hash", "created_by_actor_type", "created_by_actor_id")
-       VALUES (gen_random_uuid(), $1::uuid, 2, 1, 'SIMPLEX', 'A4', 'AUTO', 1, 'FIT', true,
+       VALUES (gen_random_uuid(), $1::uuid, 2, 1, 'SIMPLEX', 'A4', 'AUTO', 'FIT', true,
          'COLOR', $2::jsonb, 3, 3, 3, 1, $3, 'KIOSK', 'phase6-upgrade')`,
       [fixture.sessionId, JSON.stringify([{ fileId: fixture.fileId }]), "d".repeat(64)],
       "PHASE6_COLOUR_OUTPUT_ACCEPTED"
     );
 
+    // A tariff is drafted, then given its rules, then published. A published
+    // set takes no rule writes at all, so publication has to come last.
     await client.query(
       `INSERT INTO "pricing_rule_sets"
         ("id", "version", "scope", "currency", "currency_exponent", "status", "rounding",
-         "tax_mode", "minimum_application", "valid_from", "published_at")
-       VALUES ($1::uuid, 'price-upgrade-check', 'GLOBAL', 'AMD', 2, 'PUBLISHED', 'HALF_UP',
-         'EXCLUSIVE', 'BEFORE_TAX', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+         "tax_mode", "minimum_application", "valid_from")
+       VALUES ($1::uuid, 'price-upgrade-check', 'GLOBAL', 'AMD', 2, 'DRAFT', 'HALF_UP',
+         'EXCLUSIVE', 'BEFORE_TAX', CURRENT_TIMESTAMP)`,
       [fixture.ruleSetId]
     );
     await client.query(
@@ -266,6 +268,39 @@ async function verifyPricingInvariants(targetUrl) {
          "tax_basis_points", "priority")
        VALUES ($1::uuid, $2::uuid, 'PRINT', 'A4', 'MONOCHROME', 5000, 0, 0, 10000, 2000, 0)`,
       [fixture.ruleId, fixture.ruleSetId]
+    );
+    await client.query(
+      `UPDATE "pricing_rule_sets"
+         SET "status" = 'PUBLISHED', "published_at" = CURRENT_TIMESTAMP
+       WHERE "id" = $1::uuid`,
+      [fixture.ruleSetId]
+    );
+
+    // Adding a rule to a published tariff reprices it after the fact just as
+    // surely as editing one, so it is refused too.
+    await expectRejected(
+      client,
+      `INSERT INTO "pricing_rules"
+        ("id", "rule_set_id", "service", "paper_size", "color_mode", "unit_amount_minor",
+         "duplex_adjustment_basis_points", "service_fee_minor", "minimum_amount_minor",
+         "tax_basis_points", "priority")
+       VALUES (gen_random_uuid(), $1::uuid, 'PRINT', 'A4', 'MONOCHROME', 1, 0, 0, 0, 0, 99)`,
+      [fixture.ruleSetId],
+      "PHASE6_PUBLISHED_RULE_INSERT_ACCEPTED"
+    );
+
+    // A global tariff has nothing to scope to, so it cannot carry a scope_ref
+    // that would let a second published global row exist beside it.
+    await expectRejected(
+      client,
+      `INSERT INTO "pricing_rule_sets"
+        ("id", "version", "scope", "scope_ref", "currency", "currency_exponent", "status",
+         "rounding", "tax_mode", "minimum_application", "valid_from", "published_at")
+       VALUES (gen_random_uuid(), 'price-upgrade-stray', 'GLOBAL', 'stray', 'AMD', 2,
+         'PUBLISHED', 'HALF_UP', 'EXCLUSIVE', 'BEFORE_TAX', CURRENT_TIMESTAMP,
+         CURRENT_TIMESTAMP)`,
+      [],
+      "PHASE6_STRAY_GLOBAL_TARIFF_ACCEPTED"
     );
 
     await expectRejected(
