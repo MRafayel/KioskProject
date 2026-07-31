@@ -539,7 +539,7 @@ acceptance evidence, and commercial follow-up requirements.
 
 **Objective:** create valid immutable settings revisions and reproducible quotes.
 
-**Build:** canonical page ranges, copies, duplex, A4, orientation, one/two-up,
+**Build:** canonical page ranges, copies, duplex, A4, orientation,
 fit; enforce monochrome output; capability checks; page/side/sheet counts; immutable expiring
 quote with pricing version and manifest hash; automatic quote invalidation.
 
@@ -1110,7 +1110,6 @@ Content-Type: application/json
   "duplex":"LONG_EDGE",
   "paperSize":"A4",
   "orientation":"AUTO",
-  "pagesPerSheet":2,
   "scaling":"FIT",
   "collate":true
 }
@@ -1352,7 +1351,7 @@ nonnegative checks, unique constraints, and transactional migrations.
 **print_setting_revisions**
 
 - Append-only key session_id/revision; copies, duplex, paper,
-  orientation, pages_per_sheet, scaling, collate; ordered files and selections;
+  orientation, scaling, collate; ordered files and selections;
   capability version; manifest hash; created_at.
 - A quote references one exact revision. Never update it in place.
 
@@ -1540,7 +1539,7 @@ Kiosk features:
 3. Drag or large-button file reorder with an accessible alternative.
 4. Remove before payment lock.
 5. Page-range input plus page selection UI; backend returns canonical ranges.
-6. Paper outline showing portrait/landscape, margins, fit/fill, one/two-up,
+6. Paper outline showing portrait/landscape, margins, fit/fill,
    duplex front/back grouping and approximate crop.
 7. Monochrome mode applies a display filter labeled as an approximation.
 8. Persistent summary of selected document pages, printed sides, physical
@@ -1564,7 +1563,7 @@ For each file in the MVP:
 
 ~~~text
 logicalPages = count of selected normalized page ranges
-printedSidesPerCopy = ceil(logicalPages / pagesPerSheet)
+printedSidesPerCopy = logicalPages
 printedSides = printedSidesPerCopy * copies
 
 simplexSheets = printedSidesPerCopy * copies
@@ -3013,7 +3012,7 @@ authorized session snapshot, so missed or duplicate events do not corrupt UI.
 export function calculateQuote(input: PricingInput): QuoteBreakdown {
   const perFile = input.files.map((file) => {
     const pages = countSelectedPages(file.pageRanges, file.pageCount);
-    const sidesPerCopy = Math.ceil(pages / input.settings.pagesPerSheet);
+    const sidesPerCopy = pages;
     return {
       sides: sidesPerCopy * input.settings.copies,
       sheets:

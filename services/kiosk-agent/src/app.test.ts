@@ -408,7 +408,6 @@ describe("kiosk agent settings and pricing facade", () => {
       duplex: "LONG_EDGE",
       paperSize: "A4",
       orientation: "AUTO",
-      pagesPerSheet: 2,
       scaling: "FIT",
       collate: true
     };

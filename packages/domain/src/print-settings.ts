@@ -15,11 +15,11 @@ export const PAPER_SIZES = ["A4"] as const;
 export const DUPLEX_MODES = ["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"] as const;
 export const ORIENTATIONS = ["AUTO", "PORTRAIT", "LANDSCAPE"] as const;
 export const SCALING_MODES = ["FIT", "ACTUAL_SIZE"] as const;
-export const PAGES_PER_SHEET_OPTIONS = [1, 2] as const;
 export const COLOR_MODES = ["MONOCHROME"] as const;
 
 export const PRINT_COLOR_MODE = "MONOCHROME";
-export const SETTINGS_MANIFEST_VERSION = 1;
+/** Version 2 dropped pages-per-sheet: one selected page is always one side. */
+export const SETTINGS_MANIFEST_VERSION = 2;
 
 /** A page-range text longer than this is refused before parsing. */
 export const MAX_PAGE_RANGE_TEXT_LENGTH = 200;
@@ -41,7 +41,6 @@ export interface PrintSettingsInput {
   duplex: DuplexMode;
   paperSize: PaperSize;
   orientation: Orientation;
-  pagesPerSheet: number;
   scaling: ScalingMode;
   collate: boolean;
 }
@@ -63,7 +62,6 @@ export interface PrinterCapabilities {
   paperSizes: readonly PaperSize[];
   colorModes: readonly ColorMode[];
   duplexModes: readonly DuplexMode[];
-  pagesPerSheetOptions: readonly number[];
   scalingModes: readonly ScalingMode[];
   orientations: readonly Orientation[];
   maxCopies: number;
@@ -100,7 +98,6 @@ export interface NormalizedPrintSettings {
   duplex: DuplexMode;
   paperSize: PaperSize;
   orientation: Orientation;
-  pagesPerSheet: number;
   scaling: ScalingMode;
   collate: boolean;
   colorMode: ColorMode;
@@ -118,7 +115,6 @@ export interface SettingsManifest {
   paperSize: PaperSize;
   orientation: Orientation;
   duplex: DuplexMode;
-  pagesPerSheet: number;
   scaling: ScalingMode;
   collate: boolean;
   copies: number;
@@ -223,14 +219,14 @@ export function countSelectedPages(ranges: readonly PageRange[]): number {
 
 /**
  * Printed sides and physical sheets for one document in one copy.
- * Every document starts on a fresh sheet, so files never share a sheet.
+ * One selected page is one printed side; every document starts on a fresh
+ * sheet, so files never share a sheet.
  */
-export function calculateSheetUsage(input: {
-  selectedPages: number;
-  pagesPerSheet: number;
-  duplex: DuplexMode;
-}): { printedSidesPerCopy: number; physicalSheetsPerCopy: number } {
-  const printedSidesPerCopy = Math.ceil(input.selectedPages / input.pagesPerSheet);
+export function calculateSheetUsage(input: { selectedPages: number; duplex: DuplexMode }): {
+  printedSidesPerCopy: number;
+  physicalSheetsPerCopy: number;
+} {
+  const printedSidesPerCopy = input.selectedPages;
   const physicalSheetsPerCopy =
     input.duplex === "SIMPLEX" ? printedSidesPerCopy : Math.ceil(printedSidesPerCopy / 2);
   return { printedSidesPerCopy, physicalSheetsPerCopy };
@@ -244,10 +240,6 @@ export function normalizePrintSettings(
   assertSupported(context.capabilities.duplexModes.includes(input.duplex), "duplex");
   assertSupported(context.capabilities.orientations.includes(input.orientation), "orientation");
   assertSupported(context.capabilities.scalingModes.includes(input.scaling), "scaling");
-  assertSupported(
-    context.capabilities.pagesPerSheetOptions.includes(input.pagesPerSheet),
-    "pagesPerSheet"
-  );
   // Monochrome is the only output this product sells. A device that cannot
   // promise it must not receive a settings revision at all.
   assertSupported(context.capabilities.colorModes.includes(PRINT_COLOR_MODE), "colorMode");
@@ -291,11 +283,7 @@ export function normalizePrintSettings(
 
     const pageRanges = parsePageRangeText(selectionByFile.get(fileId) ?? null, file.pageCount);
     const selectedPages = countSelectedPages(pageRanges);
-    const usage = calculateSheetUsage({
-      selectedPages,
-      pagesPerSheet: input.pagesPerSheet,
-      duplex: input.duplex
-    });
+    const usage = calculateSheetUsage({ selectedPages, duplex: input.duplex });
 
     return {
       fileId,
@@ -334,7 +322,6 @@ export function normalizePrintSettings(
     duplex: input.duplex,
     paperSize: input.paperSize,
     orientation: input.orientation,
-    pagesPerSheet: input.pagesPerSheet,
     scaling: input.scaling,
     collate: input.collate,
     colorMode: PRINT_COLOR_MODE,
@@ -359,7 +346,6 @@ export function buildSettingsManifest(settings: NormalizedPrintSettings): Settin
     paperSize: settings.paperSize,
     orientation: settings.orientation,
     duplex: settings.duplex,
-    pagesPerSheet: settings.pagesPerSheet,
     scaling: settings.scaling,
     collate: settings.collate,
     copies: settings.copies,

@@ -15,7 +15,6 @@ describe("printer capability snapshots", () => {
           duplexModes: ["SIMPLEX", "LONG_EDGE"],
           orientations: ["AUTO", "PORTRAIT"],
           scalingModes: ["FIT"],
-          pagesPerSheetOptions: [1, 2],
           maxCopies: 5
         }
       },
@@ -29,7 +28,6 @@ describe("printer capability snapshots", () => {
       duplexModes: ["SIMPLEX", "LONG_EDGE"],
       orientations: ["AUTO", "PORTRAIT"],
       scalingModes: ["FIT"],
-      pagesPerSheetOptions: [1, 2],
       maxCopies: 5
     });
   });
@@ -50,8 +48,6 @@ describe("printer capability snapshots", () => {
 
     expect(capabilities.colorModes).toEqual(["MONOCHROME"]);
     expect(capabilities.duplexModes).toEqual(["SIMPLEX", "LONG_EDGE"]);
-    // Two-up is not offered until a snapshot actually claims it.
-    expect(capabilities.pagesPerSheetOptions).toEqual([1]);
     expect(capabilities.maxCopies).toBe(limits.maxCopies);
   });
 
@@ -79,7 +75,6 @@ describe("printer capability snapshots", () => {
           paperSizes: ["A3", "LETTER"],
           colorModes: ["COLOR"],
           duplexModes: "yes",
-          pagesPerSheetOptions: [4, 9],
           maxCopies: "many"
         }
       },
@@ -89,7 +84,6 @@ describe("printer capability snapshots", () => {
     expect(capabilities.paperSizes).toEqual(["A4"]);
     expect(capabilities.colorModes).toEqual([]);
     expect(capabilities.duplexModes).toEqual(["SIMPLEX"]);
-    expect(capabilities.pagesPerSheetOptions).toEqual([1]);
     expect(capabilities.maxCopies).toBe(limits.maxCopies);
   });
 

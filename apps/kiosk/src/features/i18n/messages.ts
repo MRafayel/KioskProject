@@ -102,9 +102,6 @@ export interface MessageCatalog {
     copiesAria: string;
     decreaseCopies: string;
     increaseCopies: string;
-    pagesPerSheet: string;
-    onePagePerSheet: string;
-    twoPagesPerSheet: string;
     summaryTitle: string;
     selectedPages: string;
     printedSides: string;
@@ -313,9 +310,6 @@ const english: MessageCatalog = {
     copiesAria: "Number of copies",
     decreaseCopies: "Decrease copies",
     increaseCopies: "Increase copies",
-    pagesPerSheet: "Pages per sheet",
-    onePagePerSheet: "One per sheet",
-    twoPagesPerSheet: "Two per sheet",
     summaryTitle: "Print summary",
     selectedPages: "Selected pages",
     printedSides: "Printed sides",
@@ -513,9 +507,6 @@ const russian: MessageCatalog = {
     copiesAria: "Количество копий",
     decreaseCopies: "Уменьшить количество копий",
     increaseCopies: "Увеличить количество копий",
-    pagesPerSheet: "Страниц на листе",
-    onePagePerSheet: "Одна на листе",
-    twoPagesPerSheet: "Две на листе",
     summaryTitle: "Итог печати",
     selectedPages: "Выбрано страниц",
     printedSides: "Печатных сторон",
@@ -714,9 +705,6 @@ const armenian: MessageCatalog = {
     copiesAria: "Պատճենների քանակը",
     decreaseCopies: "Նվազեցնել պատճենների քանակը",
     increaseCopies: "Ավելացնել պատճենների քանակը",
-    pagesPerSheet: "Էջեր մեկ թերթին",
-    onePagePerSheet: "Մեկ էջ թերթին",
-    twoPagesPerSheet: "Երկու էջ թերթին",
     summaryTitle: "Տպման ամփոփում",
     selectedPages: "Ընտրված էջեր",
     printedSides: "Տպվող երեսներ",

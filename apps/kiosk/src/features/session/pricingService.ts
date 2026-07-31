@@ -47,7 +47,6 @@ export function buildSettingsBody(
     duplex: settings.duplex ? "LONG_EDGE" : "SIMPLEX",
     paperSize: "A4",
     orientation: settings.orientation,
-    pagesPerSheet: settings.pagesPerSheet,
     scaling: "FIT",
     collate: true
   };
@@ -84,10 +83,16 @@ export async function saveKioskSettings(
   expectedVersion: number,
   body: UpdatePrintSettingsBody
 ): Promise<UpdatePrintSettingsResponse> {
-  const idempotencyKey = stableKey(`${SETTINGS_KEY_PREFIX}${sessionId}`, settingsFingerprint(body));
-
+  const namespace = `${SETTINGS_KEY_PREFIX}${sessionId}`;
+  const fingerprint = settingsFingerprint(body);
+  let idempotencyKey = stableKey(namespace, fingerprint);
   let version = expectedVersion;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let refreshedVersion = false;
+  let rotatedKey = false;
+
+  // Three attempts at most: the first, one after re-reading a stale version,
+  // and one after replacing a key the control plane has already spent.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const response = await fetch(`/agent/v1/sessions/${encodeURIComponent(sessionId)}/settings`, {
       method: "PUT",
       headers: {
@@ -101,10 +106,33 @@ export async function saveKioskSettings(
     });
 
     if (response.ok) return updatePrintSettingsResponseSchema.parse(await response.json());
-    if (response.status !== 412 || attempt === 1) {
-      throw await pricingError(response, "SETTINGS_SAVE_FAILED");
+
+    if (response.status === 412 && !refreshedVersion) {
+      refreshedVersion = true;
+      version = await readKioskSessionVersion(sessionId);
+      continue;
     }
-    version = await readKioskSessionVersion(sessionId);
+
+    const error = await pricingError(response, "SETTINGS_SAVE_FAILED");
+
+    // The stored key was spent on a request that is no longer identical to
+    // this one — the version moved on after a reply was lost in transit, so
+    // the same body now hashes to a different request. Reusing that key can
+    // only ever be refused again, and the key is derived from the body, so
+    // retrying without replacing it would refuse forever and strand the
+    // customer on a configuration they cannot price. A fresh key at worst
+    // writes one more settings revision, which costs nothing and charges
+    // nobody. Quotes deliberately get no such rotation: their request hash
+    // covers only the session and the revision, so a key cannot fall out of
+    // step with the request, and minting a new one there would be asking for
+    // a second price rather than recovering the first.
+    if (error.code === "IDEMPOTENCY_KEY_REUSED" && !rotatedKey) {
+      rotatedKey = true;
+      idempotencyKey = rotateStableKey(namespace, fingerprint);
+      continue;
+    }
+
+    throw error;
   }
 
   throw new PricingRequestError("SETTINGS_SAVE_FAILED", 409);
@@ -148,14 +176,46 @@ export function clearStoredPricingKeys(sessionId: string): void {
  * One idempotency key per distinct request. Retrying the same request after a
  * network interruption reuses its key, so the control plane replays the stored
  * result instead of creating a second revision or a second price.
+ *
+ * The fingerprint is stored beside the key rather than only hashed into the
+ * storage slot. The hash is 32 bits, so two unrelated requests can land on one
+ * slot; handing the second one the first one's key would spend it on a
+ * different request and earn a refusal that no retry could clear.
  */
 function stableKey(namespace: string, fingerprint: string): string {
-  const storageKey = `${namespace}.${hashFingerprint(fingerprint)}`;
-  const existing = sessionStorage.getItem(storageKey);
-  if (existing) return existing;
+  const storageKey = storageSlot(namespace, fingerprint);
+  const stored = readStoredKey(storageKey);
+  if (stored && stored.fingerprint === fingerprint) return stored.key;
+  return writeStoredKey(storageKey, fingerprint);
+}
 
+/** Abandon a key the control plane has already spent and mint its successor. */
+function rotateStableKey(namespace: string, fingerprint: string): string {
+  return writeStoredKey(storageSlot(namespace, fingerprint), fingerprint);
+}
+
+function storageSlot(namespace: string, fingerprint: string): string {
+  return `${namespace}.${hashFingerprint(fingerprint)}`;
+}
+
+function readStoredKey(storageKey: string): { fingerprint: string; key: string } | null {
+  const raw = sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { fingerprint?: unknown; key?: unknown };
+    return typeof parsed?.fingerprint === "string" && typeof parsed.key === "string"
+      ? { fingerprint: parsed.fingerprint, key: parsed.key }
+      : null;
+  } catch {
+    // A value written before this format existed carries no fingerprint to
+    // check, so it is replaced rather than trusted.
+    return null;
+  }
+}
+
+function writeStoredKey(storageKey: string, fingerprint: string): string {
   const key = `kiosk-${crypto.randomUUID()}`;
-  sessionStorage.setItem(storageKey, key);
+  sessionStorage.setItem(storageKey, JSON.stringify({ fingerprint, key }));
   return key;
 }
 
@@ -169,7 +229,6 @@ function settingsFingerprint(body: UpdatePrintSettingsBody): string {
     body.duplex,
     body.paperSize,
     body.orientation,
-    body.pagesPerSheet,
     body.scaling,
     body.collate ? "collate" : "no-collate"
   ].join("\n");

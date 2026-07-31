@@ -50,8 +50,8 @@ await database.systemMetadata.upsert({
 });
 
 // The capability snapshot is what settings validation trusts. It describes the
-// simulated pilot device: A4 monochrome, long-edge duplex, and one or two
-// pages per sheet. A real printer replaces these values in Phase 10.
+// simulated pilot device: A4 monochrome with long-edge duplex. A real printer
+// replaces these values in Phase 10.
 const developmentCapabilities = {
   service: "PRINT_ONLY",
   outputMode: "MONOCHROME",
@@ -61,7 +61,6 @@ const developmentCapabilities = {
   duplexModes: ["SIMPLEX", "LONG_EDGE"],
   orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
   scalingModes: ["FIT", "ACTUAL_SIZE"],
-  pagesPerSheetOptions: [1, 2],
   maxCopies: 20,
   scanningEnabled: false,
   photocopyEnabled: false
@@ -122,8 +121,12 @@ await database.kioskCredential.upsert({
  * accountant must validate the tax rate, the rounding point, and receipt rules
  * before real sales. A published rule set is immutable: change prices by
  * publishing the next version, never by editing this one in place.
+ *
+ * `price-v2` withdrew the minimum transaction that `price-v1` published. It is
+ * a new version rather than an edit because a quote refers to the version that
+ * priced it, and that history has to stay readable.
  */
-const developmentPricingVersion = "price-v1";
+const developmentPricingVersion = "price-v2";
 const existingRuleSet = await database.pricingRuleSet.findUnique({
   where: { version: developmentPricingVersion }
 });
@@ -137,26 +140,28 @@ if (!existingRuleSet) {
       data: { status: "ARCHIVED", archivedAt: new Date() }
     });
 
+    // Draft first, then rules, then publish. A published rule set accepts no
+    // rule writes at all — not an update, not a delete, and not an insert — so
+    // publication is the last step rather than the first.
     const ruleSet = await transaction.pricingRuleSet.create({
       data: {
-        id: "01900000-0000-7000-8000-000000000101",
+        id: "01900000-0000-7000-8000-000000000103",
         version: developmentPricingVersion,
         scope: "GLOBAL",
         scopeRef: "",
         currency: "AMD",
         currencyExponent: 2,
-        status: "PUBLISHED",
+        status: "DRAFT",
         rounding: "HALF_UP",
         taxMode: "EXCLUSIVE",
         minimumApplication: "BEFORE_TAX",
-        validFrom: new Date("2026-01-01T00:00:00.000Z"),
-        publishedAt: new Date("2026-01-01T00:00:00.000Z")
+        validFrom: new Date("2026-01-01T00:00:00.000Z")
       }
     });
 
     await transaction.pricingRule.create({
       data: {
-        id: "01900000-0000-7000-8000-000000000102",
+        id: "01900000-0000-7000-8000-000000000104",
         ruleSetId: ruleSet.id,
         service: "PRINT",
         paperSize: "A4",
@@ -164,10 +169,17 @@ if (!existingRuleSet) {
         unitAmountMinor: 5000,
         duplexAdjustmentBasisPoints: 0,
         serviceFeeMinor: 0,
-        minimumAmountMinor: 10000,
+        // No minimum transaction: a job pays for the sides it prints and
+        // nothing more. The rule field stays so a deployment can set a floor.
+        minimumAmountMinor: 0,
         taxBasisPoints: 2000,
         priority: 0
       }
+    });
+
+    await transaction.pricingRuleSet.update({
+      where: { id: ruleSet.id },
+      data: { status: "PUBLISHED", publishedAt: new Date("2026-01-01T00:00:00.000Z") }
     });
   });
 }

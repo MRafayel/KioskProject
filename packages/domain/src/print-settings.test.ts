@@ -21,7 +21,6 @@ const capabilities = {
   duplexModes: ["SIMPLEX", "LONG_EDGE"],
   orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
   scalingModes: ["FIT", "ACTUAL_SIZE"],
-  pagesPerSheetOptions: [1, 2],
   maxCopies: 20
 } as const;
 
@@ -50,7 +49,6 @@ function settings(overrides: Partial<PrintSettingsInput> = {}): PrintSettingsInp
     duplex: "SIMPLEX",
     paperSize: "A4",
     orientation: "PORTRAIT",
-    pagesPerSheet: 1,
     scaling: "FIT",
     collate: true,
     ...overrides
@@ -129,13 +127,14 @@ describe("page range normalization", () => {
 
 describe("sheet arithmetic", () => {
   it("matches the documented worked example", () => {
-    // Five pages, two per sheet, duplex: three sides per copy on two sheets.
-    expect(
-      calculateSheetUsage({ selectedPages: 5, pagesPerSheet: 2, duplex: "LONG_EDGE" })
-    ).toEqual({ printedSidesPerCopy: 3, physicalSheetsPerCopy: 2 });
-    expect(calculateSheetUsage({ selectedPages: 5, pagesPerSheet: 2, duplex: "SIMPLEX" })).toEqual({
-      printedSidesPerCopy: 3,
+    // Five pages, duplex: five sides per copy on three sheets.
+    expect(calculateSheetUsage({ selectedPages: 5, duplex: "LONG_EDGE" })).toEqual({
+      printedSidesPerCopy: 5,
       physicalSheetsPerCopy: 3
+    });
+    expect(calculateSheetUsage({ selectedPages: 5, duplex: "SIMPLEX" })).toEqual({
+      printedSidesPerCopy: 5,
+      physicalSheetsPerCopy: 5
     });
   });
 
@@ -153,14 +152,13 @@ describe("sheet arithmetic", () => {
     fc.assert(
       fc.property(
         fc.integer({ min: 1, max: 200 }),
-        fc.constantFrom(1, 2),
         fc.constantFrom("SIMPLEX" as const, "LONG_EDGE" as const, "SHORT_EDGE" as const),
-        (selectedPages, pagesPerSheet, duplex) => {
-          const usage = calculateSheetUsage({ selectedPages, pagesPerSheet, duplex });
+        (selectedPages, duplex) => {
+          const usage = calculateSheetUsage({ selectedPages, duplex });
           expect(usage.printedSidesPerCopy).toBeGreaterThan(0);
           expect(usage.physicalSheetsPerCopy).toBeGreaterThan(0);
           expect(usage.physicalSheetsPerCopy).toBeLessThanOrEqual(usage.printedSidesPerCopy);
-          expect(usage.printedSidesPerCopy).toBe(Math.ceil(selectedPages / pagesPerSheet));
+          expect(usage.printedSidesPerCopy).toBe(selectedPages);
         }
       )
     );

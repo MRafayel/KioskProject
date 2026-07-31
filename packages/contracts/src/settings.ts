@@ -5,7 +5,6 @@ export const duplexModeSchema = z.enum(["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"]);
 export const orientationSchema = z.enum(["AUTO", "PORTRAIT", "LANDSCAPE"]);
 export const scalingModeSchema = z.enum(["FIT", "ACTUAL_SIZE"]);
 export const colorModeSchema = z.enum(["MONOCHROME"]);
-export const pagesPerSheetSchema = z.union([z.literal(1), z.literal(2)]);
 
 /**
  * Free text only in the sense that a customer types it. The server re-parses
@@ -33,7 +32,6 @@ export const updatePrintSettingsBodySchema = z
     duplex: duplexModeSchema,
     paperSize: paperSizeSchema,
     orientation: orientationSchema,
-    pagesPerSheet: pagesPerSheetSchema,
     scaling: scalingModeSchema,
     collate: z.boolean()
   })
@@ -62,7 +60,6 @@ export const printSettingsSnapshotSchema = z
     duplex: duplexModeSchema,
     paperSize: paperSizeSchema,
     orientation: orientationSchema,
-    pagesPerSheet: pagesPerSheetSchema,
     scaling: scalingModeSchema,
     collate: z.boolean(),
     colorMode: colorModeSchema,
@@ -99,7 +96,6 @@ export const printCapabilitiesResponseSchema = z
     duplexModes: z.array(duplexModeSchema).min(1),
     orientations: z.array(orientationSchema).min(1),
     scalingModes: z.array(scalingModeSchema).min(1),
-    pagesPerSheetOptions: z.array(pagesPerSheetSchema).min(1),
     colorModes: z.array(colorModeSchema).min(1),
     maxCopies: z.number().int().positive(),
     maxSelectedPages: z.number().int().positive(),
@@ -112,7 +108,6 @@ export type DuplexMode = z.infer<typeof duplexModeSchema>;
 export type Orientation = z.infer<typeof orientationSchema>;
 export type ScalingMode = z.infer<typeof scalingModeSchema>;
 export type ColorMode = z.infer<typeof colorModeSchema>;
-export type PagesPerSheet = z.infer<typeof pagesPerSheetSchema>;
 export type UpdatePrintSettingsBody = z.infer<typeof updatePrintSettingsBodySchema>;
 export type FileSelectionSnapshot = z.infer<typeof fileSelectionSnapshotSchema>;
 export type PrintSettingsSnapshot = z.infer<typeof printSettingsSnapshotSchema>;

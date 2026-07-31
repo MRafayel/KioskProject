@@ -111,14 +111,12 @@ export function CheckoutScreen() {
               <dd>{money(quote.breakdown.serviceFeeMinor)}</dd>
             </div>
           ) : null}
-          <div>
-            <dt>{messages.checkout.minimumTransaction}</dt>
-            <dd>
-              {quote.breakdown.minimumAdjustmentMinor > 0
-                ? money(quote.breakdown.minimumAdjustmentMinor)
-                : "—"}
-            </dd>
-          </div>
+          {quote.breakdown.minimumAdjustmentMinor > 0 ? (
+            <div>
+              <dt>{messages.checkout.minimumTransaction}</dt>
+              <dd>{money(quote.breakdown.minimumAdjustmentMinor)}</dd>
+            </div>
+          ) : null}
           {quote.taxMinor > 0 ? (
             <div>
               <dt>{messages.checkout.tax}</dt>

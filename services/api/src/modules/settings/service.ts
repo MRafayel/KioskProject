@@ -154,7 +154,6 @@ export class PrintSettingsService {
                 duplex: normalized.duplex,
                 paperSize: normalized.paperSize,
                 orientation: normalized.orientation,
-                pagesPerSheet: normalized.pagesPerSheet,
                 scaling: normalized.scaling,
                 collate: normalized.collate,
                 colorMode: normalized.colorMode,
@@ -336,13 +335,22 @@ export class PrintSettingsService {
     if (!session) throw sessionNotFound();
 
     const capabilities = readPrinterCapabilities(session.kiosk, this.options.limits);
+    // A snapshot that does not clearly promise monochrome describes a device
+    // this product cannot sell from. Reporting that plainly matters: the
+    // response schema requires at least one colour mode, so without this the
+    // kiosk would be told its own perfectly valid request was malformed.
+    if (capabilities.colorModes.length === 0) {
+      throw new ApiError(503, "PRINTER_UNAVAILABLE", "This kiosk cannot print right now.", {
+        capabilityVersion: capabilities.version
+      });
+    }
+
     return printCapabilitiesResponseSchema.parse({
       capabilityVersion: capabilities.version,
       paperSizes: capabilities.paperSizes,
       duplexModes: capabilities.duplexModes,
       orientations: capabilities.orientations,
       scalingModes: capabilities.scalingModes,
-      pagesPerSheetOptions: capabilities.pagesPerSheetOptions,
       colorModes: capabilities.colorModes,
       maxCopies: capabilities.maxCopies,
       maxSelectedPages: this.options.limits.maxSelectedPages,
@@ -364,7 +372,6 @@ export interface StoredSettingsRevision {
   duplex: string;
   paperSize: string;
   orientation: string;
-  pagesPerSheet: number;
   scaling: string;
   collate: boolean;
   colorMode: string;
@@ -383,7 +390,6 @@ export function toStoredSettingsSnapshot(stored: StoredSettingsRevision): PrintS
     duplex: stored.duplex,
     paperSize: stored.paperSize,
     orientation: stored.orientation,
-    pagesPerSheet: stored.pagesPerSheet,
     scaling: stored.scaling,
     collate: stored.collate,
     colorMode: stored.colorMode,
@@ -415,7 +421,6 @@ function toSettingsSnapshot(
     duplex: normalized.duplex,
     paperSize: normalized.paperSize,
     orientation: normalized.orientation,
-    pagesPerSheet: normalized.pagesPerSheet,
     scaling: normalized.scaling,
     collate: normalized.collate,
     colorMode: normalized.colorMode,
@@ -448,7 +453,6 @@ function normalizeOrFail(
       duplex: body.duplex,
       paperSize: body.paperSize,
       orientation: body.orientation,
-      pagesPerSheet: body.pagesPerSheet,
       scaling: body.scaling,
       collate: body.collate
     },
@@ -472,7 +476,6 @@ function fingerprintSettingsRequest(body: UpdatePrintSettingsBody): string {
     body.duplex,
     body.paperSize,
     body.orientation,
-    body.pagesPerSheet,
     body.scaling,
     body.collate ? "collate" : "no-collate"
   ].join("\n");

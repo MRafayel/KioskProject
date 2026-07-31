@@ -74,9 +74,11 @@ describe("prototype session model", () => {
       totalSheets: 6
     });
 
-    expect(
-      calculatePrintSummary([file], { ...defaultPrintSettings, pagesPerSheet: 2, duplex: true })
-    ).toMatchObject({ selectedPages: 8, totalSides: 4, totalSheets: 2 });
+    expect(calculatePrintSummary([file], { ...defaultPrintSettings, duplex: true })).toMatchObject({
+      selectedPages: 8,
+      totalSides: 8,
+      totalSheets: 4
+    });
   });
 
   it("discards a stored price whenever the priced material changes", () => {
@@ -109,7 +111,6 @@ describe("prototype session model", () => {
       duplex: "SIMPLEX" as const,
       paperSize: "A4" as const,
       orientation: "PORTRAIT" as const,
-      pagesPerSheet: 1 as const,
       scaling: "FIT" as const,
       collate: true,
       colorMode: "MONOCHROME" as const,

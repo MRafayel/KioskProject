@@ -102,7 +102,6 @@ model PrintSettingRevision {
   duplex             String       @db.VarChar(16)
   paperSize          String       @map("paper_size") @db.VarChar(16)
   orientation        String       @db.VarChar(16)
-  pagesPerSheet      Int          @map("pages_per_sheet")
   scaling            String       @db.VarChar(16)
   collate            Boolean
   colorMode          String       @map("color_mode") @db.VarChar(16)

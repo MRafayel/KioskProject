@@ -325,7 +325,6 @@ describe("settings and quote route contracts", () => {
     duplex: "LONG_EDGE",
     paperSize: "A4",
     orientation: "AUTO",
-    pagesPerSheet: 2,
     scaling: "FIT",
     collate: true
   };
@@ -385,7 +384,8 @@ describe("settings and quote route contracts", () => {
       updatePrintSettingsBodySchema.safeParse({ ...validSettings, paperSize: "A3" }).success
     ).toBe(false);
     expect(
-      updatePrintSettingsBodySchema.safeParse({ ...validSettings, pagesPerSheet: 4 }).success
+      // Pages-per-sheet was withdrawn; the strict body rejects it outright.
+      updatePrintSettingsBodySchema.safeParse({ ...validSettings, pagesPerSheet: 1 }).success
     ).toBe(false);
     expect(
       updatePrintSettingsBodySchema.safeParse({

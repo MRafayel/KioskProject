@@ -148,7 +148,7 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
   await expect(page.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
 
   const reviewButton = page.getByRole("button", { name: /Review and pay/i });
-  await expect(page.getByText(/AMD\s*120\.00/)).toBeVisible();
+  await expect(page.getByText(/AMD\s*60\.00/)).toBeVisible();
   await expect(reviewButton).toBeEnabled();
   await expectNoHorizontalOverflow(page);
 
@@ -157,8 +157,8 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
 
   await reviewButton.click();
   await expect(page.getByRole("heading", { name: "Review and pay" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Pay\s+AMD\s*120\.00/ })).toBeEnabled();
-  await expect(page.getByText(/AMD\s*20\.00/)).toBeVisible();
+  await expect(page.getByRole("button", { name: /Pay\s+AMD\s*60\.00/ })).toBeEnabled();
+  await expect(page.getByText(/AMD\s*10\.00/)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -295,7 +295,6 @@ async function stubReadyDocumentAndPricing(
     duplex: "SIMPLEX",
     paperSize: "A4",
     orientation: "PORTRAIT",
-    pagesPerSheet: 1,
     scaling: "FIT",
     collate: true,
     colorMode: "MONOCHROME",
@@ -329,7 +328,6 @@ async function stubReadyDocumentAndPricing(
           duplexModes: ["SIMPLEX", "LONG_EDGE"],
           orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
           scalingModes: ["FIT", "ACTUAL_SIZE"],
-          pagesPerSheetOptions: [1, 2],
           colorModes: ["MONOCHROME"],
           maxCopies: 20,
           maxSelectedPages: 200,
@@ -375,11 +373,11 @@ async function stubReadyDocumentAndPricing(
               printAmountMinor: 5_000,
               duplexAdjustmentMinor: 0,
               serviceFeeMinor: 0,
-              minimumAdjustmentMinor: 5_000
+              minimumAdjustmentMinor: 0
             },
-            subtotalMinor: 10_000,
-            taxMinor: 2_000,
-            totalMinor: 12_000,
+            subtotalMinor: 5_000,
+            taxMinor: 1_000,
+            totalMinor: 6_000,
             createdAt: "2030-01-01T00:00:00.000Z",
             expiresAt: "2030-01-01T00:05:00.000Z"
           }

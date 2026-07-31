@@ -1,7 +1,6 @@
 import {
   DUPLEX_MODES,
   ORIENTATIONS,
-  PAGES_PER_SHEET_OPTIONS,
   PAPER_SIZES,
   PRINT_COLOR_MODE,
   SCALING_MODES,
@@ -43,10 +42,6 @@ export function readPrinterCapabilities(
   const paperSizes = readEnumList(snapshot.paperSizes, PAPER_SIZES);
   const orientations = readEnumList(snapshot.orientations, ORIENTATIONS);
   const scalingModes = readEnumList(snapshot.scalingModes, SCALING_MODES);
-  const pagesPerSheetOptions = readNumberList(
-    snapshot.pagesPerSheetOptions,
-    PAGES_PER_SHEET_OPTIONS
-  );
   const declaredColorModes = readEnumList(snapshot.colorModes, [PRINT_COLOR_MODE] as const);
   const colorModes: ColorMode[] =
     declaredColorModes.length > 0
@@ -64,7 +59,6 @@ export function readPrinterCapabilities(
     duplexModes,
     orientations: orientations.length > 0 ? orientations : [...ORIENTATIONS],
     scalingModes: scalingModes.length > 0 ? scalingModes : [...SCALING_MODES],
-    pagesPerSheetOptions: pagesPerSheetOptions.length > 0 ? pagesPerSheetOptions : [1],
     maxCopies: Math.min(declaredMaxCopies ?? limits.maxCopies, limits.maxCopies)
   };
 }
@@ -83,11 +77,6 @@ function readEnumList<T extends string>(value: unknown, allowed: readonly T[]): 
   if (!Array.isArray(value)) return [];
   const selected = allowed.filter((option) => value.includes(option));
   return selected;
-}
-
-function readNumberList<T extends number>(value: unknown, allowed: readonly T[]): T[] {
-  if (!Array.isArray(value)) return [];
-  return allowed.filter((option) => value.includes(option));
 }
 
 function readPositiveInteger(value: unknown): number | undefined {

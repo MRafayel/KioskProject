@@ -98,7 +98,6 @@ export function ConfigureScreen() {
   const capabilities = state.capabilities;
   const duplexAvailable =
     capabilities === null || capabilities.duplexModes.some((mode) => mode !== "SIMPLEX");
-  const pagesPerSheetOptions = capabilities?.pagesPerSheetOptions ?? [1, 2];
   const maxCopies = capabilities?.maxCopies ?? FALLBACK_MAX_COPIES;
   const localSummary = calculatePrintSummary(state.files, state.settings);
   const priced = state.pricing.settings;
@@ -348,31 +347,6 @@ export function ConfigureScreen() {
               </div>
             </div>
           </div>
-
-          {pagesPerSheetOptions.length > 1 ? (
-            <div className="settings-row">
-              <fieldset className="segmented-field">
-                <legend>{messages.configure.pagesPerSheet}</legend>
-                <div className="segmented-control">
-                  {pagesPerSheetOptions.map((option) => (
-                    <label key={option}>
-                      <input
-                        type="radio"
-                        name="pages-per-sheet"
-                        checked={state.settings.pagesPerSheet === option}
-                        onChange={() => update({ pagesPerSheet: option })}
-                      />
-                      <span>
-                        {option === 1
-                          ? messages.configure.onePagePerSheet
-                          : messages.configure.twoPagesPerSheet}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
-            </div>
-          ) : null}
         </section>
 
         <aside className="summary-card" aria-labelledby="summary-title">

@@ -41,14 +41,14 @@ const foreignApiKey = "phase6-integration-foreign-key-000001";
 /**
  * The published development tariff, repeated here so the expected amounts in
  * this suite are written out rather than recomputed by the code under test.
- * Amounts are AMD minor units: 50.00 per printed side, a 100.00 minimum, 20%
- * tax applied before the minimum, rounded half up.
+ * Amounts are AMD minor units: 50.00 per printed side, no minimum transaction,
+ * 20% tax, rounded half up.
  */
 const developmentTariff = {
-  version: "price-v1",
+  version: "price-v2",
   unitAmountMinor: 5_000,
   serviceFeeMinor: 0,
-  minimumAmountMinor: 10_000,
+  minimumAmountMinor: 0,
   taxBasisPoints: 2_000,
   currency: "AMD",
   currencyExponent: 2
@@ -231,7 +231,7 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     expect(quoteResponse.statusCode, quoteResponse.body).toBe(201);
     const quote = createQuoteResponseSchema.parse(quoteResponse.json()).quote;
 
-    // Six printed sides at 50.00, above the 100.00 minimum, plus 20% tax.
+    // Six printed sides at 50.00 plus 20% tax.
     expect(quote).toMatchObject({
       status: "ACTIVE",
       settingsRevision: 1,
@@ -286,7 +286,7 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     expect(JSON.stringify(quoteEvent?.payload)).not.toContain("manifestHash");
   }, 180_000);
 
-  it("prices duplex and two-up output by printed side and physical sheet", async () => {
+  it("prices duplex output by printed side and physical sheet", async () => {
     const prepared = await prepareConfigurableSession("phase6-duplex");
 
     const saved = updatePrintSettingsResponseSchema.parse(
@@ -298,18 +298,17 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
           body: settingsBody(prepared.fileId, {
             pageRanges: null,
             copies: 2,
-            duplex: "LONG_EDGE",
-            pagesPerSheet: 2
+            duplex: "LONG_EDGE"
           })
         })
       ).json()
     );
 
-    // Three selected pages, two per sheet: two sides per copy on one sheet.
+    // Three selected pages, duplex: three sides per copy on two sheets.
     expect(saved.settings).toMatchObject({
       selectedPages: 3,
-      printedSides: 4,
-      physicalSheets: 2
+      printedSides: 6,
+      physicalSheets: 4
     });
 
     const quote = createQuoteResponseSchema.parse(
@@ -323,15 +322,15 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     ).quote;
 
     expect(quote).toMatchObject({
-      printedSides: 4,
-      physicalSheets: 2,
-      subtotalMinor: 20_000,
-      taxMinor: 4_000,
-      totalMinor: 24_000
+      printedSides: 6,
+      physicalSheets: 4,
+      subtotalMinor: 30_000,
+      taxMinor: 6_000,
+      totalMinor: 36_000
     });
   }, 180_000);
 
-  it("charges the published minimum for a job below it", async () => {
+  it("charges a single side exactly what it costs, with no floor", async () => {
     const prepared = await prepareConfigurableSession("phase6-minimum");
 
     const saved = updatePrintSettingsResponseSchema.parse(
@@ -356,13 +355,14 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
       ).json()
     ).quote;
 
-    // One side is 50.00; the published minimum tops it up to 100.00 before tax.
+    // One side is 50.00 and the tariff publishes no minimum, so the smallest
+    // possible job is billed at its printed side and nothing more.
     expect(quote).toMatchObject({
-      subtotalMinor: developmentTariff.minimumAmountMinor,
-      taxMinor: 2_000,
-      totalMinor: 12_000
+      subtotalMinor: developmentTariff.unitAmountMinor,
+      taxMinor: 1_000,
+      totalMinor: 6_000
     });
-    expect(quote.breakdown.minimumAdjustmentMinor).toBe(5_000);
+    expect(quote.breakdown.minimumAdjustmentMinor).toBe(0);
   }, 180_000);
 
   it("replays an identical request and refuses a reused key with a different body", async () => {
@@ -412,6 +412,128 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     });
     expect(quoteReplay.json()).toEqual(quote.json());
     expect(await database.priceQuote.count({ where: { sessionId: prepared.session.id } })).toBe(1);
+  }, 180_000);
+
+  it("refuses a settings key reused under a version the request no longer names", async () => {
+    const prepared = await prepareConfigurableSession("phase6-key-version");
+    const body = settingsBody(prepared.fileId, { pageRanges: "1-2", copies: 1 });
+
+    const first = await saveSettings({
+      sessionId: prepared.session.id,
+      version: prepared.session.version,
+      idempotencyKey: "phase6-settings-version-drift",
+      body
+    });
+    expect(first.statusCode, first.body).toBe(200);
+    const saved = updatePrintSettingsResponseSchema.parse(first.json());
+
+    // The reply above is what a flaky kiosk network loses. The kiosk then
+    // learns the new session version by other means and retries the identical
+    // body — but the version is part of the stored request hash, so the key it
+    // derives from that body can only be refused from here on. This is the
+    // trap the client has to climb out of by replacing the key, and the server
+    // is expected to keep refusing rather than to relax the check.
+    const reused = await saveSettings({
+      sessionId: prepared.session.id,
+      version: saved.sessionVersion,
+      idempotencyKey: "phase6-settings-version-drift",
+      body
+    });
+    expect(reused.statusCode).toBe(409);
+    expect(reused.json()).toMatchObject({ error: { code: "IDEMPOTENCY_KEY_REUSED" } });
+
+    // A fresh key carrying the same body is accepted, which is precisely the
+    // recovery the kiosk performs.
+    const rotated = await saveSettings({
+      sessionId: prepared.session.id,
+      version: saved.sessionVersion,
+      idempotencyKey: "phase6-settings-version-drift-2",
+      body
+    });
+    expect(rotated.statusCode, rotated.body).toBe(200);
+  }, 180_000);
+
+  it("reports an unusable printer snapshot as a device fault, not a bad request", async () => {
+    const prepared = await prepareConfigurableSession("phase6-capabilities");
+
+    // A kiosk provisioned before Phase 6, or one whose snapshot promises no
+    // monochrome output, cannot be sold from. The capabilities response
+    // requires at least one colour mode, so the failure has to be named
+    // explicitly instead of surfacing as a complaint about the request.
+    await database.kiosk.update({
+      where: { id: kioskId },
+      data: { capabilities: { service: "PRINT_ONLY" } }
+    });
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: `/v1/sessions/${prepared.session.id}/print-capabilities`,
+        headers: { authorization }
+      });
+      expect(response.statusCode, response.body).toBe(503);
+      expect(response.json()).toMatchObject({ error: { code: "PRINTER_UNAVAILABLE" } });
+    } finally {
+      await database.kiosk.update({
+        where: { id: kioskId },
+        data: { capabilities: phase6Capabilities }
+      });
+    }
+  }, 180_000);
+
+  it("refuses every rule write against a published tariff, including an insert", async () => {
+    const published = await database.pricingRuleSet.findFirstOrThrow({
+      where: { status: "PUBLISHED", scope: "GLOBAL", scopeRef: "" }
+    });
+
+    // Inserting a rule into a published set changes what that published
+    // version charges just as surely as editing one, so the database refuses
+    // it. Without this the immutability guarantee would only hold for the
+    // shapes of change that happened to be listed on the trigger.
+    await expect(
+      database.pricingRule.create({
+        data: {
+          id: "01900000-0000-7000-8000-0000000001ff",
+          ruleSetId: published.id,
+          service: "PRINT",
+          paperSize: "A4",
+          colorMode: "MONOCHROME",
+          unitAmountMinor: 1,
+          duplexAdjustmentBasisPoints: 0,
+          serviceFeeMinor: 0,
+          minimumAmountMinor: 0,
+          taxBasisPoints: 0,
+          priority: 99
+        }
+      })
+    ).rejects.toThrow(/immutable/i);
+
+    await expect(
+      database.pricingRule.updateMany({
+        where: { ruleSetId: published.id },
+        data: { unitAmountMinor: 1 }
+      })
+    ).rejects.toThrow(/immutable/i);
+
+    // A global tariff has nothing to scope to, so it cannot carry a scope_ref
+    // that would let a second published global row exist beside it.
+    await expect(
+      database.pricingRuleSet.create({
+        data: {
+          id: "01900000-0000-7000-8000-0000000001fe",
+          version: "phase6-stray-global",
+          scope: "GLOBAL",
+          scopeRef: "stray",
+          currency: developmentTariff.currency,
+          currencyExponent: developmentTariff.currencyExponent,
+          status: "PUBLISHED",
+          rounding: "HALF_UP",
+          taxMode: "EXCLUSIVE",
+          minimumApplication: "BEFORE_TAX",
+          validFrom: new Date("2026-01-01T00:00:00.000Z"),
+          publishedAt: new Date("2026-01-01T00:00:00.000Z")
+        }
+      })
+    ).rejects.toThrow();
   }, 180_000);
 
   it("resolves two simultaneous saves into one revision and one stale version", async () => {
@@ -852,7 +974,6 @@ function settingsBody(
     pageRanges?: string | null;
     copies?: number;
     duplex?: "SIMPLEX" | "LONG_EDGE" | "SHORT_EDGE";
-    pagesPerSheet?: 1 | 2;
   } = {}
 ) {
   return {
@@ -862,7 +983,6 @@ function settingsBody(
     duplex: overrides.duplex ?? "SIMPLEX",
     paperSize: "A4",
     orientation: "AUTO",
-    pagesPerSheet: overrides.pagesPerSheet ?? 1,
     scaling: "FIT",
     collate: true
   };
@@ -1060,29 +1180,50 @@ async function ensureDevelopmentTariff(): Promise<void> {
         `PHASE6_UNEXPECTED_TARIFF:${published.version}: this suite expects the development tariff`
       );
     }
+    // The version string alone is not the tariff. A database still holding the
+    // amounts of an earlier publication would reprice every expectation below,
+    // so the amounts this suite writes out are checked against what is actually
+    // published rather than assumed from the name.
+    const printRule = published.rules.find(
+      (rule) => rule.service === "PRINT" && rule.paperSize === "A4"
+    );
+    const mismatch =
+      !printRule ||
+      printRule.unitAmountMinor !== developmentTariff.unitAmountMinor ||
+      printRule.serviceFeeMinor !== developmentTariff.serviceFeeMinor ||
+      printRule.minimumAmountMinor !== developmentTariff.minimumAmountMinor ||
+      printRule.taxBasisPoints !== developmentTariff.taxBasisPoints ||
+      published.currency !== developmentTariff.currency ||
+      published.currencyExponent !== developmentTariff.currencyExponent;
+    if (mismatch) {
+      throw new Error(
+        `PHASE6_STALE_TARIFF:${published.version}: the published amounts differ from this suite; run pnpm db:seed`
+      );
+    }
     return;
   }
 
   await database.$transaction(async (transaction) => {
+    // Draft, then rules, then publish: a published rule set takes no rule
+    // writes of any kind, so it is published last.
     const ruleSet = await transaction.pricingRuleSet.create({
       data: {
-        id: "01900000-0000-7000-8000-000000000101",
+        id: "01900000-0000-7000-8000-000000000103",
         version: developmentTariff.version,
         scope: "GLOBAL",
         scopeRef: "",
         currency: developmentTariff.currency,
         currencyExponent: developmentTariff.currencyExponent,
-        status: "PUBLISHED",
+        status: "DRAFT",
         rounding: "HALF_UP",
         taxMode: "EXCLUSIVE",
         minimumApplication: "BEFORE_TAX",
-        validFrom: new Date("2026-01-01T00:00:00.000Z"),
-        publishedAt: new Date("2026-01-01T00:00:00.000Z")
+        validFrom: new Date("2026-01-01T00:00:00.000Z")
       }
     });
     await transaction.pricingRule.create({
       data: {
-        id: "01900000-0000-7000-8000-000000000102",
+        id: "01900000-0000-7000-8000-000000000104",
         ruleSetId: ruleSet.id,
         service: "PRINT",
         paperSize: "A4",
@@ -1094,6 +1235,10 @@ async function ensureDevelopmentTariff(): Promise<void> {
         taxBasisPoints: developmentTariff.taxBasisPoints,
         priority: 0
       }
+    });
+    await transaction.pricingRuleSet.update({
+      where: { id: ruleSet.id },
+      data: { status: "PUBLISHED", publishedAt: new Date("2026-01-01T00:00:00.000Z") }
     });
   });
 }
@@ -1121,7 +1266,6 @@ const phase6Capabilities = {
   duplexModes: ["SIMPLEX", "LONG_EDGE"],
   orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
   scalingModes: ["FIT", "ACTUAL_SIZE"],
-  pagesPerSheetOptions: [1, 2],
   maxCopies: 20,
   scanningEnabled: false,
   photocopyEnabled: false

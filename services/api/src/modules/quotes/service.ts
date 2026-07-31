@@ -341,7 +341,6 @@ export class QuoteService {
       duplex: string;
       paperSize: string;
       orientation: string;
-      pagesPerSheet: number;
       scaling: string;
       collate: boolean;
       selections: unknown;
@@ -385,7 +384,6 @@ export class QuoteService {
             duplex: revision.duplex as DuplexMode,
             paperSize: revision.paperSize as PaperSize,
             orientation: revision.orientation as Orientation,
-            pagesPerSheet: revision.pagesPerSheet,
             scaling: revision.scaling as ScalingMode,
             collate: revision.collate
           },
@@ -410,6 +408,12 @@ export class QuoteService {
       where: {
         status: "PUBLISHED",
         scope: "GLOBAL",
+        // The published-per-scope unique index covers (scope, scope_ref), so
+        // the empty scope_ref that a global tariff carries has to be part of
+        // the lookup. Without it a stray global row with some other scope_ref
+        // would be an equally valid match and the tariff in force would depend
+        // on row order.
+        scopeRef: "",
         validFrom: { lte: now },
         OR: [{ validUntil: null }, { validUntil: { gt: now } }]
       },

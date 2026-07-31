@@ -19,7 +19,7 @@ nothing in this phase captures money.
    document moves the session back.
 2. `PUT /v1/sessions/:sessionId/settings` turns a customer's choices into one
    canonical, append-only revision: ordered documents, merged page ranges,
-   copies, duplex, A4, orientation, one- or two-up, and fit. Colour is not a
+   copies, duplex, A4, orientation, and fit. Colour is not a
    parameter. Monochrome is written by the API, enforced by a database check
    constraint, and recorded in the manifest.
 3. Page-range text is re-emitted canonically. `3,1-2,2-3` is stored as `1-3`,
@@ -55,8 +55,10 @@ nothing in this phase captures money.
     stays disabled until a live quote exists, and the checkout screen refuses
     to render at all without one.
 11. A published pricing rule set is immutable in the database. Triggers refuse
-    an in-place edit of a published tariff, of its rules, and of any settings
-    revision. Corrections publish a new version.
+    every rule write against a published tariff — insert, update and delete
+    alike — and refuse an in-place edit of the set itself or of any settings
+    revision. Publication is therefore ordered: draft the set, write its rules,
+    then publish. Corrections publish a new version.
 
 Phase 6 does not add payment, refunds, printing, promotions, multi-currency
 pricing, or per-site tariffs.
@@ -91,7 +93,7 @@ For each document in a revision:
 
 ```text
 selectedPages       = pages in the canonical ranges
-printedSidesPerCopy = ceil(selectedPages / pagesPerSheet)
+printedSidesPerCopy = selectedPages
 printedSides        = sum(printedSidesPerCopy) * copies
 physicalSheets      = simplex ? printedSides
                              : sum(ceil(printedSidesPerCopy / 2)) * copies
@@ -112,9 +114,16 @@ total      = subtotal + tax
 placements are supported, stored, and constraint-checked.
 
 The seeded development tariff is a placeholder for local work, not a price
-list: AMD with exponent 2, 50.00 per printed side, no service fee, a 100.00
-minimum before tax, 20% tax, rounded half up. **A local accountant must
-validate the rate, the rounding point, and receipt rules before real sales.**
+list: AMD with exponent 2, 50.00 per printed side, no service fee, no minimum
+transaction, 20% tax, rounded half up. **A local accountant must validate the
+rate, the rounding point, and receipt rules before real sales.**
+
+The minimum is a published rule field, not a hard-coded floor. A zero minimum
+means every job pays exactly what its sides cost; the arithmetic, the storage,
+and the `BEFORE_TAX` / `AFTER_TAX` placement stay in place so a deployment that
+wants a floor sets `minimumAmountMinor` on its rule and nothing else changes.
+The checkout screen shows the minimum line only when a floor actually moved the
+price.
 
 ## State and invalidation rules
 
@@ -170,8 +179,10 @@ without those scopes receives `403` on the new routes.
   revision number, with the canonical selections, counts, capability version,
   and manifest hash. An `UPDATE` trigger rejects in-place edits.
 - `pricing_rule_sets` and `pricing_rules` — versioned tariffs. A partial
-  unique index permits one published rule set per scope, and triggers refuse
-  to edit a published set or its rules.
+  unique index permits one published rule set per `(scope, scope_ref)` pair,
+  and a check constraint keeps a `GLOBAL` set's `scope_ref` empty so the global
+  tariff the API looks up is unambiguous. Triggers refuse to edit a published
+  set, and refuse to insert, update or delete any of its rules.
 - `price_quotes` — the stored breakdown, expiry, status, and invalidation
   reason, with a check constraint that reconstructs the total from the parts
   and a partial unique index allowing one `ACTIVE` quote per session.
@@ -245,15 +256,18 @@ GitHub.
   fast-check page-range and sheet-arithmetic properties, 16 pricing tests with
   integer-money and monotonicity properties, 6 capability-snapshot tests, and
   new API, kiosk-agent, kiosk model, and kiosk journey tests.
-- The full integration suite passed (52 tests across 4 files) against real
+- The full integration suite passed (56 tests across 4 files) against real
   loopback PostgreSQL, Redis, MinIO, ClamAV, the authenticated document
-  processor, BullMQ, the API, and the janitor. The 10 Phase 6 scenarios drive
+  processor, BullMQ, the API, and the janitor. The 13 Phase 6 scenarios drive
   the real Phase 3–5 path to a validated three-page document and then cover
-  canonical ranges, duplex and two-up pricing, the published minimum,
-  idempotent replay and key reuse, quote invalidation on settings and document
-  change, stale versions, capability and bounds refusals, a request carrying a
+  canonical ranges, duplex pricing, a tariff with no minimum,
+  idempotent replay and key reuse, a key reused under a version the request no
+  longer names, quote invalidation on settings and document
+  change, stale versions, capability and bounds refusals, an unusable printer
+  snapshot reported as a device fault, a request carrying a
   browser-supplied total, cross-kiosk isolation, expiry and re-quoting, and
-  the database immutability triggers.
+  the database immutability triggers including a rule insert against a
+  published tariff.
 - The deterministic browser gate passed 14 kiosk scenarios at both supported
   pilot resolutions, including a configure-to-checkout journey that asserts
   the displayed total comes from the server and that no kiosk request contains
@@ -343,7 +357,7 @@ there rather than folded into this phase.
   ordered multi-document jobs, and the API accepts them, but the touchscreen
   provides no reorder or per-document controls yet. Do not raise the limit
   until that workflow exists.
-- Orientation, scaling, and two-up are recorded and priced but not yet
+- Orientation and scaling are recorded and priced but not yet
   rendered: the preview still shows the canonical document page rather than a
   simulation of the imposed sheet. The monochrome preview remains an
   approximation until a real capability snapshot exists.

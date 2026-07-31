@@ -44,7 +44,6 @@ export interface PrintSettings {
   pageEnd: number | null;
   copies: number;
   duplex: boolean;
-  pagesPerSheet: 1 | 2;
 }
 
 /**
@@ -90,8 +89,7 @@ export const defaultPrintSettings: PrintSettings = {
   pageStart: 1,
   pageEnd: null,
   copies: 1,
-  duplex: false,
-  pagesPerSheet: 1
+  duplex: false
 };
 
 export const idlePricingState: PricingState = {
@@ -195,7 +193,7 @@ export function calculatePrintSummary(
   const requestedEnd = settings.pageEnd ?? availablePages;
   const pageEnd = availablePages === 0 ? 0 : clampPage(requestedEnd, pageStart, availablePages);
   const selectedPages = availablePages === 0 ? 0 : pageEnd - pageStart + 1;
-  const sidesPerCopy = Math.ceil(selectedPages / settings.pagesPerSheet);
+  const sidesPerCopy = selectedPages;
   const sheetsPerCopy = settings.duplex ? Math.ceil(sidesPerCopy / 2) : sidesPerCopy;
 
   return {
