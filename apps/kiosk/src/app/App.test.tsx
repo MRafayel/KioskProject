@@ -34,11 +34,102 @@ const readyFixture = {
   sizeBytes: 2_400_000
 };
 
+// The control plane owns every number below. These fixtures stand in for its
+// answers so the screens can be checked for displaying them rather than for
+// working any of them out locally.
+const settingsFixture = {
+  revision: 1,
+  copies: 2,
+  duplex: "LONG_EDGE" as const,
+  paperSize: "A4" as const,
+  orientation: "PORTRAIT" as const,
+  pagesPerSheet: 1 as const,
+  scaling: "FIT" as const,
+  collate: true,
+  colorMode: "MONOCHROME" as const,
+  files: [
+    {
+      fileId: readyFixture.id,
+      position: 0,
+      pageCount: 8,
+      pageRanges: [[3, 7] as [number, number]],
+      pageRangeText: "3-7",
+      selectedPages: 5
+    }
+  ],
+  selectedPages: 5,
+  printedSides: 10,
+  physicalSheets: 6,
+  createdAt: "2030-01-01T00:00:00.000Z"
+};
+
+const quoteFixture = {
+  id: "01900000-0000-7000-8000-0000000000aa",
+  sessionId: testSession.id,
+  settingsRevision: 1,
+  pricingVersion: "price-v1",
+  status: "ACTIVE" as const,
+  currency: "AMD",
+  currencyExponent: 2,
+  selectedPages: 5,
+  printedSides: 10,
+  physicalSheets: 6,
+  breakdown: {
+    printAmountMinor: 50_000,
+    duplexAdjustmentMinor: 0,
+    serviceFeeMinor: 0,
+    minimumAdjustmentMinor: 0
+  },
+  subtotalMinor: 50_000,
+  taxMinor: 10_000,
+  totalMinor: 60_000,
+  createdAt: "2030-01-01T00:00:00.000Z",
+  expiresAt: "2030-01-01T00:05:00.000Z"
+};
+
+const capabilitiesFixture = {
+  capabilityVersion: 2,
+  paperSizes: ["A4"],
+  duplexModes: ["SIMPLEX", "LONG_EDGE"],
+  orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
+  scalingModes: ["FIT", "ACTUAL_SIZE"],
+  pagesPerSheetOptions: [1, 2],
+  colorModes: ["MONOCHROME"],
+  maxCopies: 20,
+  maxSelectedPages: 200,
+  maxPrintedSides: 1_000
+};
+
+function readRequestBody(body: BodyInit | null | undefined): string {
+  return typeof body === "string" ? body : "";
+}
+
+function payButtonName(amountMinor: number): RegExp {
+  // The accessible name keeps ICU's non-breaking space, so match either form.
+  const escaped = formatAmd(amountMinor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^Pay\\s${escaped.replace(/^AMD\s/, "AMD\\s")}$`);
+}
+
+function formatAmd(amountMinor: number): string {
+  // Testing Library normalizes whitespace, and ICU separates the currency code
+  // from the amount with a non-breaking space, so match what a query will see.
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "AMD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })
+    .format(amountMinor / 100)
+    .replace(/\u00a0/g, " ");
+}
+
 let listedFileStatus: string;
 let cancelFailuresRemaining: number;
 let cancelIdempotencyKeys: string[];
 let fileDeleteFailuresRemaining: number;
 let fileDeleteIdempotencyKeys: string[];
+let settingsRequests: Array<{ body: string; ifMatch: string; idempotencyKey: string }>;
+let quoteRequests: Array<{ body: string; idempotencyKey: string }>;
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -47,10 +138,54 @@ beforeEach(() => {
   cancelIdempotencyKeys = [];
   fileDeleteFailuresRemaining = 0;
   fileDeleteIdempotencyKeys = [];
+  settingsRequests = [];
+  quoteRequests = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/print-capabilities")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(capabilitiesFixture), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      if (url.endsWith("/settings") && init?.method === "PUT") {
+        const headers = new Headers(init.headers);
+        settingsRequests.push({
+          body: readRequestBody(init.body),
+          ifMatch: headers.get("if-match") ?? "",
+          idempotencyKey: headers.get("idempotency-key") ?? ""
+        });
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              settings: settingsFixture,
+              sessionState: "CONFIGURING",
+              sessionVersion: 2,
+              quoteInvalidated: false
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )
+        );
+      }
+
+      if (url.endsWith("/quotes") && init?.method === "POST") {
+        quoteRequests.push({
+          body: readRequestBody(init.body),
+          idempotencyKey: new Headers(init.headers).get("idempotency-key") ?? ""
+        });
+        return Promise.resolve(
+          new Response(JSON.stringify({ quote: quoteFixture }), {
+            status: 201,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
       if (url.endsWith("/cancel")) {
         cancelIdempotencyKeys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
         if (cancelFailuresRemaining > 0) {
@@ -200,7 +335,7 @@ describe("kiosk prototype journey", () => {
     );
   });
 
-  it("keeps the completed Phase 1 settings and checkout prototype covered with ready test data", async () => {
+  it("pays only the total the control plane calculated for the saved settings", async () => {
     const user = userEvent.setup();
     renderKiosk({
       initialEntries: ["/configure"],
@@ -214,7 +349,6 @@ describe("kiosk prototype journey", () => {
 
     expect(screen.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
     expect(screen.queryByText("Paper size", { exact: true })).not.toBeInTheDocument();
-    expect(screen.queryByText("Pages per side", { exact: true })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "From page" }), {
       target: { value: "3" }
@@ -225,11 +359,60 @@ describe("kiosk prototype journey", () => {
 
     await user.click(screen.getByRole("button", { name: "Increase copies" }));
     await user.click(screen.getByLabelText("Double-sided"));
-    expect(screen.getByText("$1.50")).toBeVisible();
+
+    // Payment stays unavailable until an authoritative price arrives.
+    expect(screen.getByRole("button", { name: /Review and pay/i })).toBeDisabled();
+    expect(await screen.findByText(formatAmd(quoteFixture.totalMinor))).toBeVisible();
+    expect(screen.getByRole("button", { name: /Review and pay/i })).toBeEnabled();
+
+    // Server counts replace the local preview once they exist.
+    expect(screen.getByText(settingsFixture.printedSides.toString())).toBeVisible();
+    expect(screen.getByText(settingsFixture.physicalSheets.toString())).toBeVisible();
+
+    const lastSettings = settingsRequests.at(-1);
+    const lastQuote = quoteRequests.at(-1);
+    expect(lastSettings?.ifMatch).toBe('"1"');
+    expect(lastSettings?.idempotencyKey).toMatch(/^kiosk-/);
+    expect(JSON.parse(lastSettings?.body ?? "{}")).toMatchObject({
+      copies: 2,
+      duplex: "LONG_EDGE",
+      paperSize: "A4",
+      fileSelections: [{ fileId: readyFixture.id, pageRanges: "3-7" }]
+    });
+    // No request the kiosk sends may contain an amount, a currency, or a total.
+    for (const request of [...settingsRequests, ...quoteRequests]) {
+      expect(request.body).not.toMatch(/minor|amount|currency|total|price/i);
+    }
+    expect(JSON.parse(lastQuote?.body ?? "{}")).toEqual({ settingsRevision: 1 });
 
     await user.click(screen.getByRole("button", { name: /Review and pay/i }));
     expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Pay $1.50" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) })
+    ).toBeEnabled();
+    expect(screen.getByText(formatAmd(quoteFixture.taxMinor))).toBeVisible();
+  });
+
+  it("sends the customer back to configure instead of paying an expired price", async () => {
+    const user = userEvent.setup();
+    renderKiosk({
+      initialEntries: ["/checkout"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: { ...quoteFixture, expiresAt: "2020-01-01T00:00:00.000Z" },
+          errorCode: null
+        }
+      }
+    });
+    await user.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Review and pay" })).not.toBeInTheDocument();
   });
 
   it("shows the ready image kind in the compact configure file card", () => {
@@ -296,12 +479,18 @@ describe("kiosk prototype journey", () => {
       initialState: {
         ...initialPrototypeState,
         session: testSession,
-        files: [readyFixture]
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        }
       }
     });
     fireEvent.click(screen.getByRole("button", { name: "English" }));
     fireEvent.click(screen.getByLabelText("Printer error"));
-    fireEvent.click(screen.getByRole("button", { name: "Pay $1.20" }));
+    fireEvent.click(screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) }));
 
     expect(screen.getByRole("heading", { name: "Processing payment" })).toBeVisible();
     await act(async () => {
@@ -318,6 +507,115 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(1_200);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+  });
+
+  it("recovers a kiosk blocked by a session it can no longer resume", async () => {
+    // Exactly the state a validated document creates: the previous session has
+    // moved past WAITING_FOR_UPLOAD, so its QR grant can no longer be handed
+    // back, and this kiosk cannot start a new session until it is closed.
+    const blockingSessionId = "01900000-0000-7000-8000-0000000000b1";
+    const createAttempts: string[] = [];
+    const cancelled: Array<{ sessionId: string; ifMatch: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const headers = new Headers(init?.headers);
+
+        if (url.endsWith("/agent/v1/sessions") && init?.method === "POST") {
+          createAttempts.push(headers.get("idempotency-key") ?? "");
+          if (createAttempts.length === 1) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  error: {
+                    code: "ACTIVE_SESSION_EXISTS",
+                    message: "This kiosk already has an active session.",
+                    requestId: "req_test",
+                    details: { sessionId: blockingSessionId, currentState: "FILES_UPLOADED" }
+                  }
+                }),
+                { status: 409, headers: { "content-type": "application/json" } }
+              )
+            );
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                session: {
+                  id: "01900000-0000-7000-8000-0000000000b2",
+                  publicId: "ps_recoveredsession01",
+                  kioskId: "kiosk_dev_001",
+                  locale: "en",
+                  state: "WAITING_FOR_UPLOAD",
+                  version: 1,
+                  expiresAt: "2030-01-01T00:10:00.000Z",
+                  hardExpiresAt: "2030-01-01T00:30:00.000Z",
+                  createdAt: "2030-01-01T00:00:00.000Z",
+                  canceledAt: null
+                },
+                upload: {
+                  shortCode: "48291357",
+                  qrUrl: "https://upload.example.test/s/ps_recoveredsession01#t=u_example"
+                }
+              }),
+              { status: 201, headers: { "content-type": "application/json" } }
+            )
+          );
+        }
+
+        if (url.endsWith(`/cancel`)) {
+          cancelled.push({
+            sessionId: blockingSessionId,
+            ifMatch: headers.get("if-match") ?? ""
+          });
+          return Promise.resolve(
+            new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+          );
+        }
+
+        if (url.endsWith(`/agent/v1/sessions/${blockingSessionId}`)) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                session: {
+                  id: blockingSessionId,
+                  publicId: "ps_blockedsession0001",
+                  kioskId: "kiosk_dev_001",
+                  locale: "en",
+                  state: "FILES_UPLOADED",
+                  version: 2,
+                  expiresAt: "2030-01-01T00:10:00.000Z",
+                  hardExpiresAt: "2030-01-01T00:30:00.000Z",
+                  createdAt: "2030-01-01T00:00:00.000Z",
+                  canceledAt: null
+                }
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            )
+          );
+        }
+
+        return Promise.resolve(
+          new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      })
+    );
+
+    const user = userEvent.setup();
+    renderKiosk();
+    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(screen.getByRole("button", { name: "Start printing" }));
+
+    expect(await screen.findByRole("heading", { name: "Upload your document" })).toBeVisible();
+    // The blocking session was closed with its authoritative version, and the
+    // retry used a new key rather than replaying the refused one.
+    expect(cancelled).toEqual([{ sessionId: blockingSessionId, ifMatch: '"2"' }]);
+    expect(createAttempts).toHaveLength(2);
+    expect(createAttempts[0]).not.toBe(createAttempts[1]);
   });
 
   it("cancels safely and returns to the only available service", async () => {

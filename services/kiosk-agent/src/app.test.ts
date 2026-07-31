@@ -368,3 +368,128 @@ describe("kiosk agent session facade", () => {
     expect(forwarded?.body).toBeUndefined();
   });
 });
+
+describe("kiosk agent settings and pricing facade", () => {
+  const sessionId = "01900000-0000-7000-8000-000000000010";
+
+  function agentWithUpstream(status = 200, body: unknown = { ok: true }) {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const environment = loadEnvironment({
+      NODE_ENV: "test",
+      API_ORIGIN: "https://api.example.test",
+      DEV_KIOSK_API_KEY: "test-kiosk-api-key-000000"
+    });
+    return {
+      environment,
+      requests,
+      build: () =>
+        buildAgent(environment, {
+          upstreamFetch: (input, init) => {
+            requests.push({ url: String(input), init });
+            return Promise.resolve(
+              new Response(JSON.stringify(body), {
+                status,
+                headers: { "content-type": "application/json", etag: '"9"' }
+              })
+            );
+          }
+        })
+    };
+  }
+
+  it("forwards a settings write with the kiosk credential and both preconditions", async () => {
+    const upstream = agentWithUpstream();
+    const app = await upstream.build();
+    openApps.push(app);
+    const payload = {
+      fileOrder: ["01900000-0000-7000-8000-000000000011"],
+      fileSelections: [{ fileId: "01900000-0000-7000-8000-000000000011", pageRanges: "1-3" }],
+      copies: 2,
+      duplex: "LONG_EDGE",
+      paperSize: "A4",
+      orientation: "AUTO",
+      pagesPerSheet: 2,
+      scaling: "FIT",
+      collate: true
+    };
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/v1/sessions/${sessionId}/settings`,
+      headers: { "idempotency-key": "settings-key-000001", "if-match": '"8"' },
+      payload
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(upstream.requests[0]?.url).toBe(
+      `https://api.example.test/v1/sessions/${sessionId}/settings`
+    );
+    const headers = new Headers(upstream.requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer test-kiosk-api-key-000000");
+    expect(headers.get("if-match")).toBe('"8"');
+    expect(headers.get("idempotency-key")).toBe("settings-key-000001");
+    expect(upstream.requests[0]?.init?.body).toBe(JSON.stringify(payload));
+    expect(response.body).not.toContain(upstream.environment.DEV_KIOSK_API_KEY);
+  });
+
+  it("refuses a settings write that would lose the optimistic version", async () => {
+    const upstream = agentWithUpstream();
+    const app = await upstream.build();
+    openApps.push(app);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/v1/sessions/${sessionId}/settings`,
+      headers: { "idempotency-key": "settings-key-000002" },
+      payload: {}
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: { code: "CONDITIONAL_REQUEST_HEADERS_REQUIRED" }
+    });
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it("forwards a quote request and refuses one without an idempotency key", async () => {
+    const upstream = agentWithUpstream(201, { quote: { id: "quote-id" } });
+    const app = await upstream.build();
+    openApps.push(app);
+
+    const created = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/quotes`,
+      headers: { "idempotency-key": "quote-key-000001" },
+      payload: { settingsRevision: 3 }
+    });
+    const unkeyed = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/quotes`,
+      payload: { settingsRevision: 3 }
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(upstream.requests[0]?.init?.body).toBe(JSON.stringify({ settingsRevision: 3 }));
+    expect(unkeyed.statusCode).toBe(400);
+    expect(upstream.requests).toHaveLength(1);
+  });
+
+  it("rejects malformed session and quote identifiers before reaching the API", async () => {
+    const upstream = agentWithUpstream();
+    const app = await upstream.build();
+    openApps.push(app);
+
+    const badSession = await app.inject({
+      method: "GET",
+      url: "/v1/sessions/not-a-uuid/print-capabilities"
+    });
+    const badQuote = await app.inject({
+      method: "GET",
+      url: `/v1/sessions/${sessionId}/quotes/not-a-uuid`
+    });
+
+    expect(badSession.statusCode).toBe(400);
+    expect(badQuote.statusCode).toBe(400);
+    expect(upstream.requests).toHaveLength(0);
+  });
+});

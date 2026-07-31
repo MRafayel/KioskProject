@@ -136,6 +136,32 @@ test("shows an image file kind in the ready document settings card", async ({ pa
   await expect(page.locator(".file-card--compact .file-card__icon")).toHaveText("JPEG");
 });
 
+test("shows only the server total and unlocks payment when a quote exists", async ({ page }) => {
+  const fileId = "01900000-0000-7000-8000-000000000021";
+  const requestBodies: string[] = [];
+  await stubReadyDocumentAndPricing(page, fileId, requestBodies);
+
+  await page.goto("/");
+  await switchToEnglish(page);
+  await page.getByRole("button", { name: "Start printing" }).click();
+  await page.getByRole("button", { name: /Continue to print settings/i }).click();
+  await expect(page.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
+
+  const reviewButton = page.getByRole("button", { name: /Review and pay/i });
+  await expect(page.getByText(/AMD\s*120\.00/)).toBeVisible();
+  await expect(reviewButton).toBeEnabled();
+  await expectNoHorizontalOverflow(page);
+
+  // Nothing the kiosk sent could have named its own price.
+  expect(requestBodies.join("\n")).not.toMatch(/minor|amount|currency|total|price/i);
+
+  await reviewButton.click();
+  await expect(page.getByRole("heading", { name: "Review and pay" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Pay\s+AMD\s*120\.00/ })).toBeEnabled();
+  await expect(page.getByText(/AMD\s*20\.00/)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});
+
 test("offers a safe cancel path while an uploaded file is quarantined", async ({ page }) => {
   await page.goto("/");
   await switchToEnglish(page);
@@ -252,6 +278,156 @@ test("keeps Russian and Armenian meaningful across the active session", async ({
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Անցնել տպման կարգավորումներին" })).toBeDisabled();
 });
+
+/**
+ * A validated document plus the control plane's answers for capabilities,
+ * settings and price. Every amount below belongs to the server side of the
+ * boundary; the kiosk only renders what these responses contain.
+ */
+async function stubReadyDocumentAndPricing(
+  page: Page,
+  fileId: string,
+  requestBodies: string[]
+): Promise<void> {
+  const settings = {
+    revision: 1,
+    copies: 1,
+    duplex: "SIMPLEX",
+    paperSize: "A4",
+    orientation: "PORTRAIT",
+    pagesPerSheet: 1,
+    scaling: "FIT",
+    collate: true,
+    colorMode: "MONOCHROME",
+    files: [
+      {
+        fileId,
+        position: 0,
+        pageCount: 1,
+        pageRanges: [[1, 1]],
+        pageRangeText: "1",
+        selectedPages: 1
+      }
+    ],
+    selectedPages: 1,
+    printedSides: 1,
+    physicalSheets: 1,
+    createdAt: "2030-01-01T00:00:00.000Z"
+  };
+
+  await page.route("**/agent/v1/sessions/**", async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+
+    if (pathname.endsWith("/print-capabilities")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          capabilityVersion: 2,
+          paperSizes: ["A4"],
+          duplexModes: ["SIMPLEX", "LONG_EDGE"],
+          orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
+          scalingModes: ["FIT", "ACTUAL_SIZE"],
+          pagesPerSheetOptions: [1, 2],
+          colorModes: ["MONOCHROME"],
+          maxCopies: 20,
+          maxSelectedPages: 200,
+          maxPrintedSides: 1_000
+        })
+      });
+      return;
+    }
+
+    if (pathname.endsWith("/settings") && request.method() === "PUT") {
+      requestBodies.push(request.postData() ?? "");
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          settings,
+          sessionState: "CONFIGURING",
+          sessionVersion: 2,
+          quoteInvalidated: false
+        })
+      });
+      return;
+    }
+
+    if (pathname.endsWith("/quotes") && request.method() === "POST") {
+      requestBodies.push(request.postData() ?? "");
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          quote: {
+            id: "01900000-0000-7000-8000-0000000000aa",
+            sessionId: "01900000-0000-7000-8000-000000000020",
+            settingsRevision: 1,
+            pricingVersion: "price-v1",
+            status: "ACTIVE",
+            currency: "AMD",
+            currencyExponent: 2,
+            selectedPages: 1,
+            printedSides: 1,
+            physicalSheets: 1,
+            breakdown: {
+              printAmountMinor: 5_000,
+              duplexAdjustmentMinor: 0,
+              serviceFeeMinor: 0,
+              minimumAdjustmentMinor: 5_000
+            },
+            subtotalMinor: 10_000,
+            taxMinor: 2_000,
+            totalMinor: 12_000,
+            createdAt: "2030-01-01T00:00:00.000Z",
+            expiresAt: "2030-01-01T00:05:00.000Z"
+          }
+        })
+      });
+      return;
+    }
+
+    if (pathname.endsWith("/files")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              id: fileId,
+              ordinal: 0,
+              status: "READY",
+              kind: "PDF",
+              pageCount: 1,
+              processingRevision: 1,
+              rejectionCode: null,
+              sizeBytes: 2_400_000,
+              createdAt: "2030-01-01T00:00:00.000Z"
+            }
+          ]
+        })
+      });
+      return;
+    }
+
+    if (pathname.endsWith(`/${fileId}/pages`)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          fileId,
+          processingRevision: 1,
+          pageCount: 1,
+          items: [{ pageNumber: 1, widthPixels: 850, heightPixels: 1200, previewAvailable: false }]
+        })
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+}
 
 async function switchToEnglish(page: Page): Promise<void> {
   await page.getByRole("button", { name: "English" }).click();

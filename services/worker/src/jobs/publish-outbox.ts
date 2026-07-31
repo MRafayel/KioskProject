@@ -254,6 +254,29 @@ function toSafeSessionEvent(input: {
     safePayload = { sessionId, file: payload.file };
   } else if (input.type === "file.deleted") {
     safePayload = { sessionId, fileId: payload.fileId };
+  } else if (input.type === "settings.updated") {
+    safePayload = {
+      sessionId,
+      settingsRevision: payload.settingsRevision,
+      state: payload.state,
+      version: payload.version,
+      selectedPages: payload.selectedPages,
+      printedSides: payload.printedSides,
+      physicalSheets: payload.physicalSheets
+    };
+  } else if (input.type === "quote.created") {
+    safePayload = {
+      sessionId,
+      quoteId: payload.quoteId,
+      settingsRevision: payload.settingsRevision,
+      pricingVersion: payload.pricingVersion,
+      currency: payload.currency,
+      currencyExponent: payload.currencyExponent,
+      totalMinor: payload.totalMinor,
+      expiresAt: payload.expiresAt
+    };
+  } else if (input.type === "quote.invalidated") {
+    safePayload = { sessionId, quoteId: payload.quoteId, reason: payload.reason };
   } else if (input.type === "session.canceled" || input.type === "session.expired") {
     safePayload = {
       sessionId,

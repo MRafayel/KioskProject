@@ -9,7 +9,7 @@ import {
   type SessionSnapshot,
   type SessionState
 } from "@printing-kiosk/contracts";
-import { Prisma, type PrismaClient } from "@printing-kiosk/database";
+import { invalidateSessionPricing, Prisma, type PrismaClient } from "@printing-kiosk/database";
 import { isSessionExpired, SessionDomainError, transitionSession } from "@printing-kiosk/domain";
 
 import { processingArtifactCleanupDueAt } from "../files/cleanup-policy.js";
@@ -22,6 +22,7 @@ import {
   safelyEqualHexDigests
 } from "./crypto.js";
 import { ApiError } from "./errors.js";
+import { isRetryableTransactionError } from "./transactions.js";
 
 const TERMINAL_STATES: SessionState[] = ["COMPLETED", "CANCELED", "EXPIRED"];
 const EXPIRABLE_STATES: SessionState[] = [
@@ -337,7 +338,15 @@ export class SessionService {
               input.expectedVersion
             );
             const now = this.options.clock.now();
-            const nextEventSequence = session.eventSequence + 1;
+            const invalidation = await invalidateSessionPricing(transaction, {
+              sessionId: session.id,
+              reason: "SESSION_TERMINAL",
+              now,
+              startingSequence: session.eventSequence,
+              newEventId: () => this.options.random.uuid(now),
+              clearSettingsRevision: false
+            });
+            const nextEventSequence = invalidation.nextSequence + 1;
             const update = await transaction.printSession.updateMany({
               where: { id: session.id, stateVersion: input.expectedVersion },
               data: {
@@ -692,7 +701,15 @@ async function expireSession(
     "EXPIRED",
     session.stateVersion
   );
-  const nextEventSequence = session.eventSequence + 1;
+  const invalidation = await invalidateSessionPricing(transaction, {
+    sessionId: session.id,
+    reason: "SESSION_TERMINAL",
+    now,
+    startingSequence: session.eventSequence,
+    newEventId: () => random.uuid(now),
+    clearSettingsRevision: false
+  });
+  const nextEventSequence = invalidation.nextSequence + 1;
 
   await transaction.printSession.update({
     where: { id: session.id },
@@ -832,35 +849,6 @@ function mapDatabaseConflict(error: unknown): unknown {
     return new ApiError(409, "CONCURRENT_SESSION_UPDATE", "The session changed concurrently.");
   }
   return error;
-}
-
-function isRetryableTransactionError(error: unknown): boolean {
-  if (!error || typeof error !== "object" || !("code" in error)) return false;
-  const code = Reflect.get(error, "code");
-  if (code === "P2034") return true;
-
-  // Prisma can surface PostgreSQL serialization failures raised by a raw
-  // SELECT ... FOR UPDATE as P2010 instead of P2034. Retry only the two
-  // PostgreSQL transaction-conflict SQLSTATEs; other raw-query errors must
-  // remain visible rather than being mistaken for a safe concurrency retry.
-  if (code !== "P2010" || !("meta" in error)) return false;
-  const meta = Reflect.get(error, "meta");
-  const databaseCode = getDriverDatabaseCode(meta);
-  return databaseCode === "40001" || databaseCode === "40P01";
-}
-
-function getDriverDatabaseCode(meta: unknown): unknown {
-  if (!meta || typeof meta !== "object" || !("driverAdapterError" in meta)) return undefined;
-  const driverAdapterError = Reflect.get(meta, "driverAdapterError");
-  if (
-    !driverAdapterError ||
-    typeof driverAdapterError !== "object" ||
-    !("cause" in driverAdapterError)
-  )
-    return undefined;
-  const cause = Reflect.get(driverAdapterError, "cause");
-  if (!cause || typeof cause !== "object" || !("originalCode" in cause)) return undefined;
-  return Reflect.get(cause, "originalCode");
 }
 
 function isAllocationConstraintError(error: unknown): boolean {

@@ -21,6 +21,7 @@
     "migrate:dev": "prisma migrate dev",
     "seed": "tsx prisma/seed.ts",
     "verify:phase5-upgrade": "node scripts/verify-phase5-upgrade.mjs",
+    "verify:phase6-upgrade": "node scripts/verify-phase6-upgrade.mjs",
     "typecheck": "pnpm generate && tsc -p tsconfig.json --noEmit",
     "test": "vitest run src --passWithNoTests"
   },

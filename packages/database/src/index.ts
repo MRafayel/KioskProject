@@ -9,3 +9,5 @@ export function createDatabaseClient(connectionString: string): PrismaClient {
 
 export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };
+export { invalidateSessionPricing } from "./session-pricing.js";
+export type { QuoteInvalidationReason, SessionPricingInvalidation } from "./session-pricing.js";

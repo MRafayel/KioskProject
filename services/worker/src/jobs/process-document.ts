@@ -11,7 +11,8 @@ import {
   type DocumentProcessingJob,
   type UploadedFileRejectionCode
 } from "@printing-kiosk/contracts";
-import { Prisma, type PrismaClient } from "@printing-kiosk/database";
+import { invalidateSessionPricing, Prisma, type PrismaClient } from "@printing-kiosk/database";
+import { canTransitionSession, type SessionState } from "@printing-kiosk/domain";
 
 import type { DocumentStore } from "../storage/document-store.js";
 import {
@@ -24,6 +25,16 @@ import {
 const DEFAULT_DISPATCH_INTERVAL_MS = 500;
 const ENQUEUE_STALE_AFTER_MS = 30_000;
 const MAX_DISPATCH_BATCH = 25;
+/**
+ * A document may finish validating while the customer is still adding files or
+ * already choosing settings. Anything further along has locked a manifest, so a
+ * late arrival there is a lost lease rather than a new printable document.
+ */
+const ACCEPTS_READY_FILE_STATES: SessionState[] = [
+  "WAITING_FOR_UPLOAD",
+  "FILES_UPLOADED",
+  "CONFIGURING"
+];
 
 export interface DocumentProcessingLogger {
   info(fields: Record<string, unknown>, message: string): void;
@@ -551,7 +562,7 @@ export class DocumentProcessingCoordinator {
         });
         const now = new Date();
         if (
-          session.state !== "WAITING_FOR_UPLOAD" ||
+          !ACCEPTS_READY_FILE_STATES.includes(session.state as SessionState) ||
           now.getTime() >= session.idleExpiresAt.getTime() ||
           now.getTime() >= session.hardExpiresAt.getTime()
         ) {
@@ -626,11 +637,36 @@ export class DocumentProcessingCoordinator {
           rejectionCode: ready.rejectionCode,
           createdAt: ready.createdAt.toISOString()
         });
-        const nextSequence = session.eventSequence + 1;
+        // A newly printable document changes the material any saved settings
+        // and any live price described, so both are retired here. The customer
+        // returns to the document list and configures the new set explicitly.
+        const invalidation = await invalidateSessionPricing(transaction, {
+          sessionId: session.id,
+          reason: "DOCUMENTS_CHANGED",
+          now,
+          startingSequence: session.eventSequence,
+          newEventId: () => randomUUID(),
+          clearSettingsRevision: true
+        });
+
+        const currentState = session.state as SessionState;
+        const readyState: SessionState = "FILES_UPLOADED";
+        const stateChanged = currentState !== readyState;
+        if (stateChanged && !canTransitionSession(currentState, readyState)) {
+          throw new LeaseLostError();
+        }
+
+        const nextSequence = invalidation.nextSequence + 1;
         await Promise.all([
           transaction.printSession.update({
             where: { id: session.id },
-            data: { eventSequence: nextSequence, updatedAt: now }
+            data: {
+              ...(stateChanged
+                ? { state: readyState, stateVersion: session.stateVersion + 1 }
+                : {}),
+              eventSequence: nextSequence,
+              updatedAt: now
+            }
           }),
           transaction.auditEvent.create({
             data: {
@@ -645,7 +681,8 @@ export class DocumentProcessingCoordinator {
               metadata: {
                 fileId: claimed.id,
                 processingRevision: claimed.processingRevision,
-                pageCount: bundle.manifest.pageCount
+                pageCount: bundle.manifest.pageCount,
+                sessionState: stateChanged ? readyState : currentState
               }
             }
           }),

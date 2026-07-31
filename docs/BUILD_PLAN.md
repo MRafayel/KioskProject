@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: active implementation plan; Phases 0–5 implemented
+Status: active implementation plan; Phases 0–6 implemented
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
@@ -532,6 +532,10 @@ Office/SVG/archive support now, public previews, eager huge rasterization, and
 native viewing of originals.
 
 ### Phase 6 — settings and server-authoritative pricing
+
+**Implementation:** complete for the pilot/prototype boundary. See
+`docs/PHASE_6_STATUS.md` for the pricing model, invalidation rules, migrations,
+acceptance evidence, and commercial follow-up requirements.
 
 **Objective:** create valid immutable settings revisions and reproducible quotes.
 

@@ -315,3 +315,92 @@ describe("controlled transport errors", () => {
     });
   });
 });
+
+describe("settings and quote route contracts", () => {
+  const sessionId = "01900000-0000-7000-8000-000000000010";
+  const validSettings = {
+    fileOrder: ["01900000-0000-7000-8000-000000000011"],
+    fileSelections: [{ fileId: "01900000-0000-7000-8000-000000000011", pageRanges: "1-3" }],
+    copies: 2,
+    duplex: "LONG_EDGE",
+    paperSize: "A4",
+    orientation: "AUTO",
+    pagesPerSheet: 2,
+    scaling: "FIT",
+    collate: true
+  };
+
+  it("requires a kiosk credential before reading or writing settings", async () => {
+    const app = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(app);
+
+    const write = await app.inject({
+      method: "PUT",
+      url: `/v1/sessions/${sessionId}/settings`,
+      headers: { "idempotency-key": "settings-unauthenticated", "if-match": '"1"' },
+      payload: validSettings
+    });
+    const read = await app.inject({ method: "GET", url: `/v1/sessions/${sessionId}/settings` });
+    const quote = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/quotes`,
+      headers: { "idempotency-key": "quote-unauthenticated" },
+      payload: { settingsRevision: 1 }
+    });
+
+    for (const response of [write, read, quote]) {
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+    }
+  });
+
+  it("refuses a settings write that carries no version or idempotency key", async () => {
+    const app = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(app);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/v1/sessions/${sessionId}/settings`,
+      headers: { authorization: "Bearer development-only-kiosk-key" },
+      payload: validSettings
+    });
+
+    // Authentication is still the first gate; the conditional headers are
+    // checked only once a credential is accepted.
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("rejects a colour or unsupported paper request at the contract boundary", async () => {
+    const { updatePrintSettingsBodySchema, createQuoteBodySchema } =
+      await import("@printing-kiosk/contracts");
+
+    expect(updatePrintSettingsBodySchema.safeParse(validSettings).success).toBe(true);
+    expect(
+      updatePrintSettingsBodySchema.safeParse({ ...validSettings, colorMode: "COLOR" }).success
+    ).toBe(false);
+    expect(
+      updatePrintSettingsBodySchema.safeParse({ ...validSettings, paperSize: "A3" }).success
+    ).toBe(false);
+    expect(
+      updatePrintSettingsBodySchema.safeParse({ ...validSettings, pagesPerSheet: 4 }).success
+    ).toBe(false);
+    expect(
+      updatePrintSettingsBodySchema.safeParse({
+        ...validSettings,
+        fileSelections: [
+          { fileId: "01900000-0000-7000-8000-000000000011", pageRanges: "1-3; DROP" }
+        ]
+      }).success
+    ).toBe(false);
+
+    // A quote request has room for a settings revision and nothing else, so a
+    // browser cannot propose the amount it would like to pay.
+    expect(createQuoteBodySchema.safeParse({ settingsRevision: 3 }).success).toBe(true);
+    expect(createQuoteBodySchema.safeParse({ settingsRevision: 3, totalMinor: 1 }).success).toBe(
+      false
+    );
+  });
+});

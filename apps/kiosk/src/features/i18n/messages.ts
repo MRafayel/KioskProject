@@ -102,12 +102,20 @@ export interface MessageCatalog {
     copiesAria: string;
     decreaseCopies: string;
     increaseCopies: string;
+    pagesPerSheet: string;
+    onePagePerSheet: string;
+    twoPagesPerSheet: string;
     summaryTitle: string;
     selectedPages: string;
     printedSides: string;
     paperSheets: string;
     output: string;
-    estimatedTotal: string;
+    total: string;
+    priceCalculating: string;
+    priceCalculatingHelp: string;
+    priceUnavailable: string;
+    priceUnavailableHelp: string;
+    priceRetry: string;
     reviewAndPay: string;
     backToUpload: string;
   };
@@ -119,7 +127,10 @@ export interface MessageCatalog {
     edit: string;
     copies: string;
     sides: string;
+    paperSheets: string;
     output: string;
+    serviceFee: string;
+    tax: string;
     prototypeOutcome: string;
     prototypeDescription: string;
     outcomeSuccess: string;
@@ -302,12 +313,20 @@ const english: MessageCatalog = {
     copiesAria: "Number of copies",
     decreaseCopies: "Decrease copies",
     increaseCopies: "Increase copies",
+    pagesPerSheet: "Pages per sheet",
+    onePagePerSheet: "One per sheet",
+    twoPagesPerSheet: "Two per sheet",
     summaryTitle: "Print summary",
     selectedPages: "Selected pages",
     printedSides: "Printed sides",
     paperSheets: "Paper sheets",
     output: "Output",
-    estimatedTotal: "Estimated total",
+    total: "Total",
+    priceCalculating: "Calculating…",
+    priceCalculatingHelp: "The kiosk is confirming the price for these settings.",
+    priceUnavailable: "The price could not be confirmed.",
+    priceUnavailableHelp: "The price could not be confirmed, so payment is not available yet.",
+    priceRetry: "Try again",
     reviewAndPay: "Review and pay",
     backToUpload: "Back to upload"
   },
@@ -319,7 +338,10 @@ const english: MessageCatalog = {
     edit: "Edit",
     copies: "Copies",
     sides: "Sides",
+    paperSheets: "Paper sheets",
     output: "Output",
+    serviceFee: "Service fee",
+    tax: "Tax",
     prototypeOutcome: "Prototype outcome",
     prototypeDescription: "Choose a result to verify the kiosk recovery screens.",
     outcomeSuccess: "Successful print",
@@ -491,12 +513,20 @@ const russian: MessageCatalog = {
     copiesAria: "Количество копий",
     decreaseCopies: "Уменьшить количество копий",
     increaseCopies: "Увеличить количество копий",
+    pagesPerSheet: "Страниц на листе",
+    onePagePerSheet: "Одна на листе",
+    twoPagesPerSheet: "Две на листе",
     summaryTitle: "Итог печати",
     selectedPages: "Выбрано страниц",
     printedSides: "Печатных сторон",
     paperSheets: "Листов бумаги",
     output: "Режим печати",
-    estimatedTotal: "Предварительная стоимость",
+    total: "Итого",
+    priceCalculating: "Расчёт…",
+    priceCalculatingHelp: "Терминал подтверждает стоимость для выбранных параметров.",
+    priceUnavailable: "Не удалось подтвердить стоимость.",
+    priceUnavailableHelp: "Стоимость не подтверждена, поэтому оплата пока недоступна.",
+    priceRetry: "Повторить",
     reviewAndPay: "Проверить и оплатить",
     backToUpload: "Вернуться к загрузке"
   },
@@ -509,7 +539,10 @@ const russian: MessageCatalog = {
     edit: "Изменить",
     copies: "Копии",
     sides: "Стороны",
+    paperSheets: "Листов бумаги",
     output: "Режим печати",
+    serviceFee: "Сервисный сбор",
+    tax: "Налог",
     prototypeOutcome: "Результат прототипа",
     prototypeDescription: "Выберите результат, чтобы проверить экраны восстановления.",
     outcomeSuccess: "Успешная печать",
@@ -681,12 +714,20 @@ const armenian: MessageCatalog = {
     copiesAria: "Պատճենների քանակը",
     decreaseCopies: "Նվազեցնել պատճենների քանակը",
     increaseCopies: "Ավելացնել պատճենների քանակը",
+    pagesPerSheet: "Էջեր մեկ թերթին",
+    onePagePerSheet: "Մեկ էջ թերթին",
+    twoPagesPerSheet: "Երկու էջ թերթին",
     summaryTitle: "Տպման ամփոփում",
     selectedPages: "Ընտրված էջեր",
     printedSides: "Տպվող երեսներ",
     paperSheets: "Թղթի թերթեր",
     output: "Տպման ռեժիմ",
-    estimatedTotal: "Նախնական արժեքը",
+    total: "Ընդամենը",
+    priceCalculating: "Հաշվարկվում է…",
+    priceCalculatingHelp: "Տերմինալը հաստատում է ընտրված պարամետրերի արժեքը։",
+    priceUnavailable: "Չհաջողվեց հաստատել արժեքը։",
+    priceUnavailableHelp: "Արժեքը հաստատված չէ, ուստի վճարումը դեռ հասանելի չէ։",
+    priceRetry: "Կրկնել",
     reviewAndPay: "Ստուգել և վճարել",
     backToUpload: "Վերադառնալ վերբեռնմանը"
   },
@@ -698,7 +739,10 @@ const armenian: MessageCatalog = {
     edit: "Փոփոխել",
     copies: "Պատճեններ",
     sides: "Երեսներ",
+    paperSheets: "Թղթի թերթեր",
     output: "Տպման ռեժիմ",
+    serviceFee: "Սպասարկման վճար",
+    tax: "Հարկ",
     prototypeOutcome: "Նախատիպի արդյունքը",
     prototypeDescription: "Ընտրեք արդյունքը՝ վերականգնման էկրանները ստուգելու համար։",
     outcomeSuccess: "Հաջող տպագրություն",

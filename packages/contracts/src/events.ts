@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { quoteInvalidationReasonSchema } from "./quotes.js";
 import { sessionStateSchema } from "./sessions.js";
 import { readyUploadedFileSnapshotSchema, uploadedFileSnapshotSchema } from "./uploads.js";
 
@@ -71,6 +72,47 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       .object({
         sessionId: sessionIdSchema,
         fileId: z.string().uuid()
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("settings.updated"),
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        settingsRevision: z.number().int().positive(),
+        state: sessionStateSchema,
+        version: z.number().int().positive(),
+        selectedPages: z.number().int().positive(),
+        printedSides: z.number().int().positive(),
+        physicalSheets: z.number().int().positive()
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("quote.created"),
+    // Money is present because the kiosk must display an authoritative total,
+    // but nothing here identifies a document or its contents.
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        quoteId: z.string().uuid(),
+        settingsRevision: z.number().int().positive(),
+        pricingVersion: z.string().min(1).max(40),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        currencyExponent: z.number().int().min(0).max(4),
+        totalMinor: z.number().int().nonnegative(),
+        expiresAt: z.string().datetime()
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("quote.invalidated"),
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        quoteId: z.string().uuid(),
+        reason: quoteInvalidationReasonSchema
       })
       .strict()
   }),

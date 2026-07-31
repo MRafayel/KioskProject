@@ -649,7 +649,9 @@ function validateLocalFile(
 }
 
 function isMobileUploadState(state: string): boolean {
-  return state === "WAITING_FOR_UPLOAD" || state === "FILES_UPLOADED";
+  // The phone may still add a document while the kiosk is choosing settings.
+  // Anything past configuring has a locked manifest and refuses uploads.
+  return state === "WAITING_FOR_UPLOAD" || state === "FILES_UPLOADED" || state === "CONFIGURING";
 }
 
 function isTerminalMobileSessionError(error: unknown): boolean {

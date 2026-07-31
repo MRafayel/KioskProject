@@ -39,6 +39,8 @@ Read these documents before implementation:
   replay recovery, migration, and verification evidence.
 - docs/PHASE_5_STATUS.md — isolated document processing, private previews,
   cleanup guarantees, migration, and verification evidence.
+- docs/PHASE_6_STATUS.md — immutable settings revisions, capability checks,
+  server-authoritative pricing, quote invalidation, and migration evidence.
 - SECURITY.md — handling rules for secrets and private customer documents.
 
 ## Development commands

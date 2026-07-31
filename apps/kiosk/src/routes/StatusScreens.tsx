@@ -6,7 +6,7 @@ import { usePrototypeSession } from "../features/session/PrototypeSessionProvide
 import {
   calculatePrintSummary,
   fileExtension,
-  formatPrice,
+  formatMinorAmount,
   isReadyFile
 } from "../features/session/model.js";
 import { closeKioskSession } from "../features/session/sessionService.js";
@@ -126,7 +126,9 @@ export function CompleteScreen() {
   const file = state.files[0];
   if (!isReadyFile(file)) return <KioskRedirect to="/" />;
 
-  const summary = calculatePrintSummary(state.files, state.settings);
+  const quote = state.pricing.quote;
+  const localSummary = calculatePrintSummary(state.files, state.settings);
+  const collectedSheets = quote?.physicalSheets ?? localSummary.totalSheets;
 
   const finish = async () => {
     const session = state.session;
@@ -152,7 +154,7 @@ export function CompleteScreen() {
       </div>
       <p className="eyebrow">{messages.status.completeEyebrow}</p>
       <h1>{messages.status.completeTitle}</h1>
-      <p>{messages.status.collectSheets(summary.totalSheets)}</p>
+      <p>{messages.status.collectSheets(collectedSheets)}</p>
       <dl className="completion-summary">
         <div>
           <dt>{messages.status.printed}</dt>
@@ -160,10 +162,21 @@ export function CompleteScreen() {
             {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
           </dd>
         </div>
-        <div>
-          <dt>{messages.status.paid}</dt>
-          <dd>{formatPrice(summary.priceCents, numberLocale)}</dd>
-        </div>
+        {/* The receipt shows the amount the control plane quoted, never a
+            figure this screen worked out for itself. */}
+        {quote ? (
+          <div>
+            <dt>{messages.status.paid}</dt>
+            <dd>
+              {formatMinorAmount(
+                quote.totalMinor,
+                quote.currency,
+                quote.currencyExponent,
+                numberLocale
+              )}
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt>{messages.status.files}</dt>
           <dd>{messages.status.deletionScheduled}</dd>

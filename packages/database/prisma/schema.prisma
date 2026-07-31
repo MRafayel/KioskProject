@@ -58,33 +58,148 @@ model KioskCredential {
 }
 
 model PrintSession {
-  id             String               @id @db.Uuid
-  publicId       String               @unique @map("public_id") @db.VarChar(80)
-  kioskId        String               @map("kiosk_id") @db.VarChar(64)
-  locale         String               @db.VarChar(10)
-  state          String               @db.VarChar(40)
-  stateVersion   Int                  @default(1) @map("state_version")
-  eventSequence  Int                  @default(1) @map("event_sequence")
-  idleExpiresAt  DateTime             @map("idle_expires_at")
-  hardExpiresAt  DateTime             @map("hard_expires_at")
-  terminalReason String?              @map("terminal_reason") @db.VarChar(80)
-  createdAt      DateTime             @default(now()) @map("created_at")
-  updatedAt      DateTime             @default(now()) @updatedAt @map("updated_at")
-  canceledAt     DateTime?            @map("canceled_at")
-  expiredAt      DateTime?            @map("expired_at")
-  completedAt    DateTime?            @map("completed_at")
-  kiosk          Kiosk                @relation(fields: [kioskId], references: [id], onDelete: Restrict)
-  uploadGrants   SessionUploadGrant[]
-  mobileClients  MobileClient[]
-  uploadedFiles  UploadedFile[]
-  auditEvents    AuditEvent[]
-  outboxEvents   OutboxEvent[]
-  sessionEvents  SessionEvent[]
+  id                      String                 @id @db.Uuid
+  publicId                String                 @unique @map("public_id") @db.VarChar(80)
+  kioskId                 String                 @map("kiosk_id") @db.VarChar(64)
+  locale                  String                 @db.VarChar(10)
+  state                   String                 @db.VarChar(40)
+  stateVersion            Int                    @default(1) @map("state_version")
+  eventSequence           Int                    @default(1) @map("event_sequence")
+  currentSettingsRevision Int?                   @map("current_settings_revision")
+  activeQuoteId           String?                @unique @map("active_quote_id") @db.Uuid
+  idleExpiresAt           DateTime               @map("idle_expires_at")
+  hardExpiresAt           DateTime               @map("hard_expires_at")
+  terminalReason          String?                @map("terminal_reason") @db.VarChar(80)
+  createdAt               DateTime               @default(now()) @map("created_at")
+  updatedAt               DateTime               @default(now()) @updatedAt @map("updated_at")
+  canceledAt              DateTime?              @map("canceled_at")
+  expiredAt               DateTime?              @map("expired_at")
+  completedAt             DateTime?              @map("completed_at")
+  kiosk                   Kiosk                  @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  activeQuote             PriceQuote?            @relation("SessionActiveQuote", fields: [activeQuoteId], references: [id], onDelete: SetNull)
+  uploadGrants            SessionUploadGrant[]
+  mobileClients           MobileClient[]
+  uploadedFiles           UploadedFile[]
+  settingRevisions        PrintSettingRevision[]
+  priceQuotes             PriceQuote[]           @relation("SessionQuotes")
+  auditEvents             AuditEvent[]
+  outboxEvents            OutboxEvent[]
+  sessionEvents           SessionEvent[]
 
   @@index([kioskId, createdAt])
   @@index([state, idleExpiresAt])
   @@index([state, hardExpiresAt])
   @@map("print_sessions")
+}
+
+/// Append-only. A quote, a payment, and a print job all refer to one exact
+/// revision, so a row here is never updated after it is written.
+model PrintSettingRevision {
+  id                 String       @id @db.Uuid
+  sessionId          String       @map("session_id") @db.Uuid
+  revision           Int
+  copies             Int
+  duplex             String       @db.VarChar(16)
+  paperSize          String       @map("paper_size") @db.VarChar(16)
+  orientation        String       @db.VarChar(16)
+  pagesPerSheet      Int          @map("pages_per_sheet")
+  scaling            String       @db.VarChar(16)
+  collate            Boolean
+  colorMode          String       @map("color_mode") @db.VarChar(16)
+  selections         Json
+  selectedPages      Int          @map("selected_pages")
+  printedSides       Int          @map("printed_sides")
+  physicalSheets     Int          @map("physical_sheets")
+  capabilityVersion  Int          @map("capability_version")
+  manifestHash       String       @map("manifest_hash") @db.VarChar(64)
+  createdByActorType String       @map("created_by_actor_type") @db.VarChar(32)
+  createdByActorId   String       @map("created_by_actor_id") @db.VarChar(100)
+  createdAt          DateTime     @default(now()) @map("created_at")
+  session            PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  quotes             PriceQuote[]
+
+  @@unique([sessionId, revision])
+  @@index([sessionId, createdAt])
+  @@map("print_setting_revisions")
+}
+
+/// A published rule set is immutable. Corrections create another version.
+model PricingRuleSet {
+  id                 String        @id @db.Uuid
+  version            String        @unique @db.VarChar(40)
+  scope              String        @db.VarChar(24)
+  scopeRef           String        @default("") @map("scope_ref") @db.VarChar(64)
+  currency           String        @db.Char(3)
+  currencyExponent   Int           @map("currency_exponent")
+  status             String        @db.VarChar(16)
+  rounding           String        @db.VarChar(16)
+  taxMode            String        @map("tax_mode") @db.VarChar(16)
+  minimumApplication String        @map("minimum_application") @db.VarChar(16)
+  validFrom          DateTime      @map("valid_from")
+  validUntil         DateTime?     @map("valid_until")
+  publishedAt        DateTime?     @map("published_at")
+  archivedAt         DateTime?     @map("archived_at")
+  createdAt          DateTime      @default(now()) @map("created_at")
+  updatedAt          DateTime      @default(now()) @updatedAt @map("updated_at")
+  rules              PricingRule[]
+  quotes             PriceQuote[]
+
+  @@index([status, validFrom])
+  @@map("pricing_rule_sets")
+}
+
+model PricingRule {
+  id                          String         @id @db.Uuid
+  ruleSetId                   String         @map("rule_set_id") @db.Uuid
+  service                     String         @db.VarChar(24)
+  paperSize                   String         @map("paper_size") @db.VarChar(16)
+  colorMode                   String         @map("color_mode") @db.VarChar(16)
+  unitAmountMinor             Int            @map("unit_amount_minor")
+  duplexAdjustmentBasisPoints Int            @map("duplex_adjustment_basis_points")
+  serviceFeeMinor             Int            @map("service_fee_minor")
+  minimumAmountMinor          Int            @map("minimum_amount_minor")
+  taxBasisPoints              Int            @map("tax_basis_points")
+  priority                    Int            @default(0)
+  createdAt                   DateTime       @default(now()) @map("created_at")
+  ruleSet                     PricingRuleSet @relation(fields: [ruleSetId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleSetId, service, paperSize, colorMode])
+  @@map("pricing_rules")
+}
+
+model PriceQuote {
+  id                     String               @id @db.Uuid
+  sessionId              String               @map("session_id") @db.Uuid
+  settingsRevision       Int                  @map("settings_revision")
+  manifestHash           String               @map("manifest_hash") @db.VarChar(64)
+  ruleSetId              String               @map("rule_set_id") @db.Uuid
+  pricingVersion         String               @map("pricing_version") @db.VarChar(40)
+  status                 String               @db.VarChar(16)
+  currency               String               @db.Char(3)
+  currencyExponent       Int                  @map("currency_exponent")
+  selectedPages          Int                  @map("selected_pages")
+  printedSides           Int                  @map("printed_sides")
+  physicalSheets         Int                  @map("physical_sheets")
+  printAmountMinor       Int                  @map("print_amount_minor")
+  duplexAdjustmentMinor  Int                  @map("duplex_adjustment_minor")
+  serviceFeeMinor        Int                  @map("service_fee_minor")
+  minimumAdjustmentMinor Int                  @map("minimum_adjustment_minor")
+  subtotalMinor          Int                  @map("subtotal_minor")
+  taxMinor               Int                  @map("tax_minor")
+  totalMinor             Int                  @map("total_minor")
+  expiresAt              DateTime             @map("expires_at")
+  createdAt              DateTime             @default(now()) @map("created_at")
+  invalidatedAt          DateTime?            @map("invalidated_at")
+  invalidationReason     String?              @map("invalidation_reason") @db.VarChar(32)
+  session                PrintSession         @relation("SessionQuotes", fields: [sessionId], references: [id], onDelete: Cascade)
+  settings               PrintSettingRevision @relation(fields: [sessionId, settingsRevision], references: [sessionId, revision], onDelete: Cascade)
+  ruleSet                PricingRuleSet       @relation(fields: [ruleSetId], references: [id], onDelete: Restrict)
+  activeForSession       PrintSession?        @relation("SessionActiveQuote")
+
+  @@unique([id, sessionId])
+  @@index([sessionId, createdAt])
+  @@index([status, expiresAt])
+  @@map("price_quotes")
 }
 
 model SessionUploadGrant {

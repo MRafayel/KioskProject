@@ -9,7 +9,8 @@ import {
   type UploadedFileSnapshot,
   type UploadFileResponse
 } from "@printing-kiosk/contracts";
-import { Prisma, type PrismaClient } from "@printing-kiosk/database";
+import { invalidateSessionPricing, Prisma, type PrismaClient } from "@printing-kiosk/database";
+import { canTransitionSession } from "@printing-kiosk/domain";
 import {
   PreliminaryFileValidationError,
   validatePreliminaryFile
@@ -32,7 +33,10 @@ const ACTIVE_FILE_STATUSES = [
   "DELETE_PENDING"
 ] as const;
 const VISIBLE_FILE_STATUSES = [...ACTIVE_FILE_STATUSES, "REJECTED"] as const;
-const UPLOADABLE_STATES: SessionState[] = ["WAITING_FOR_UPLOAD"];
+// A customer may add a document while earlier ones are already validated or
+// configured. Nothing may arrive once a manifest has been quoted and locked.
+const UPLOADABLE_STATES: SessionState[] = ["WAITING_FOR_UPLOAD", "FILES_UPLOADED", "CONFIGURING"];
+const CONFIGURED_STATES: SessionState[] = ["FILES_UPLOADED", "CONFIGURING"];
 const MAX_TRANSACTION_ATTEMPTS = 4;
 
 interface FileServiceOptions {
@@ -484,11 +488,17 @@ export class FileService {
       data: { status: "DELETED", deletedAt: now, updatedAt: now }
     });
     if (updated.count !== 1) throw hiddenFile();
-    const nextSequence = session.eventSequence + 1;
+    const retired = await this.retireSessionPricing(transaction, session, now);
+    const nextSequence = retired.nextSequence + 1;
     await Promise.all([
       transaction.printSession.update({
         where: { id: session.id },
-        data: { eventSequence: nextSequence, updatedAt: now }
+        data: {
+          state: retired.state,
+          stateVersion: retired.stateVersion,
+          eventSequence: nextSequence,
+          updatedAt: now
+        }
       }),
       transaction.auditEvent.create({
         data: {
@@ -516,6 +526,45 @@ export class FileService {
       }),
       this.storeDeletionReplay(transaction, input, action, requestHash, file.id, now, 204)
     ]);
+  }
+
+  /**
+   * Removing a document changes what any saved settings and any live price
+   * described, so both are retired and the session steps back to the stage the
+   * remaining documents justify: back to configuring when others survive, or
+   * back to waiting for an upload when none do.
+   *
+   * The caller owns the session row update; this returns the values it must
+   * write so a single update carries the state, version, and event sequence.
+   */
+  private async retireSessionPricing(
+    transaction: Prisma.TransactionClient,
+    session: { id: string; state: string; stateVersion: number; eventSequence: number },
+    now: Date
+  ): Promise<{ nextSequence: number; state: string; stateVersion: number }> {
+    const invalidation = await invalidateSessionPricing(transaction, {
+      sessionId: session.id,
+      reason: "DOCUMENTS_CHANGED",
+      now,
+      startingSequence: session.eventSequence,
+      newEventId: () => this.options.random.uuid(now),
+      clearSettingsRevision: true
+    });
+
+    let state = session.state;
+    let stateVersion = session.stateVersion;
+    if (CONFIGURED_STATES.includes(session.state as SessionState)) {
+      const readyRemaining = await transaction.uploadedFile.count({
+        where: { sessionId: session.id, status: "READY" }
+      });
+      const target: SessionState = readyRemaining > 0 ? "FILES_UPLOADED" : "WAITING_FOR_UPLOAD";
+      if (target !== session.state && canTransitionSession(session.state as SessionState, target)) {
+        state = target;
+        stateVersion = session.stateVersion + 1;
+      }
+    }
+
+    return { nextSequence: invalidation.nextSequence, state, stateVersion };
   }
 
   private async reserveUpload(input: UploadInput): Promise<ReservedUpload> {
@@ -932,11 +981,17 @@ export class FileService {
         });
         if (updated.count !== 1) return;
 
-        const nextSequence = session.eventSequence + 1;
+        const retired = await this.retireSessionPricing(transaction, session, now);
+        const nextSequence = retired.nextSequence + 1;
         await Promise.all([
           transaction.printSession.update({
             where: { id: session.id },
-            data: { eventSequence: nextSequence, updatedAt: now }
+            data: {
+              state: retired.state,
+              stateVersion: retired.stateVersion,
+              eventSequence: nextSequence,
+              updatedAt: now
+            }
           }),
           transaction.auditEvent.create({
             data: {

@@ -114,6 +114,10 @@ const environmentSchema = z
       .min(16_777_216)
       .max(2_147_483_648)
       .default(2_147_483_648),
+    MAX_COPIES: z.coerce.number().int().min(1).max(100).default(20),
+    MAX_SELECTED_PAGES: z.coerce.number().int().min(1).max(2_000).default(200),
+    MAX_PRINTED_SIDES: z.coerce.number().int().min(1).max(20_000).default(1_000),
+    QUOTE_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
     PRINTER_ADAPTER: z.literal("mock").default("mock"),
     PAYMENT_PROVIDER: z.literal("mock").default("mock")
   })
@@ -201,6 +205,34 @@ const environmentSchema = z
         path: ["DOCUMENT_PROCESSOR_MEMORY_MIB"],
         message:
           "DOCUMENT_PROCESSOR_MEMORY_MIB must cover tmpfs scratch plus 1024 MiB runtime headroom"
+      });
+    }
+
+    const selectablePages = environment.MAX_DOCUMENT_PAGES * environment.MAX_FILES_PER_SESSION;
+    if (environment.MAX_SELECTED_PAGES > selectablePages) {
+      context.addIssue({
+        code: "custom",
+        path: ["MAX_SELECTED_PAGES"],
+        message: "MAX_SELECTED_PAGES cannot exceed MAX_DOCUMENT_PAGES × MAX_FILES_PER_SESSION"
+      });
+    }
+
+    // One copy of the largest allowed selection must always be priceable;
+    // otherwise a customer could upload an accepted document and then be told
+    // that printing it at all is impossible.
+    if (environment.MAX_PRINTED_SIDES < environment.MAX_SELECTED_PAGES) {
+      context.addIssue({
+        code: "custom",
+        path: ["MAX_PRINTED_SIDES"],
+        message: "MAX_PRINTED_SIDES must be at least MAX_SELECTED_PAGES"
+      });
+    }
+
+    if (environment.QUOTE_TTL_SECONDS > environment.SESSION_IDLE_TTL_MINUTES * 60) {
+      context.addIssue({
+        code: "custom",
+        path: ["QUOTE_TTL_SECONDS"],
+        message: "QUOTE_TTL_SECONDS must not outlive the idle session window"
       });
     }
 

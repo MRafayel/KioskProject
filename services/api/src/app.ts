@@ -18,6 +18,10 @@ import { FileService } from "./modules/files/service.js";
 import { registerEventRoutes } from "./modules/events/routes.js";
 import { registerMobileAccessRoutes } from "./modules/mobile-access/routes.js";
 import { MobileAccessService } from "./modules/mobile-access/service.js";
+import { registerQuoteRoutes } from "./modules/quotes/routes.js";
+import { QuoteService } from "./modules/quotes/service.js";
+import { registerSettingsRoutes } from "./modules/settings/routes.js";
+import { PrintSettingsService } from "./modules/settings/service.js";
 import {
   LocalSessionEventBus,
   type SessionEventSource
@@ -143,6 +147,28 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     maxSessionBytes: options.environment.MAX_SESSION_UPLOAD_BYTES,
     maxFiles: options.environment.MAX_FILES_PER_SESSION,
     uploadTimeoutSeconds: options.environment.UPLOAD_TIMEOUT_SECONDS
+  });
+  const printSettingsLimits = {
+    maxCopies: options.environment.MAX_COPIES,
+    maxSelectedPages: options.environment.MAX_SELECTED_PAGES,
+    maxPrintedSides: options.environment.MAX_PRINTED_SIDES
+  };
+  const settings = new PrintSettingsService({
+    database,
+    clock,
+    random,
+    idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
+    idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
+    limits: printSettingsLimits
+  });
+  const quotes = new QuoteService({
+    database,
+    clock,
+    random,
+    idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
+    idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
+    quoteTtlSeconds: options.environment.QUOTE_TTL_SECONDS,
+    limits: printSettingsLimits
   });
   const janitor = new FileJanitor({
     database,
@@ -354,6 +380,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     uploadOrigin: options.environment.UPLOAD_ORIGIN,
     maxFileBytes: options.environment.MAX_FILE_BYTES
   });
+  registerSettingsRoutes(app, { database, clock, settings, kioskAuthentication });
+  registerQuoteRoutes(app, { database, clock, quotes, kioskAuthentication });
   registerDocumentPreviewRoutes(app, {
     database,
     objectStore,

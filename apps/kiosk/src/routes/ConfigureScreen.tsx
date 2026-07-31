@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
@@ -8,16 +8,24 @@ import {
   calculatePrintSummary,
   fileExtension,
   formatFileSize,
-  formatPrice,
+  formatMinorAmount,
+  isQuotePayable,
   isReadyFile,
   type Orientation,
   type PrintSettings
 } from "../features/session/model.js";
 import {
+  readKioskPrintCapabilities,
+  readKioskSessionVersion
+} from "../features/session/pricingService.js";
+import { usePricing } from "../features/session/usePricing.js";
+import {
   deleteKioskSessionFile,
   kioskPagePreviewUrl,
   listKioskFilePages
 } from "../features/session/sessionService.js";
+
+const FALLBACK_MAX_COPIES = 20;
 
 export function ConfigureScreen() {
   const { messages, numberLocale } = useLanguage();
@@ -40,9 +48,75 @@ export function ConfigureScreen() {
     retry: false
   });
 
+  const capabilitiesQuery = useQuery({
+    queryKey: ["kiosk-print-capabilities", sessionId],
+    queryFn: () => {
+      if (!sessionId) throw new Error("SESSION_REQUIRED");
+      return readKioskPrintCapabilities(sessionId);
+    },
+    enabled: Boolean(sessionId),
+    staleTime: 300_000,
+    retry: false
+  });
+
+  useEffect(() => {
+    if (!capabilitiesQuery.data) return;
+    dispatch({ type: "CAPABILITIES_LOADED", capabilities: capabilitiesQuery.data });
+  }, [capabilitiesQuery.data, dispatch]);
+
+  // Validating a document advances the session by itself, so the version the
+  // kiosk has held since it created the session is already behind. Reading the
+  // authoritative one here spares the first save a refused round-trip; the
+  // retry inside the save remains the correctness guarantee.
+  const sessionVersionQuery = useQuery({
+    queryKey: ["kiosk-session-version", sessionId],
+    queryFn: () => {
+      if (!sessionId) throw new Error("SESSION_REQUIRED");
+      return readKioskSessionVersion(sessionId);
+    },
+    enabled: Boolean(sessionId),
+    staleTime: 30_000,
+    retry: false
+  });
+
+  useEffect(() => {
+    if (sessionVersionQuery.data === undefined) return;
+    dispatch({ type: "SESSION_VERSION_OBSERVED", version: sessionVersionQuery.data });
+  }, [dispatch, sessionVersionQuery.data]);
+
+  const pricing = usePricing({
+    sessionId: sessionId ?? null,
+    sessionVersion: state.session?.version ?? 1,
+    file: readyFile,
+    settings: state.settings,
+    pricing: state.pricing,
+    dispatch
+  });
+
   if (!readyFile || !sessionId) return <KioskRedirect to="/upload" />;
 
-  const summary = calculatePrintSummary(state.files, state.settings);
+  const capabilities = state.capabilities;
+  const duplexAvailable =
+    capabilities === null || capabilities.duplexModes.some((mode) => mode !== "SIMPLEX");
+  const pagesPerSheetOptions = capabilities?.pagesPerSheetOptions ?? [1, 2];
+  const maxCopies = capabilities?.maxCopies ?? FALLBACK_MAX_COPIES;
+  const localSummary = calculatePrintSummary(state.files, state.settings);
+  const priced = state.pricing.settings;
+  const quote = state.pricing.quote;
+  const payable = isQuotePayable(quote, new Date());
+  // Server counts win whenever they exist; the local arithmetic only fills the
+  // moment between a touch and the control plane's answer.
+  const summary = priced
+    ? {
+        selectedPages: priced.selectedPages,
+        totalSides: priced.printedSides,
+        totalSheets: priced.physicalSheets
+      }
+    : {
+        selectedPages: localSummary.selectedPages,
+        totalSides: localSummary.totalSides,
+        totalSheets: localSummary.totalSheets
+      };
   const update = (settings: Partial<PrintSettings>) =>
     dispatch({ type: "SETTINGS_CHANGED", settings });
   const pageEnd = state.settings.pageEnd ?? readyFile.pageCount;
@@ -243,6 +317,7 @@ export function ConfigureScreen() {
                     type="radio"
                     name="sides"
                     checked={state.settings.duplex}
+                    disabled={!duplexAvailable}
                     onChange={() => update({ duplex: true })}
                   />
                   <span>{messages.configure.doubleSided}</span>
@@ -265,7 +340,7 @@ export function ConfigureScreen() {
                 <button
                   type="button"
                   aria-label={messages.configure.increaseCopies}
-                  disabled={state.settings.copies >= 10}
+                  disabled={state.settings.copies >= maxCopies}
                   onClick={() => update({ copies: state.settings.copies + 1 })}
                 >
                   +
@@ -273,6 +348,31 @@ export function ConfigureScreen() {
               </div>
             </div>
           </div>
+
+          {pagesPerSheetOptions.length > 1 ? (
+            <div className="settings-row">
+              <fieldset className="segmented-field">
+                <legend>{messages.configure.pagesPerSheet}</legend>
+                <div className="segmented-control">
+                  {pagesPerSheetOptions.map((option) => (
+                    <label key={option}>
+                      <input
+                        type="radio"
+                        name="pages-per-sheet"
+                        checked={state.settings.pagesPerSheet === option}
+                        onChange={() => update({ pagesPerSheet: option })}
+                      />
+                      <span>
+                        {option === 1
+                          ? messages.configure.onePagePerSheet
+                          : messages.configure.twoPagesPerSheet}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            </div>
+          ) : null}
         </section>
 
         <aside className="summary-card" aria-labelledby="summary-title">
@@ -305,16 +405,41 @@ export function ConfigureScreen() {
             </div>
           </dl>
           <div className="price-total">
-            <span>{messages.configure.estimatedTotal}</span>
-            <strong>{formatPrice(summary.priceCents, numberLocale)}</strong>
+            <span>{messages.configure.total}</span>
+            <strong aria-live="polite">
+              {payable && quote
+                ? formatMinorAmount(
+                    quote.totalMinor,
+                    quote.currency,
+                    quote.currencyExponent,
+                    numberLocale
+                  )
+                : messages.configure.priceCalculating}
+            </strong>
           </div>
+          {state.pricing.status === "FAILED" ? (
+            <p className="configuration-error" role="alert">
+              {messages.configure.priceUnavailable}{" "}
+              <button className="text-button" type="button" onClick={pricing.retry}>
+                {messages.configure.priceRetry}
+              </button>
+            </p>
+          ) : null}
           <button
             className="button button--primary button--wide"
             type="button"
+            disabled={!payable}
             onClick={() => void navigate("/checkout")}
           >
             {messages.configure.reviewAndPay} <span aria-hidden="true">→</span>
           </button>
+          {payable ? null : (
+            <p className="upload-panel__pending" role="status">
+              {state.pricing.status === "FAILED"
+                ? messages.configure.priceUnavailableHelp
+                : messages.configure.priceCalculatingHelp}
+            </p>
+          )}
           <button
             className="button button--quiet button--wide"
             type="button"

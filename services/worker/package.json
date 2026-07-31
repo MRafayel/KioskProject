@@ -9,6 +9,7 @@
     "@printing-kiosk/config": "workspace:*",
     "@printing-kiosk/contracts": "workspace:*",
     "@printing-kiosk/database": "workspace:*",
+    "@printing-kiosk/domain": "workspace:*",
     "@printing-kiosk/file-processing": "workspace:*",
     "bullmq": "5.80.2",
     "pino": "10.3.1",

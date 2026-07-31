@@ -1,12 +1,14 @@
 import {
   createSessionResponseSchema,
   filePagesResponseSchema,
+  getSessionResponseSchema,
   listUploadedFilesResponseSchema,
   type FilePagesResponse
 } from "@printing-kiosk/contracts";
 
 import type { Locale } from "../i18n/messages.js";
 import type { PrototypeFile, PrototypeSession } from "./model.js";
+import { clearStoredPricingKeys } from "./pricingService.js";
 
 const CREATE_KEY_STORAGE = "printing-kiosk.pending-create";
 const CANCEL_KEY_PREFIX = "printing-kiosk.pending-cancel.";
@@ -19,6 +21,18 @@ interface PendingCreate {
   key: string;
   locale: Locale;
 }
+
+/**
+ * A session that stands between this kiosk and a new customer. The first is a
+ * fresh request blocked by an active session; the second is this kiosk's own
+ * stored request for a session that has moved past the point where its QR
+ * grant can be safely handed out again — which is what happens as soon as an
+ * uploaded document is validated.
+ */
+const BLOCKING_SESSION_CODES = new Set([
+  "ACTIVE_SESSION_EXISTS",
+  "SESSION_UPLOAD_GRANT_REPLAY_UNAVAILABLE"
+]);
 
 export async function createKioskSession(locale: Locale): Promise<PrototypeSession> {
   // A reload loses the in-memory session while the authoritative one stays
@@ -36,7 +50,69 @@ export async function createKioskSession(locale: Locale): Promise<PrototypeSessi
     );
   }
 
+  if (response.status === 409) {
+    const failure = await readSessionConflict(response);
+    if (!BLOCKING_SESSION_CODES.has(failure.code ?? "")) {
+      throw new Error(failure.code ?? "SESSION_CREATE_FAILED");
+    }
+
+    // Somebody is standing at the screen asking to print, and the kiosk can no
+    // longer return them to the session that is in the way — its QR grant is
+    // already claimed. Leaving the terminal dead until that session expires is
+    // the worse answer, so the kiosk closes it, which also removes the previous
+    // customer's documents, and starts fresh.
+    await discardBlockingSession(failure.sessionId);
+    return parseCreateResponse(
+      await postCreateSession(storePendingCreate(newIdempotencyKey(), locale))
+    );
+  }
+
   return parseCreateResponse(response);
+}
+
+async function discardBlockingSession(sessionId: string | undefined): Promise<void> {
+  if (!sessionId) return;
+
+  // The version is read rather than assumed: the blocked create reports which
+  // session is in the way, but a document finishing validation moves its
+  // version at any moment.
+  const snapshot = await fetch(`/agent/v1/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!snapshot.ok) {
+    // Already expired or cleaned up; nothing is in the way any more.
+    clearStoredSessionKeys(sessionId);
+    return;
+  }
+
+  const version = getSessionResponseSchema.parse(await snapshot.json()).session.version;
+  await fetch(`/agent/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+    method: "POST",
+    headers: {
+      "idempotency-key": `kiosk-recover-${sessionId}-${version}`,
+      "if-match": `"${version}"`
+    }
+  });
+  clearStoredSessionKeys(sessionId);
+}
+
+async function readSessionConflict(
+  response: Response
+): Promise<{ code?: string; sessionId?: string }> {
+  try {
+    const body = (await response.json()) as {
+      error?: { code?: string; details?: Record<string, unknown> };
+    };
+    const sessionId = body.error?.details?.sessionId;
+    return {
+      ...(body.error?.code ? { code: body.error.code } : {}),
+      ...(typeof sessionId === "string" ? { sessionId } : {})
+    };
+  } catch {
+    return {};
+  }
 }
 
 async function postCreateSession(pending: PendingCreate): Promise<Response> {
@@ -186,6 +262,9 @@ export function clearStoredSessionKeys(sessionId?: string): void {
     const key = sessionStorage.key(index);
     if (key?.startsWith(deletePrefix)) sessionStorage.removeItem(key);
   }
+  // A kiosk browser stays open for months. Every finished session must take
+  // its replay keys with it rather than accumulating them indefinitely.
+  clearStoredPricingKeys(sessionId);
 }
 
 function readPendingCreate(): PendingCreate | null {

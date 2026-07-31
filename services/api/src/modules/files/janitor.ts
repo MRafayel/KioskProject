@@ -1,5 +1,5 @@
 import { uploadedFileSnapshotSchema } from "@printing-kiosk/contracts";
-import type { Prisma, PrismaClient } from "@printing-kiosk/database";
+import { invalidateSessionPricing, type Prisma, type PrismaClient } from "@printing-kiosk/database";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { processingArtifactCleanupDueAt } from "./cleanup-policy.js";
@@ -50,6 +50,7 @@ export class FileJanitor {
     this.running = true;
     try {
       await this.expireSessions();
+      await this.expireQuotes();
       await this.expireMobileClients();
       await this.markInterruptedUploads();
       await this.cleanPendingFiles();
@@ -90,8 +91,16 @@ export class FileJanitor {
             return;
           }
 
+          const invalidation = await invalidateSessionPricing(transaction, {
+            sessionId: session.id,
+            reason: "SESSION_TERMINAL",
+            now,
+            startingSequence: session.eventSequence,
+            newEventId: () => this.options.random.uuid(now),
+            clearSettingsRevision: false
+          });
           const nextVersion = session.stateVersion + 1;
-          const nextSequence = session.eventSequence + 1;
+          const nextSequence = invalidation.nextSequence + 1;
           const reason =
             now.getTime() >= session.hardExpiresAt.getTime() ? "HARD_TIMEOUT" : "IDLE_TIMEOUT";
           await transaction.printSession.update({
@@ -144,6 +153,35 @@ export class FileJanitor {
         this.report(error, "session expiry");
       }
     }
+  }
+
+  /**
+   * A quote that reached its deadline stops being a live price. The kiosk
+   * already treats the deadline as authoritative, so this only settles the
+   * stored row and releases the session's active-quote pointer; the customer
+   * simply asks for a new price.
+   */
+  private async expireQuotes(): Promise<void> {
+    const now = this.options.clock.now();
+    const expired = await this.options.database.priceQuote.findMany({
+      where: { status: "ACTIVE", expiresAt: { lte: now } },
+      select: { id: true },
+      orderBy: { expiresAt: "asc" },
+      take: 100
+    });
+    if (expired.length === 0) return;
+
+    const ids = expired.map((quote) => quote.id);
+    await this.options.database.$transaction([
+      this.options.database.printSession.updateMany({
+        where: { activeQuoteId: { in: ids } },
+        data: { activeQuoteId: null }
+      }),
+      this.options.database.priceQuote.updateMany({
+        where: { id: { in: ids }, status: "ACTIVE" },
+        data: { status: "EXPIRED", invalidatedAt: now }
+      })
+    ]);
   }
 
   private async expireMobileClients(): Promise<void> {

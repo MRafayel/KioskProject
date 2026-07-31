@@ -182,6 +182,12 @@ importers:
 
   packages/file-processing: {}
 
+  packages/pricing:
+    devDependencies:
+      fast-check:
+        specifier: 3.23.2
+        version: 3.23.2
+
   services/api:
     dependencies:
       '@aws-sdk/client-s3':
@@ -220,6 +226,9 @@ importers:
       '@printing-kiosk/file-processing':
         specifier: workspace:*
         version: link:../../packages/file-processing
+      '@printing-kiosk/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       bullmq:
         specifier: 5.80.2
         version: 5.80.2
@@ -301,6 +310,9 @@ importers:
       '@printing-kiosk/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@printing-kiosk/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@printing-kiosk/file-processing':
         specifier: workspace:*
         version: link:../../packages/file-processing

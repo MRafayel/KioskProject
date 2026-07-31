@@ -97,6 +97,108 @@ export async function buildAgent(
     )
   );
 
+  app.get<{ Params: { sessionId: string } }>(
+    "/v1/sessions/:sessionId/print-capabilities",
+    (request, reply) => {
+      if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/print-capabilities`,
+        { method: "GET", headers: upstreamHeaders(environment, { accept: "application/json" }) },
+        reply
+      );
+    }
+  );
+
+  app.get<{ Params: { sessionId: string } }>(
+    "/v1/sessions/:sessionId/settings",
+    (request, reply) => {
+      if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/settings`,
+        { method: "GET", headers: upstreamHeaders(environment, { accept: "application/json" }) },
+        reply
+      );
+    }
+  );
+
+  app.put<{ Params: { sessionId: string } }>(
+    "/v1/sessions/:sessionId/settings",
+    (request, reply) => {
+      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
+      const ifMatch = singleHeader(request.headers["if-match"]);
+      if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
+      if (!idempotencyKey || !ifMatch) return conditionalHeadersRequired(reply);
+
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/settings`,
+        {
+          method: "PUT",
+          headers: upstreamHeaders(environment, {
+            accept: "application/json",
+            "content-type": "application/json",
+            "idempotency-key": idempotencyKey,
+            "if-match": ifMatch
+          }),
+          body: JSON.stringify(request.body ?? {})
+        },
+        reply
+      );
+    }
+  );
+
+  app.post<{ Params: { sessionId: string } }>(
+    "/v1/sessions/:sessionId/quotes",
+    (request, reply) => {
+      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
+      if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
+      if (!idempotencyKey) return conditionalHeadersRequired(reply);
+
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/quotes`,
+        {
+          method: "POST",
+          headers: upstreamHeaders(environment, {
+            accept: "application/json",
+            "content-type": "application/json",
+            "idempotency-key": idempotencyKey
+          }),
+          // The kiosk browser never proposes an amount. Only the settings
+          // revision it wants priced reaches the control plane.
+          body: JSON.stringify(request.body ?? {})
+        },
+        reply
+      );
+    }
+  );
+
+  app.get<{ Params: { sessionId: string; quoteId: string } }>(
+    "/v1/sessions/:sessionId/quotes/:quoteId",
+    (request, reply) => {
+      if (
+        !UUID_PATTERN.test(request.params.sessionId) ||
+        !UUID_PATTERN.test(request.params.quoteId)
+      ) {
+        return invalidSessionRequest(reply);
+      }
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}` +
+          `/quotes/${encodeURIComponent(request.params.quoteId)}`,
+        { method: "GET", headers: upstreamHeaders(environment, { accept: "application/json" }) },
+        reply
+      );
+    }
+  );
+
   app.get<{ Params: { sessionId: string; fileId: string } }>(
     "/v1/sessions/:sessionId/files/:fileId/pages",
     (request, reply) => {
@@ -401,6 +503,21 @@ function boundedPositiveInteger(value: string | undefined, maximum: number): num
 function invalidFileRequest(reply: FastifyReply) {
   return reply.code(400).send({
     error: { code: "INVALID_FILE_REQUEST", message: "The file request is invalid." }
+  });
+}
+
+function invalidSessionRequest(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: { code: "INVALID_SESSION_REQUEST", message: "The session request is invalid." }
+  });
+}
+
+function conditionalHeadersRequired(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: {
+      code: "CONDITIONAL_REQUEST_HEADERS_REQUIRED",
+      message: "Idempotency-Key and If-Match are required."
+    }
   });
 }
 
