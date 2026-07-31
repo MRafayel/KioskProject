@@ -93,6 +93,9 @@ services:
       CLAMAV_NO_CLAMD: "true"
       CLAMAV_NO_MILTERD: "true"
       FRESHCLAM_CHECKS: ${CLAMAV_UPDATE_CHECKS_PER_DAY:-12}
+      # The same limit the document processor enforces, so this gate cannot
+      # release definitions the processor will reject.
+      CLAMAV_DEFINITION_MAX_AGE_HOURS: ${CLAMAV_DEFINITION_MAX_AGE_HOURS:-36}
     networks:
       - malware_updates
     volumes:
@@ -103,11 +106,9 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=0700
       - /var/log/clamav:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pidof freshclam >/dev/null && test -s /var/lib/clamav/main.cvd && (test -s /var/lib/clamav/daily.cld || test -s /var/lib/clamav/daily.cvd)"
-        ]
+      # Asserts the definitions are current, not merely present — see the
+      # script for why presence alone is satisfied by a weeks-old database.
+      test: ["CMD", "/usr/local/bin/definitions-fresh"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -165,6 +166,7 @@ services:
       DOCUMENT_PROCESSOR_AUTH_TOKEN: ${DOCUMENT_PROCESSOR_AUTH_TOKEN:-development-processor-auth-token-change-me}
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
+      CLAMAV_DEFINITION_MAX_AGE_HOURS: ${CLAMAV_DEFINITION_MAX_AGE_HOURS:-36}
       MAX_FILE_BYTES: ${MAX_FILE_BYTES:-52428800}
       MAX_DOCUMENT_PAGES: ${MAX_DOCUMENT_PAGES:-200}
       MAX_IMAGE_DIMENSION_PIXELS: ${MAX_IMAGE_DIMENSION_PIXELS:-20000}

@@ -15,6 +15,9 @@
     "typecheck": {
       "dependsOn": ["^build"]
     },
+    "@printing-kiosk/database#lint": {
+      "dependsOn": ["@printing-kiosk/database#build"]
+    },
     "@printing-kiosk/database#typecheck": {
       "dependsOn": ["@printing-kiosk/database#build"]
     },
