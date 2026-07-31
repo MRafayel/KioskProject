@@ -38,8 +38,12 @@ jobs:
       - name: Create development test configuration
         run: cp .env.example .env
 
+      # Playwright belongs to the two browser apps, not to the workspace root,
+      # and pnpm keeps each package's binaries to itself. Running this from the
+      # root cannot resolve the executable; the browser it downloads is shared
+      # machine-wide, so installing once from either app serves both.
       - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm --filter @printing-kiosk/kiosk exec playwright install --with-deps chromium
 
       - name: Check formatting
         run: pnpm format:check

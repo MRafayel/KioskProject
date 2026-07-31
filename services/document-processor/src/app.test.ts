@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createProcessorServer } from "./app.js";
 import type { ProcessorConfig } from "./config.js";
+import { ProcessorError } from "./errors.js";
 import type {
   InternalDocumentProcessor,
   ProcessDocumentInput,
@@ -155,6 +156,95 @@ describe("document processor HTTP boundary", () => {
   });
 });
 
+describe("readiness reporting", () => {
+  let scratchDirectory: string;
+  let fake: FakeProcessor;
+  let reported: string[];
+  let server: ReturnType<typeof createProcessorServer>;
+  let origin: string;
+
+  beforeEach(async () => {
+    scratchDirectory = await mkdtemp(join(tmpdir(), "processor-ready-test-"));
+    fake = new FakeProcessor(scratchDirectory);
+    reported = [];
+    server = createProcessorServer({
+      config: testConfig(scratchDirectory),
+      processor: fake,
+      onReadinessFailure: (code) => reported.push(code)
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    const closed = new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+    server.closeAllConnections();
+    await closed;
+    await rm(scratchDirectory, { recursive: true, force: true });
+  });
+
+  it("stays silent while the dependencies are healthy", async () => {
+    const response = await fetch(`${origin}/health/ready`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ready" });
+    expect(reported).toEqual([]);
+  });
+
+  it("names the unhappy dependency without telling the caller", async () => {
+    // This probe gates every service that waits on the processor, so a refusal
+    // has to say which dependency refused. The caller still learns nothing:
+    // a health endpoint should not describe the deployment to whoever reaches
+    // it, and the operator reads the reason from the container's own output.
+    fake.readinessFailure = new ProcessorError("MALWARE_SCANNER_STALE", 503, true);
+
+    const response = await fetch(`${origin}/health/ready`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: "not_ready" });
+    expect(reported).toEqual(["MALWARE_SCANNER_STALE"]);
+  });
+
+  it("reduces an unrecognized failure to a safe code", async () => {
+    fake.readinessFailure = new Error("connect ECONNREFUSED 10.0.0.5:3310");
+
+    const response = await fetch(`${origin}/health/ready`);
+
+    expect(response.status).toBe(503);
+    expect(reported).toEqual(["INTERNAL_ERROR"]);
+    // The raw failure text can carry an address or a path, so it never reaches
+    // the report the operator reads.
+    expect(reported.join()).not.toContain("10.0.0.5");
+  });
+
+  it("keeps a failing reporter from changing what the probe answers", async () => {
+    const noisy = createProcessorServer({
+      config: testConfig(scratchDirectory),
+      processor: fake,
+      onReadinessFailure: () => {
+        throw new Error("reporting is broken");
+      }
+    });
+    await new Promise<void>((resolve) => noisy.listen(0, "127.0.0.1", resolve));
+    const noisyOrigin = `http://127.0.0.1:${(noisy.address() as AddressInfo).port}`;
+    fake.readinessFailure = new ProcessorError("NATIVE_TOOL_UNAVAILABLE", 503, true);
+
+    try {
+      const response = await fetch(`${noisyOrigin}/health/ready`);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ status: "not_ready" });
+    } finally {
+      const closed = new Promise<void>((resolve, reject) =>
+        noisy.close((error) => (error ? reject(error) : resolve()))
+      );
+      noisy.closeAllConnections();
+      await closed;
+    }
+  });
+});
+
 class FakeProcessor implements InternalDocumentProcessor {
   public processCalls = 0;
   public failure: Error | undefined;
@@ -167,7 +257,10 @@ class FakeProcessor implements InternalDocumentProcessor {
 
   public constructor(private readonly directory: string) {}
 
+  public readinessFailure: Error | undefined;
+
   public checkReady() {
+    if (this.readinessFailure) return Promise.reject(this.readinessFailure);
     return Promise.resolve({ malwareScanner: "ok" as const, nativeTools: "ok" as const });
   }
 

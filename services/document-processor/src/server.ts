@@ -32,6 +32,16 @@ const processor = new DocumentProcessor(config, scanner, tools);
 const server = createProcessorServer({
   config,
   processor,
+  // Always on, unlike the timing report. A readiness refusal holds back every
+  // service that waits on this one, and it is rare enough that one line per
+  // failed probe cannot become noise. The code names which dependency was
+  // unhappy — scanner, scanner freshness, or the native tools — and nothing
+  // about the request or the documents.
+  onReadinessFailure: (code: string) => {
+    process.stdout.write(
+      `${JSON.stringify({ level: "warn", event: "readiness_failed", reason: code })}\n`
+    );
+  },
   // One line per request, and only when enabled. The report carries stage
   // names, counts and durations — never a path, digest or filename.
   ...(config.timingLog

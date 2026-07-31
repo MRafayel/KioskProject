@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import type { ProcessorConfig } from "./config.js";
-import { ProcessorError, safeProcessorError } from "./errors.js";
+import { ProcessorError, safeProcessorError, type ProcessorErrorCode } from "./errors.js";
 import { sendProcessedDocumentTar } from "./tar-response.js";
 import { TimingCollector, type TimingReport } from "./timings.js";
 import {
@@ -27,6 +27,17 @@ export interface ProcessorServerDependencies {
    * assert on the report directly.
    */
   onTiming?: (report: TimingReport, kind: DocumentKind) => void;
+  /**
+   * Receives the reason a readiness probe failed.
+   *
+   * The probe gates the whole stack: nothing that depends on this service
+   * starts until it answers, so a silent refusal is indistinguishable from a
+   * crash, a missing tool, and an unreachable scanner. The reason is reported
+   * here rather than returned to the caller — a health probe should not
+   * describe the deployment to whoever can reach it — and injected rather than
+   * logged so the server keeps no logging dependency.
+   */
+  onReadinessFailure?: (code: ProcessorErrorCode) => void;
 }
 
 export function createProcessorServer(dependencies: ProcessorServerDependencies): Server {
@@ -80,7 +91,13 @@ export function createProcessorServer(dependencies: ProcessorServerDependencies)
       try {
         await dependencies.processor.checkReady(readinessDeadline);
         sendJson(response, 200, { status: "ready" });
-      } catch {
+      } catch (error) {
+        // Reporting must never be able to change what the probe answers.
+        try {
+          dependencies.onReadinessFailure?.(safeProcessorError(error).code);
+        } catch {
+          /* ignore */
+        }
         sendJson(response, 503, { status: "not_ready" });
       }
       return;
