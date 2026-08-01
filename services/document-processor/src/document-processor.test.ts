@@ -382,7 +382,14 @@ function testConfig(scratchDirectory: string): ProcessorConfig {
     previewWidth: 900,
     previewHeight: 1_200,
     processTimeoutMilliseconds: 10_000,
-    toolTimeoutMilliseconds: 1_000,
+    // Sharp's timeout is wall-clock, and these tests rasterize real images on
+    // whatever machine happens to run them. A tight budget measures how
+    // contended the runner is, not whether the pipeline is correct: the work
+    // takes single-digit milliseconds here, yet a shared two-core CI runner
+    // executing every package's suite at once blew a one-second budget. The
+    // tests that assert on timeouts inject the error directly, so no coverage
+    // depends on this value being small.
+    toolTimeoutMilliseconds: 30_000,
     scannerTimeoutMilliseconds: 1_000,
     scannerDefinitionMaxAgeMilliseconds: 60_000,
     timingLog: false,
