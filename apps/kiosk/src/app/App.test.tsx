@@ -1,12 +1,18 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
-import type { SessionEvent } from "@printing-kiosk/contracts";
+import type { SessionEvent, UpdatePrintSettingsBody } from "@printing-kiosk/contracts";
+import {
+  calculateSheetUsage,
+  countSelectedPages,
+  formatPageRanges,
+  parsePageRangeText
+} from "@printing-kiosk/domain";
 
 import { LanguageProvider } from "../features/i18n/LanguageProvider.js";
 import { PrototypeSessionProvider } from "../features/session/PrototypeSessionProvider.js";
@@ -102,6 +108,47 @@ function readRequestBody(body: BodyInit | null | undefined): string {
   return typeof body === "string" ? body : "";
 }
 
+/**
+ * The control plane answers a settings request by re-deriving every count from
+ * the page ranges it was sent. Stubbing it with the shared domain rules keeps
+ * the fixture from agreeing with a request the real server would have counted
+ * differently.
+ */
+function settingsResponseFor(requestBody: string) {
+  const request = JSON.parse(requestBody || "{}") as UpdatePrintSettingsBody;
+  const pageRanges = parsePageRangeText(
+    request.fileSelections[0]?.pageRanges ?? null,
+    readyFixture.pageCount
+  );
+  const selectedPages = countSelectedPages(pageRanges);
+  const usage = calculateSheetUsage({ selectedPages, duplex: request.duplex });
+
+  return {
+    ...settingsFixture,
+    copies: request.copies,
+    duplex: request.duplex,
+    orientation: request.orientation,
+    files: [
+      {
+        fileId: readyFixture.id,
+        position: 0,
+        pageCount: readyFixture.pageCount,
+        pageRanges: pageRanges.map(([start, end]) => [start, end] as [number, number]),
+        pageRangeText: formatPageRanges(pageRanges),
+        selectedPages
+      }
+    ],
+    selectedPages,
+    printedSides: usage.printedSidesPerCopy * request.copies,
+    physicalSheets: usage.physicalSheetsPerCopy * request.copies
+  };
+}
+
+function summaryValue(label: string): string {
+  const term = screen.getByText(label);
+  return term.parentElement?.querySelector("dd")?.textContent ?? "";
+}
+
 function payButtonName(amountMinor: number): RegExp {
   // The accessible name keeps ICU's non-breaking space, so match either form.
   const escaped = formatAmd(amountMinor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -161,7 +208,7 @@ beforeEach(() => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              settings: settingsFixture,
+              settings: settingsResponseFor(readRequestBody(init.body)),
               sessionState: "CONFIGURING",
               sessionVersion: 2,
               quoteInvalidated: false
@@ -389,6 +436,126 @@ describe("kiosk prototype journey", () => {
       screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) })
     ).toBeEnabled();
     expect(screen.getByText(formatAmd(quoteFixture.taxMinor))).toBeVisible();
+  });
+
+  it("prices and prints only the pages left after the customer excludes one", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.mocked(fetch);
+    renderKiosk({
+      initialEntries: ["/configure"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture]
+      }
+    });
+    await user.click(screen.getByRole("button", { name: "English" }));
+
+    await user.click(await screen.findByRole("button", { name: "Page 3" }));
+    const enlarged = screen.getByRole("dialog", { name: "Page 3" });
+    expect(within(enlarged).getByRole("img", { name: "Page 3" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("/pages/3/preview?revision=1")
+    );
+
+    // A page that is printing is offered the one answer that would change it.
+    expect(within(enlarged).getByText("This page will be printed.")).toBeVisible();
+    expect(within(enlarged).queryByRole("button", { name: "Print" })).not.toBeInTheDocument();
+
+    // Choosing is the customer's last word on this page: it is applied and the
+    // enlarged view hands them back to where they were in the strip.
+    await user.click(within(enlarged).getByRole("button", { name: "Don't print" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // The preview marks the page, and the summary drops it.
+    const excludedPage = screen.getByRole("button", { name: "Page 3, excluded from printing" });
+    expect(excludedPage).toHaveFocus();
+    expect(screen.getByText("1 page is excluded from printing.")).toBeVisible();
+    await vi.waitFor(
+      () => {
+        expect(JSON.parse(settingsRequests.at(-1)?.body ?? "{}")).toMatchObject({
+          fileSelections: [{ fileId: readyFixture.id, pageRanges: "1-2,4-8" }]
+        });
+      },
+      { timeout: 3_000 }
+    );
+    expect(summaryValue("Selected pages")).toBe("7");
+    expect(summaryValue("Printed sides")).toBe("7");
+
+    // Excluding a page is a print instruction, not an edit: the document the
+    // customer uploaded is neither deleted nor replaced.
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE" || init?.method === "POST")
+    ).toBe(true);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+    expect(screen.getByText("safe-fixture.pdf")).toBeVisible();
+
+    // Reopening states the page's standing, and dismissing the view leaves it
+    // exactly as it was: only Print and Don't print decide anything.
+    await user.click(excludedPage);
+    const reopened = screen.getByRole("dialog", { name: "Page 3" });
+    expect(within(reopened).getByText("This page will not be printed.")).toBeVisible();
+    expect(within(reopened).queryByRole("button", { name: "Don't print" })).not.toBeInTheDocument();
+    await user.click(within(reopened).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByText("1 page is excluded from printing.")).toBeVisible();
+    expect(settingsRequests.at(-1)?.body).toContain("1-2,4-8");
+
+    const savesBeforeRestore = settingsRequests.length;
+    await user.click(screen.getByRole("button", { name: "Page 3, excluded from printing" }));
+    const restored = screen.getByRole("dialog", { name: "Page 3" });
+    await user.click(within(restored).getByRole("button", { name: "Print" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 page is excluded from printing.")).not.toBeInTheDocument();
+    await vi.waitFor(
+      () => {
+        expect(settingsRequests.length).toBeGreaterThan(savesBeforeRestore);
+        expect(JSON.parse(settingsRequests.at(-1)?.body ?? "{}")).toMatchObject({
+          fileSelections: [{ fileId: readyFixture.id, pageRanges: "1-8" }]
+        });
+      },
+      { timeout: 3_000 }
+    );
+    expect(summaryValue("Selected pages")).toBe("8");
+  });
+
+  it("refuses to let the customer empty the print job from the preview", async () => {
+    const user = userEvent.setup();
+    renderKiosk({
+      initialEntries: ["/configure"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture]
+      }
+    });
+    await user.click(screen.getByRole("button", { name: "English" }));
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "From page" }), {
+      target: { value: "3" }
+    });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "To page" }), {
+      target: { value: "3" }
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Page 3" }));
+    const onlyPage = screen.getByRole("dialog", { name: "Page 3" });
+    expect(within(onlyPage).getByRole("button", { name: "Don't print" })).toBeDisabled();
+    expect(within(onlyPage).getByText("At least one page has to stay selected.")).toBeVisible();
+    await user.click(within(onlyPage).getByRole("button", { name: "Close" }));
+
+    // A page the range already leaves out is shown as such rather than offered
+    // a choice that would change nothing.
+    await user.click(screen.getByRole("button", { name: "Page 6, outside the selected range" }));
+    const skipped = screen.getByRole("dialog", { name: "Page 6" });
+    expect(
+      within(skipped).getByText(
+        "This page is outside the selected range (3–3), so it is not printed."
+      )
+    ).toBeVisible();
+    expect(within(skipped).queryByRole("button", { name: "Don't print" })).not.toBeInTheDocument();
+    expect(within(skipped).queryByRole("button", { name: "Print" })).not.toBeInTheDocument();
   });
 
   it("sends the customer back to configure instead of paying an expired price", async () => {
@@ -742,7 +909,7 @@ describe("kiosk prototype journey", () => {
       source.message(fileRejectedEvent(2));
     });
 
-    expect(await screen.findByText(/Ֆայլը վնասված է.*Հեռախոսից հեռացրեք/)).toBeVisible();
+    expect(await screen.findByText(/Ֆայլը վնասված է.*Հեռացրեք այս ֆայլը հեռախոսում/)).toBeVisible();
     expect(screen.queryByText(/վնասակար բովանդակության/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Անցնել տպման կարգավորումներին/i })).toBeDisabled();
   });
@@ -828,7 +995,7 @@ describe("kiosk prototype journey", () => {
     await act(() => vi.advanceTimersByTime(90_000));
     expect(screen.getByRole("alertdialog", { name: "Ավելի շատ ժամանա՞կ է պետք։" })).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "Ավարտել գործողությունը" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ավարտել հիմա" }));
     await act(async () => {
       await Promise.resolve();
     });
@@ -852,7 +1019,7 @@ describe("kiosk prototype journey", () => {
     });
 
     expect(
-      screen.getByRole("alertdialog", { name: "Ֆայլերի հեռացումը դեռ հաստատված չէ" })
+      screen.getByRole("alertdialog", { name: "Չհաջողվեց հաստատել ֆայլերի հեռացումը" })
     ).toBeVisible();
     expect(screen.getByRole("heading", { name: "Ընտրեք տպման կարգավորումները" })).toBeVisible();
     const retainedKey = window.sessionStorage.getItem(
@@ -860,7 +1027,7 @@ describe("kiosk prototype journey", () => {
     );
     expect(retainedKey).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Կրկին փորձել անվտանգ հեռացումը" }));
+    fireEvent.click(screen.getByRole("button", { name: "Կրկին հեռացնել ֆայլերը" }));
     await act(async () => {
       await Promise.resolve();
     });

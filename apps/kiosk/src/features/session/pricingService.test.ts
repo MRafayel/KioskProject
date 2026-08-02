@@ -2,8 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { buildSettingsBody, saveKioskSettings } from "./pricingService.js";
-import { defaultPrintSettings, type ReadyPrototypeFile } from "./model.js";
+import { buildSettingsBody, PricingRequestError, saveKioskSettings } from "./pricingService.js";
+import { defaultPrintSettings, type PrintSettings, type ReadyPrototypeFile } from "./model.js";
 
 const sessionId = "01900000-0000-7000-8000-000000000010";
 const fileId = "01900000-0000-7000-8000-000000000011";
@@ -115,6 +115,31 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("buildSettingsBody", () => {
+  const pageRangesFor = (settings: Partial<PrintSettings>) =>
+    buildSettingsBody(file, { ...defaultPrintSettings, ...settings }).fileSelections[0]?.pageRanges;
+
+  it("asks for the chosen range", () => {
+    expect(pageRangesFor({})).toBe("1-4");
+    expect(pageRangesFor({ pageStart: 2, pageEnd: 3 })).toBe("2-3");
+    expect(pageRangesFor({ pageStart: 3, pageEnd: 3 })).toBe("3");
+  });
+
+  it("leaves excluded pages out of the range it asks the control plane to price", () => {
+    expect(pageRangesFor({ excludedPages: [2] })).toBe("1,3-4");
+    expect(pageRangesFor({ excludedPages: [1, 3] })).toBe("2,4");
+    // An exclusion outside the chosen range changes nothing about the request.
+    expect(pageRangesFor({ pageStart: 3, pageEnd: 4, excludedPages: [1] })).toBe("3-4");
+  });
+
+  it("refuses to ask for a price once every selected page has been excluded", () => {
+    // Empty page-range text means the whole document to the control plane, so
+    // an emptied selection must never reach it as a request at all.
+    expect(() => pageRangesFor({ excludedPages: [1, 2, 3, 4] })).toThrow(PricingRequestError);
+    expect(() => pageRangesFor({ excludedPages: [1, 2, 3, 4] })).toThrow("NO_SELECTED_PAGES");
+  });
 });
 
 describe("saveKioskSettings", () => {

@@ -44,7 +44,7 @@ function showSafeLoadError(): void {
   const main = document.createElement("main");
   main.setAttribute("role", "alert");
   const heading = document.createElement("h1");
-  heading.textContent = "Չհաջողվեց բացել տպման գործողությունը";
+  heading.textContent = "Տպման գործընթացը հասանելի չէ";
   const detail = document.createElement("p");
   detail.textContent = "Վերադարձեք տերմինալ և նորից սկանավորեք QR կոդը։";
   main.append(heading, detail);

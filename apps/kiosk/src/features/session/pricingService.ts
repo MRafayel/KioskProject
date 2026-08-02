@@ -1,3 +1,5 @@
+import { formatPageRanges } from "@printing-kiosk/domain";
+
 import {
   createQuoteResponseSchema,
   getSessionResponseSchema,
@@ -9,7 +11,7 @@ import {
   type UpdatePrintSettingsResponse
 } from "@printing-kiosk/contracts";
 
-import type { PrintSettings, ReadyPrototypeFile } from "./model.js";
+import { selectedPageRanges, type PrintSettings, type ReadyPrototypeFile } from "./model.js";
 
 const SETTINGS_KEY_PREFIX = "printing-kiosk.pending-settings.";
 const QUOTE_KEY_PREFIX = "printing-kiosk.pending-quote.";
@@ -32,15 +34,18 @@ export function buildSettingsBody(
   file: ReadyPrototypeFile,
   settings: PrintSettings
 ): UpdatePrintSettingsBody {
-  const pageEnd = Math.min(settings.pageEnd ?? file.pageCount, file.pageCount);
-  const pageStart = Math.min(Math.max(settings.pageStart, 1), pageEnd);
+  const ranges = selectedPageRanges(settings, file.pageCount);
+  // Empty page-range text means "the whole document" to the control plane, so
+  // a selection the customer emptied must fail here rather than quietly become
+  // a price — and a print job — for every page they took out.
+  if (ranges.length === 0) throw new PricingRequestError("NO_SELECTED_PAGES", 422);
 
   return {
     fileOrder: [file.id],
     fileSelections: [
       {
         fileId: file.id,
-        pageRanges: pageStart === pageEnd ? `${pageStart}` : `${pageStart}-${pageEnd}`
+        pageRanges: formatPageRanges(ranges)
       }
     ],
     copies: settings.copies,

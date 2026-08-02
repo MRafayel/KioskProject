@@ -170,7 +170,7 @@ test("offers a safe cancel path while an uploaded file is quarantined", async ({
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("dialog", { name: "Cancel this print session?" })).toBeVisible();
   await page.getByRole("button", { name: "Cancel session" }).click();
-  await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Սկսել տպումը" })).toBeVisible();
 });
 
 test("returns safely to welcome when an expired session is replayed", async ({ page }) => {
@@ -226,14 +226,14 @@ test("returns safely to welcome when an expired session is replayed", async ({ p
   await expect
     .poll(() => page.evaluate(() => Boolean(Reflect.get(window, "__terminalReplayDelivered"))))
     .toBe(true);
-  await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Սկսել տպումը" })).toBeVisible();
   await expect(page.getByRole("timer")).toHaveCount(0);
 });
 
 test("has keyboard-visible focus and no serious accessibility violations", async ({ page }) => {
   await page.goto("/");
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "Սկսել տպագրությունը" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Սկսել տպումը" })).toBeFocused();
 
   const welcomeResults = await new AxeBuilder({ page }).analyze();
   expect(
@@ -242,7 +242,7 @@ test("has keyboard-visible focus and no serious accessibility violations", async
     )
   ).toEqual([]);
 
-  await page.getByRole("button", { name: "Սկսել տպագրությունը" }).click();
+  await page.getByRole("button", { name: "Սկսել տպումը" }).click();
   await expect(page.getByText("Փաստաթուղթ 1.pdf")).toBeVisible();
   const uploadResults = await new AxeBuilder({ page }).analyze();
   expect(
@@ -274,7 +274,7 @@ test("keeps Russian and Armenian meaningful across the active session", async ({
   await expect(page.getByRole("heading", { name: "Վերբեռնեք փաստաթուղթը" })).toBeVisible();
   await expect(page.getByText("Փաստաթուղթ 1.pdf")).toBeVisible();
   await expect(
-    page.getByText("Ֆայլը ստացվել է և սպասում է անվտանգ ստուգման").first()
+    page.getByText("Ֆայլը ստացվել է․ սպասում է անվտանգության ստուգման").first()
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Անցնել տպման կարգավորումներին" })).toBeDisabled();
 });

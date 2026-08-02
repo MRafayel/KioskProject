@@ -85,7 +85,7 @@ describe("mobile upload application", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Վերբեռնեք տպվող ֆայլը" })).toBeVisible();
-    expect(screen.getByText(/Գործողությունը հասանելի է մինչև/)).toBeVisible();
+    expect(screen.getByText(/Կարող եք ֆայլ վերբեռնել մինչև/)).toBeVisible();
     expect(document.documentElement).toHaveAttribute("lang", "hy");
     expect(exchangeRequest).toHaveBeenCalledOnce();
     expect(nonceValues.size).toBe(0);
@@ -108,7 +108,7 @@ describe("mobile upload application", () => {
     render(<App bootstrap={rejectedBootstrap} publicSessionId={publicSessionId} />);
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Այս հղումը վավեր չէ");
+    expect(alert).toHaveTextContent("Հղումը վավեր չէ");
     expect(alert).not.toHaveTextContent("INVALID_UPLOAD_GRANT");
     expect(screen.queryByRole("button", { name: "Փորձել կրկին" })).not.toBeInTheDocument();
   });
@@ -151,7 +151,7 @@ describe("mobile upload application", () => {
 
     render(<App bootstrap={{ run: () => pending }} publicSessionId={publicSessionId} />);
 
-    expect(screen.getByRole("heading", { name: "Միանում ենք տպման տերմինալին…" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Կապվում ենք տպման տերմինալի հետ…" })).toBeVisible();
     resolveBootstrap?.({
       ...context,
       session: { ...context.session, locale: "ru" }
@@ -209,7 +209,7 @@ describe("mobile upload application", () => {
 
       expect(
         await screen.findByText(
-          status === "READY" ? /պատրաստ է տպման/ : /պատրաստում ենք տպման էջերը/
+          status === "READY" ? /պատրաստ է տպման/ : /պատրաստում ենք էջերի նախադիտումը/
         )
       ).toBeVisible();
       expect(screen.getByRole("button", { name: "Ընտրել ևս մեկ ֆայլ" })).toBeDisabled();
@@ -258,9 +258,9 @@ describe("mobile upload application", () => {
       }
     });
 
-    expect(await screen.findByText("Տպման գործողությունը փակված է")).toBeVisible();
-    expect(screen.getByText(/այլևս չի ընդունում ֆայլեր/)).toBeVisible();
-    expect(screen.queryByText(/Գործողությունը հասանելի է մինչև/)).not.toBeInTheDocument();
+    expect(await screen.findByText("Տպման գործընթացն ավարտված է")).toBeVisible();
+    expect(screen.getByText(/այլևս հնարավոր չէ ֆայլ ավելացնել/)).toBeVisible();
+    expect(screen.queryByText(/Կարող եք ֆայլ վերբեռնել մինչև/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ընտրել ֆայլ" })).toBeDisabled();
     expect(xhrConstructor).not.toHaveBeenCalled();
   });
@@ -292,11 +292,11 @@ describe("mobile upload application", () => {
       }
     });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Ֆայլը չփոխանցվեց");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Չհաջողվեց վերբեռնել ֆայլը");
     expect(screen.getByText("Հեռախոսը միացված է տերմինալին")).toBeVisible();
-    expect(screen.getByText(/Գործողությունը հասանելի է մինչև/)).toBeVisible();
+    expect(screen.getByText(/Կարող եք ֆայլ վերբեռնել մինչև/)).toBeVisible();
     expect(screen.getByRole("button", { name: "Ընտրել ֆայլ" })).toBeEnabled();
-    expect(screen.queryByText("Տպման գործողությունը փակված է")).not.toBeInTheDocument();
+    expect(screen.queryByText("Տպման գործընթացն ավարտված է")).not.toBeInTheDocument();
   });
 
   it("does not show a stale upload-success notice when authoritative validation rejects the file", async () => {
@@ -341,7 +341,7 @@ describe("mobile upload application", () => {
     render(
       <App bootstrap={{ run: () => Promise.resolve(context) }} publicSessionId={publicSessionId} />
     );
-    expect(await screen.findByText("Դեռ ֆայլ չեք փոխանցել։")).toBeVisible();
+    expect(await screen.findByText("Դեռ ֆայլ չեք վերբեռնել։")).toBeVisible();
     const input = document.querySelector<HTMLInputElement>("#file-upload");
     if (!input) throw new Error("EXPECTED_FILE_INPUT");
 
@@ -353,7 +353,7 @@ describe("mobile upload application", () => {
 
     expect(await screen.findByText(/Ֆայլը վնասված է/)).toBeVisible();
     expect(
-      screen.queryByText("Ֆայլը փոխանցվել է։ Այն արդեն երևում է տպման տերմինալում։")
+      screen.queryByText("Ֆայլը վերբեռնվել է և արդեն երևում է տերմինալի էկրանին։")
     ).not.toBeInTheDocument();
   });
 
@@ -409,7 +409,7 @@ describe("mobile upload application", () => {
       <App bootstrap={{ run: () => Promise.resolve(context) }} publicSessionId={publicSessionId} />
     );
 
-    expect(await screen.findByText(/սպասում է անվտանգ ստուգման/)).toBeVisible();
+    expect(await screen.findByText(/սպասում է անվտանգության ստուգման/)).toBeVisible();
     if (!source) throw new Error("EXPECTED_EVENT_SOURCE");
     act(() => {
       source?.message({
@@ -492,7 +492,7 @@ describe("mobile upload application", () => {
       <App bootstrap={{ run: () => Promise.resolve(context) }} publicSessionId={publicSessionId} />
     );
 
-    expect(await screen.findByText(/սպասում է անվտանգ ստուգման/)).toBeVisible();
+    expect(await screen.findByText(/սպասում է անվտանգության ստուգման/)).toBeVisible();
     if (!source) throw new Error("EXPECTED_EVENT_SOURCE");
     act(() => {
       source?.message({
@@ -519,7 +519,7 @@ describe("mobile upload application", () => {
     });
 
     expect(await screen.findByText(/Ֆայլը վնասված է/)).toBeVisible();
-    expect(screen.queryByText(/վնասակար բովանդակության/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/վնասակար ծրագրերի/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ընտրել ֆայլ" })).toBeEnabled();
     expect(listRequests).toBe(2);
   });
@@ -588,7 +588,7 @@ describe("mobile upload application", () => {
       );
     });
 
-    expect(await screen.findByText("Տպման գործողությունը փակված է")).toBeVisible();
+    expect(await screen.findByText("Տպման գործընթացն ավարտված է")).toBeVisible();
     expect(contextRequests).toBe(2);
     expect(fileRequests).toBeGreaterThanOrEqual(2);
   });

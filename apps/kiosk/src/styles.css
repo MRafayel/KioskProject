@@ -793,7 +793,13 @@ p {
 }
 
 .document-preview h2 {
-  margin-bottom: 0.8rem;
+  margin-bottom: 0.35rem;
+}
+
+.document-preview__hint {
+  margin: 0 0 0.55rem;
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .document-preview__grid {
@@ -810,6 +816,16 @@ p {
 .document-preview__page {
   min-width: 0;
   margin: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  cursor: pointer;
+}
+
+.document-preview__thumb {
+  position: relative;
+  display: block;
 }
 
 .document-preview__page img,
@@ -829,12 +845,68 @@ p {
     linear-gradient(135deg, transparent 48%, #d7e0e9 49%, #d7e0e9 51%, transparent 52%), #f4f7fa;
 }
 
-.document-preview__page figcaption {
+.document-preview__page:focus-visible .document-preview__thumb,
+.document-preview__page:hover .document-preview__thumb {
+  transform: translateY(-2px);
+}
+
+.document-preview__badge {
+  position: absolute;
+  right: 0.3rem;
+  bottom: 0.3rem;
+  left: 0.3rem;
+  padding: 0.2rem 0.35rem;
+  border-radius: 0.35rem;
+  color: white;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.document-preview__page--excluded .document-preview__badge {
+  background: var(--red);
+}
+
+.document-preview__page--skipped .document-preview__badge {
+  background: var(--muted);
+}
+
+/* An excluded page stays legible: it is marked, not hidden, because the
+   customer has to recognise it to put it back. */
+.document-preview__page--excluded img,
+.document-preview__page--excluded .document-preview__missing {
+  border: 2px solid var(--red);
+  opacity: 0.5;
+  filter: grayscale(100%);
+}
+
+.document-preview__page--skipped img,
+.document-preview__page--skipped .document-preview__missing {
+  border-style: dashed;
+  opacity: 0.55;
+}
+
+.document-preview__caption {
+  display: block;
   margin-top: 0.35rem;
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 750;
   text-align: center;
+}
+
+.document-preview__page--excluded .document-preview__caption {
+  color: var(--red);
+  text-decoration: line-through;
+}
+
+.document-preview__excluded-note {
+  margin: 0;
+  color: var(--red);
+  font-size: 0.86rem;
+  font-weight: 700;
 }
 
 .document-preview__status {
@@ -1441,6 +1513,88 @@ p {
   background: white;
   box-shadow: 0 30px 90px rgb(0 0 0 / 35%);
   text-align: center;
+}
+
+.modal--page {
+  position: relative;
+  width: min(660px, 100%);
+  padding: 1.5rem;
+}
+
+.modal--page h2 {
+  padding: 0 3.25rem;
+}
+
+/* Sized as a touch target rather than as a glyph: it sits over the corner of
+   the dialog, where a thumb reaching from the edge of the screen lands. */
+.page-preview__close {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  place-items: center;
+  border: 1px solid #b7c7d8;
+  border-radius: 50%;
+  color: var(--navy);
+  background: white;
+  font-size: 1.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.page-preview__close:hover {
+  border-color: var(--navy);
+  background: var(--surface-soft);
+}
+
+.page-preview {
+  display: grid;
+  /* Reserved before the page arrives so the dialog does not resize under a
+     finger already reaching for the action below it. */
+  min-height: min(58vh, 720px);
+  margin: 0.9rem 0;
+  place-items: center;
+}
+
+/* Width and height are left to the page's own proportions so the frame hugs
+   the page instead of letterboxing it; the dialog also has a heading, a notice
+   and its actions to fit, so the height is bounded by the viewport. */
+.page-preview img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: min(58vh, 720px);
+  border: 1px solid #cfdae5;
+  border-radius: 0.7rem;
+  background: #f4f7fa;
+  box-shadow: 0 10px 30px rgb(23 34 53 / 12%);
+}
+
+.page-preview--excluded img,
+.page-preview--skipped img {
+  opacity: 0.55;
+  filter: grayscale(100%);
+}
+
+.page-preview--excluded img {
+  border: 2px solid var(--red);
+}
+
+.page-preview--skipped img {
+  border-style: dashed;
+}
+
+.page-preview__notice {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.page-preview__notice--excluded {
+  color: var(--red);
 }
 
 .countdown {

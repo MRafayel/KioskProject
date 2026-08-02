@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@printing-kiosk/contracts": "workspace:*",
+    "@printing-kiosk/domain": "workspace:*",
     "@tanstack/react-query": "5.101.2",
     "qrcode.react": "4.2.0",
     "react": "19.2.7",

@@ -6,6 +6,12 @@ import type {
   UploadedFileRejectionCode,
   UploadedFileStatus
 } from "@printing-kiosk/contracts";
+import {
+  formatPageRanges,
+  MAX_PAGE_RANGE_SEGMENTS,
+  MAX_PAGE_RANGE_TEXT_LENGTH,
+  type PageRange
+} from "@printing-kiosk/domain";
 
 export type Orientation = "PORTRAIT" | "LANDSCAPE";
 export type PrototypeOutcome = "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR";
@@ -42,6 +48,14 @@ export interface PrintSettings {
   orientation: Orientation;
   pageStart: number;
   pageEnd: number | null;
+  /**
+   * Pages the customer took out of the print job from the preview, held sorted
+   * and without duplicates. They are subtracted from the chosen range rather
+   * than replacing it, and one outside the range is kept but has no effect, so
+   * narrowing and widening the range again returns the customer's exclusions
+   * instead of silently reinstating pages they removed.
+   */
+  excludedPages: number[];
   copies: number;
   duplex: boolean;
 }
@@ -76,6 +90,7 @@ export type PrototypeAction =
   | { type: "FILES_SYNCED"; files: PrototypeFile[] }
   | { type: "FILE_REMOVED"; fileId: string }
   | { type: "SETTINGS_CHANGED"; settings: Partial<PrintSettings> }
+  | { type: "PAGE_EXCLUSION_CHANGED"; pageNumber: number; excluded: boolean }
   | { type: "CAPABILITIES_LOADED"; capabilities: PrintCapabilitiesResponse }
   | { type: "PRICING_PENDING" }
   | { type: "PRICING_RESOLVED"; settings: PrintSettingsSnapshot; quote: PriceQuote }
@@ -88,6 +103,7 @@ export const defaultPrintSettings: PrintSettings = {
   orientation: "PORTRAIT",
   pageStart: 1,
   pageEnd: null,
+  excludedPages: [],
   copies: 1,
   duplex: false
 };
@@ -121,20 +137,21 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         (a, b) => fileDisplayPriority(a) - fileDisplayPriority(b) || a.ordinal - b.ordinal
       );
       // A changed document set retires the stored price with the same finality
-      // the server applies to it.
+      // the server applies to it, and takes the page exclusions with it: those
+      // page numbers described a document that is no longer the one on screen.
+      const sameMaterial = readyFileFingerprint(files) === readyFileFingerprint(state.files);
       return {
         ...state,
         files,
-        pricing:
-          readyFileFingerprint(files) === readyFileFingerprint(state.files)
-            ? state.pricing
-            : idlePricingState
+        settings: sameMaterial ? state.settings : { ...state.settings, excludedPages: [] },
+        pricing: sameMaterial ? state.pricing : idlePricingState
       };
     }
     case "FILE_REMOVED":
       return {
         ...state,
         files: state.files.filter((file) => file.id !== action.fileId),
+        settings: { ...state.settings, excludedPages: [] },
         pricing: idlePricingState
       };
     case "SETTINGS_CHANGED":
@@ -143,6 +160,21 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         settings: { ...state.settings, ...action.settings },
         pricing: idlePricingState
       };
+    case "PAGE_EXCLUSION_CHANGED": {
+      const excludedPages = action.excluded
+        ? [...new Set([...state.settings.excludedPages, action.pageNumber])].sort(
+            (left, right) => left - right
+          )
+        : state.settings.excludedPages.filter((page) => page !== action.pageNumber);
+      // Asking for the state a page is already in changes nothing, and must not
+      // throw away a live price to say so.
+      if (excludedPages.length === state.settings.excludedPages.length) return state;
+      return {
+        ...state,
+        settings: { ...state.settings, excludedPages },
+        pricing: idlePricingState
+      };
+    }
     case "CAPABILITIES_LOADED":
       return { ...state, capabilities: action.capabilities };
     case "PRICING_PENDING":
@@ -189,10 +221,12 @@ export function calculatePrintSummary(
   settings: PrintSettings
 ): PrintSummary {
   const availablePages = files.reduce((total, file) => total + (file.pageCount ?? 0), 0);
-  const pageStart = availablePages === 0 ? 0 : clampPage(settings.pageStart, 1, availablePages);
-  const requestedEnd = settings.pageEnd ?? availablePages;
-  const pageEnd = availablePages === 0 ? 0 : clampPage(requestedEnd, pageStart, availablePages);
-  const selectedPages = availablePages === 0 ? 0 : pageEnd - pageStart + 1;
+  if (availablePages === 0) {
+    return { pageStart: 0, pageEnd: 0, selectedPages: 0, totalSides: 0, totalSheets: 0 };
+  }
+
+  const { pageStart, pageEnd } = pageRangeBounds(settings, availablePages);
+  const selectedPages = countPagesInRanges(selectedPageRanges(settings, availablePages));
   const sidesPerCopy = selectedPages;
   const sheetsPerCopy = settings.duplex ? Math.ceil(sidesPerCopy / 2) : sidesPerCopy;
 
@@ -203,6 +237,82 @@ export function calculatePrintSummary(
     totalSides: sidesPerCopy * settings.copies,
     totalSheets: sheetsPerCopy * settings.copies
   };
+}
+
+/** Where the customer's chosen range actually falls in a document this long. */
+export function pageRangeBounds(
+  settings: PrintSettings,
+  pageCount: number
+): { pageStart: number; pageEnd: number } {
+  const pageStart = clampPage(settings.pageStart, 1, pageCount);
+  const pageEnd = clampPage(settings.pageEnd ?? pageCount, pageStart, pageCount);
+  return { pageStart, pageEnd };
+}
+
+/**
+ * The pages this configuration prints: the chosen range with every excluded
+ * page taken out, as the contiguous groups the control plane is told about.
+ * An empty result means the customer has excluded everything they selected.
+ */
+export function selectedPageRanges(settings: PrintSettings, pageCount: number): PageRange[] {
+  const { pageStart, pageEnd } = pageRangeBounds(settings, pageCount);
+  const excluded = new Set(settings.excludedPages);
+  const ranges: Array<[number, number]> = [];
+
+  for (let page = pageStart; page <= pageEnd; page += 1) {
+    if (excluded.has(page)) continue;
+    const last = ranges.at(-1);
+    if (last && last[1] === page - 1) last[1] = page;
+    else ranges.push([page, page]);
+  }
+
+  return ranges;
+}
+
+export function countPagesInRanges(ranges: readonly PageRange[]): number {
+  return ranges.reduce((total, [start, end]) => total + (end - start + 1), 0);
+}
+
+/** How a single page of the document is treated by the current settings. */
+export type PagePrintState = "PRINTED" | "EXCLUDED" | "OUT_OF_RANGE";
+
+export function pagePrintState(
+  settings: PrintSettings,
+  pageCount: number,
+  pageNumber: number
+): PagePrintState {
+  const { pageStart, pageEnd } = pageRangeBounds(settings, pageCount);
+  if (pageNumber < pageStart || pageNumber > pageEnd) return "OUT_OF_RANGE";
+  return settings.excludedPages.includes(pageNumber) ? "EXCLUDED" : "PRINTED";
+}
+
+/**
+ * Why a printed page cannot be excluded, or `null` when it can be.
+ *
+ * The kiosk refuses these two before they are dispatched rather than letting
+ * the control plane refuse the settings afterwards: both would leave the
+ * customer looking at a configuration that cannot be priced, with nothing on
+ * screen explaining which tap caused it.
+ */
+export type PageExclusionRefusal = "LAST_SELECTED_PAGE" | "SELECTION_TOO_COMPLEX";
+
+export function pageExclusionRefusal(
+  settings: PrintSettings,
+  pageCount: number,
+  pageNumber: number
+): PageExclusionRefusal | null {
+  const ranges = selectedPageRanges(
+    { ...settings, excludedPages: [...settings.excludedPages, pageNumber] },
+    pageCount
+  );
+  if (ranges.length === 0) return "LAST_SELECTED_PAGE";
+  if (
+    ranges.length > MAX_PAGE_RANGE_SEGMENTS ||
+    formatPageRanges(ranges).length > MAX_PAGE_RANGE_TEXT_LENGTH
+  ) {
+    return "SELECTION_TOO_COMPLEX";
+  }
+  return null;
 }
 
 export function isReadyFile(file: PrototypeFile | undefined): file is ReadyPrototypeFile {

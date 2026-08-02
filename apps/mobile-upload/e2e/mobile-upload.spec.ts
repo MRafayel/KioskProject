@@ -95,6 +95,14 @@ test("keeps the QR bearer private through a responsive upload, delete, and refre
   expect(await page.locator("body").evaluate((element) => getComputedStyle(element).margin)).toBe(
     "0px"
   );
+
+  await page.getByRole("button", { name: "Հայերեն" }).click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "hy");
+  await expect(page.getByRole("heading", { name: "Վերբեռնեք տպվող ֆայլը" })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await expect(page.locator(".transfer-card")).toBeInViewport();
+  await page.getByRole("button", { name: "Русский" }).click();
+
   await expect(page.locator("body")).not.toContainText(uploadToken);
   expect(await page.content()).not.toContain(uploadToken);
   expect(await browserStorageText(page)).not.toContain(uploadToken);
