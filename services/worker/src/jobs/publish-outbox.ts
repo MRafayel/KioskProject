@@ -277,6 +277,40 @@ function toSafeSessionEvent(input: {
     };
   } else if (input.type === "quote.invalidated") {
     safePayload = { sessionId, quoteId: payload.quoteId, reason: payload.reason };
+  } else if (input.type === "payment.pending") {
+    safePayload = {
+      sessionId,
+      paymentId: payload.paymentId,
+      quoteId: payload.quoteId,
+      state: payload.state,
+      version: payload.version,
+      currency: payload.currency,
+      currencyExponent: payload.currencyExponent,
+      amountMinor: payload.amountMinor,
+      expiresAt: payload.expiresAt
+    };
+  } else if (input.type === "payment.succeeded") {
+    safePayload = {
+      sessionId,
+      paymentId: payload.paymentId,
+      quoteId: payload.quoteId,
+      state: payload.state,
+      version: payload.version,
+      currency: payload.currency,
+      currencyExponent: payload.currencyExponent,
+      amountMinor: payload.amountMinor,
+      capturedAt: payload.capturedAt
+    };
+  } else if (input.type === "payment.failed") {
+    // No provider reference, no card detail: only what the screen must say.
+    safePayload = {
+      sessionId,
+      paymentId: payload.paymentId,
+      state: payload.state,
+      version: payload.version,
+      status: payload.status,
+      failureCode: payload.failureCode
+    };
   } else if (input.type === "session.canceled" || input.type === "session.expired") {
     safePayload = {
       sessionId,

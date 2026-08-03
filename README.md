@@ -4,7 +4,7 @@ Privacy-first, self-service monochrome printing kiosk platform.
 
 ## Current status
 
-Phases 0–5 are implemented to the pilot/prototype acceptance boundary. The
+Phases 0–7 are implemented to the pilot/prototype acceptance boundary. The
 repository contains the first secure document workflow: the kiosk creates an
 authoritative session and QR link, one phone claims that link, and PDF/JPEG/PNG
 bytes stream into private quarantine storage. An isolated processor performs
@@ -18,6 +18,12 @@ a disconnect. The phone can list and delete its file without exposing the
 kiosk credential or storing a raw QR token. Kiosk cancellation is pushed to
 the claimed phone through an authenticated SSE stream, while PostgreSQL
 remains authoritative for upload, processing, and cleanup transitions.
+
+A validated document is then configured into an immutable settings revision and
+priced by the control plane from a published tariff. Payment is simulated: the
+kiosk starts a payment against one exact quote, and only a signed provider
+callback for that exact amount moves the session to `PAID`. No card data enters
+this system, and no real money moves anywhere in the current phases.
 
 The product is intentionally print-only and monochrome. Document scanning,
 photocopying/xerox, and color printing are outside scope.
@@ -41,6 +47,8 @@ Read these documents before implementation:
   cleanup guarantees, migration, and verification evidence.
 - docs/PHASE_6_STATUS.md — immutable settings revisions, capability checks,
   server-authoritative pricing, quote invalidation, and migration evidence.
+- docs/PHASE_7_STATUS.md — simulated payment, the payment ledger, signed
+  provider callbacks, compensation records, and migration evidence.
 - SECURITY.md — handling rules for secrets and private customer documents.
 
 ## Development commands
@@ -71,7 +79,7 @@ pnpm typecheck
 pnpm test
 pnpm test:e2e
 pnpm infra:up
-pnpm db:verify-phase5-upgrade
+pnpm db:verify-phase7-upgrade
 pnpm db:migrate
 pnpm db:seed
 pnpm dev

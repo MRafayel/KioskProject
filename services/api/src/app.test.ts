@@ -404,3 +404,103 @@ describe("settings and quote route contracts", () => {
     );
   });
 });
+
+describe("payment routes", () => {
+  const paymentId = "01900000-0000-7000-8000-0000000000bb";
+
+  it("refuses every payment route without a kiosk credential", async () => {
+    const app = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(app);
+
+    const requests = [
+      app.inject({
+        method: "POST",
+        url: "/v1/sessions/01900000-0000-7000-8000-000000000010/payments",
+        headers: { "idempotency-key": "unauthenticated-payment" },
+        payload: { quoteId: "01900000-0000-7000-8000-0000000000aa" }
+      }),
+      app.inject({
+        method: "POST",
+        url: `/v1/payments/${paymentId}/confirm`,
+        headers: { "idempotency-key": "unauthenticated-confirm" }
+      }),
+      app.inject({ method: "GET", url: `/v1/payments/${paymentId}` })
+    ];
+
+    for (const response of await Promise.all(requests)) {
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+    }
+  });
+
+  it("refuses a callback that is not signed by the provider, before touching the database", async () => {
+    // The stub database answers nothing but credential lookups, so any attempt
+    // to read a payment here would fail loudly rather than return 401.
+    const app = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(app);
+
+    const unsigned = await app.inject({
+      method: "POST",
+      url: "/v1/webhooks/payments/mock",
+      headers: { "content-type": "application/json" },
+      payload: { id: "mock_evt_forged", type: "payment_intent.captured", data: {} }
+    });
+    const misSigned = await app.inject({
+      method: "POST",
+      url: "/v1/webhooks/payments/mock",
+      headers: {
+        "content-type": "application/json",
+        "x-mock-payment-signature": `t=${Math.floor(Date.now() / 1_000)},v1=${"a".repeat(64)}`
+      },
+      payload: { id: "mock_evt_forged", type: "payment_intent.captured", data: {} }
+    });
+
+    for (const response of [unsigned, misSigned]) {
+      expect(response.statusCode).toBe(401);
+      // The caller is told the callback was not accepted and nothing more:
+      // which check failed is not something an unauthenticated source may probe.
+      const body: { error: Record<string, unknown> } = response.json();
+      expect(body.error.code).toBe("INVALID_WEBHOOK_SIGNATURE");
+      expect(body.error.message).toBe("The callback could not be verified.");
+      expect(Object.keys(body.error).sort()).toEqual(["code", "message", "requestId"]);
+    }
+  });
+
+  it("never exposes the outcome control unless it is deliberately enabled", async () => {
+    const withoutControl = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(withoutControl);
+    const withControl = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test", PAYMENT_TEST_OUTCOMES_ENABLED: "true" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(withControl);
+
+    const absent = await withoutControl.inject({
+      method: "POST",
+      url: `/v1/test/payments/${paymentId}/outcomes`,
+      payload: { outcome: "SUCCEEDED" }
+    });
+    const present = await withControl.inject({
+      method: "POST",
+      url: `/v1/test/payments/${paymentId}/outcomes`,
+      payload: { outcome: "SUCCEEDED" }
+    });
+
+    expect(absent.statusCode).toBe(404);
+    // Enabled, the route exists — and still demands the owning kiosk's
+    // credential before it will sign anything.
+    expect(present.statusCode).toBe(401);
+  });
+
+  it("gives a payment request room for a quote and nothing else", async () => {
+    const { createPaymentBodySchema } = await import("@printing-kiosk/contracts");
+    const quoteId = "01900000-0000-7000-8000-0000000000aa";
+
+    expect(createPaymentBodySchema.safeParse({ quoteId }).success).toBe(true);
+    expect(createPaymentBodySchema.safeParse({ quoteId, amountMinor: 1 }).success).toBe(false);
+    expect(createPaymentBodySchema.safeParse({ quoteId, provider: "REAL" }).success).toBe(false);
+  });
+});

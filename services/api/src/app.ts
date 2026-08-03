@@ -9,6 +9,7 @@ import { ZodError } from "zod";
 import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 import { createDatabaseClient, type PrismaClient } from "@printing-kiosk/database";
+import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
 import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
@@ -18,6 +19,12 @@ import { FileService } from "./modules/files/service.js";
 import { registerEventRoutes } from "./modules/events/routes.js";
 import { registerMobileAccessRoutes } from "./modules/mobile-access/routes.js";
 import { MobileAccessService } from "./modules/mobile-access/service.js";
+import {
+  registerPaymentOutcomeTestRoutes,
+  registerPaymentRoutes,
+  registerPaymentWebhookRoutes
+} from "./modules/payments/routes.js";
+import { PaymentService } from "./modules/payments/service.js";
 import { registerQuoteRoutes } from "./modules/quotes/routes.js";
 import { QuoteService } from "./modules/quotes/service.js";
 import { registerSettingsRoutes } from "./modules/settings/routes.js";
@@ -48,6 +55,11 @@ export interface BuildAppOptions {
   random?: RandomSource;
   objectStore?: ObjectStore;
   sessionEvents?: SessionEventSource;
+  /**
+   * The simulated payment provider. Only a test replaces it, and only to
+   * exercise scenarios such as an unavailable provider.
+   */
+  paymentProvider?: MockPaymentProvider;
   startBackgroundJobs?: boolean;
   /**
    * Per-IP ceiling on phone handoffs. Production keeps the built-in default;
@@ -169,6 +181,21 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
     quoteTtlSeconds: options.environment.QUOTE_TTL_SECONDS,
     limits: printSettingsLimits
+  });
+  const paymentProvider =
+    options.paymentProvider ??
+    new MockPaymentProvider({
+      webhookSecret: options.environment.PAYMENT_WEBHOOK_SECRET,
+      signatureToleranceSeconds: options.environment.PAYMENT_WEBHOOK_TOLERANCE_SECONDS
+    });
+  const payments = new PaymentService({
+    database,
+    clock,
+    random,
+    provider: paymentProvider,
+    idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
+    idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
+    paymentTimeoutSeconds: options.environment.PAYMENT_TIMEOUT_SECONDS
   });
   const janitor = new FileJanitor({
     database,
@@ -382,6 +409,23 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   });
   registerSettingsRoutes(app, { database, clock, settings, kioskAuthentication });
   registerQuoteRoutes(app, { database, clock, quotes, kioskAuthentication });
+  registerPaymentRoutes(app, { database, clock, payments, kioskAuthentication });
+  await registerPaymentWebhookRoutes(app, { payments });
+  // A route that dictates payment outcomes never exists in a production
+  // build: configuration validation refuses to enable it there, and this
+  // second check means a mistaken environment cannot expose it either.
+  if (
+    options.environment.PAYMENT_TEST_OUTCOMES_ENABLED &&
+    options.environment.NODE_ENV !== "production"
+  ) {
+    registerPaymentOutcomeTestRoutes(app, {
+      database,
+      clock,
+      payments,
+      kioskAuthentication,
+      mockProvider: paymentProvider
+    });
+  }
   registerDocumentPreviewRoutes(app, {
     database,
     objectStore,

@@ -371,6 +371,8 @@ describe("kiosk agent session facade", () => {
 
 describe("kiosk agent settings and pricing facade", () => {
   const sessionId = "01900000-0000-7000-8000-000000000010";
+  const quoteId = "01900000-0000-7000-8000-0000000000aa";
+  const paymentId = "01900000-0000-7000-8000-0000000000bb";
 
   function agentWithUpstream(status = 200, body: unknown = { ok: true }) {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
@@ -471,6 +473,99 @@ describe("kiosk agent settings and pricing facade", () => {
     expect(upstream.requests[0]?.init?.body).toBe(JSON.stringify({ settingsRevision: 3 }));
     expect(unkeyed.statusCode).toBe(400);
     expect(upstream.requests).toHaveLength(1);
+  });
+
+  it("forwards a payment against a quote and never a proposed amount", async () => {
+    const upstream = agentWithUpstream(201, { payment: { id: paymentId } });
+    const app = await upstream.build();
+    openApps.push(app);
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/payments`,
+      headers: { "idempotency-key": "payment-key-000001" },
+      payload: { quoteId, provider: "MOCK" }
+    });
+    const unkeyed = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/payments`,
+      payload: { quoteId }
+    });
+
+    expect(started.statusCode).toBe(201);
+    expect(upstream.requests[0]?.url).toBe(
+      `https://api.example.test/v1/sessions/${sessionId}/payments`
+    );
+    const headers = new Headers(upstream.requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer test-kiosk-api-key-000000");
+    expect(headers.get("idempotency-key")).toBe("payment-key-000001");
+    expect(upstream.requests[0]?.init?.body).toBe(JSON.stringify({ quoteId, provider: "MOCK" }));
+    expect(unkeyed.statusCode).toBe(400);
+    expect(upstream.requests).toHaveLength(1);
+  });
+
+  it("proxies payment confirmation and status without exposing the device credential", async () => {
+    const upstream = agentWithUpstream(200, { payment: { id: paymentId, status: "PENDING" } });
+    const app = await upstream.build();
+    openApps.push(app);
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/v1/payments/${paymentId}/confirm`,
+      headers: { "idempotency-key": "confirm-key-000001" }
+    });
+    const read = await app.inject({ method: "GET", url: `/v1/payments/${paymentId}` });
+    const malformed = await app.inject({ method: "GET", url: "/v1/payments/not-a-uuid" });
+
+    expect(confirmed.statusCode).toBe(200);
+    expect(read.statusCode).toBe(200);
+    expect(malformed.statusCode).toBe(400);
+    expect(upstream.requests).toHaveLength(2);
+    expect(JSON.stringify(confirmed.json())).not.toContain("test-kiosk-api-key");
+  });
+
+  it("offers the outcome control only where it was deliberately enabled", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const upstreamFetch = (input: string | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return Promise.resolve(
+        new Response(JSON.stringify({ payment: { id: paymentId } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      );
+    };
+    const disabled = await buildAgent(
+      loadEnvironment({ NODE_ENV: "test", API_ORIGIN: "https://api.example.test" }),
+      { upstreamFetch }
+    );
+    const enabled = await buildAgent(
+      loadEnvironment({
+        NODE_ENV: "test",
+        API_ORIGIN: "https://api.example.test",
+        PAYMENT_TEST_OUTCOMES_ENABLED: "true"
+      }),
+      { upstreamFetch }
+    );
+    openApps.push(disabled, enabled);
+
+    const refused = await disabled.inject({
+      method: "POST",
+      url: `/v1/payments/${paymentId}/simulate`,
+      payload: { outcome: "SUCCEEDED" }
+    });
+    const accepted = await enabled.inject({
+      method: "POST",
+      url: `/v1/payments/${paymentId}/simulate`,
+      payload: { outcome: "SUCCEEDED" }
+    });
+
+    expect(refused.statusCode).toBe(404);
+    expect(accepted.statusCode).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      `https://api.example.test/v1/test/payments/${paymentId}/outcomes`
+    );
   });
 
   it("rejects malformed session and quote identifiers before reaching the API", async () => {

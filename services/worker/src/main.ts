@@ -3,7 +3,9 @@ import pino from "pino";
 import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
 import { createDatabaseClient } from "@printing-kiosk/database";
+import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { PaymentReconciler } from "./jobs/reconcile-payments.js";
 import { OutboxPublisher } from "./jobs/publish-outbox.js";
 import { DocumentProcessingCoordinator } from "./jobs/process-document.js";
 import { DocumentProcessorClient } from "./processing/processor-client.js";
@@ -61,13 +63,28 @@ const documentProcessing = new DocumentProcessingCoordinator({
   maximumAttempts: environment.DOCUMENT_PROCESSOR_MAX_ATTEMPTS
 });
 
+const paymentReconciler = new PaymentReconciler({
+  database,
+  provider: new MockPaymentProvider({
+    webhookSecret: environment.PAYMENT_WEBHOOK_SECRET,
+    signatureToleranceSeconds: environment.PAYMENT_WEBHOOK_TOLERANCE_SECONDS
+  }),
+  logger
+});
+
 logger.info({ productScope: PRODUCT_SCOPE }, "worker started");
 publisher.start();
 documentProcessing.start();
+paymentReconciler.start();
 
 const shutdown = async (signal: string) => {
   logger.info({ signal }, "worker stopped");
-  await Promise.all([publisher.close(), documentProcessing.close(), processorScratch.close()]);
+  await Promise.all([
+    publisher.close(),
+    documentProcessing.close(),
+    processorScratch.close(),
+    paymentReconciler.close()
+  ]);
   await database.$disconnect();
   process.exit(0);
 };

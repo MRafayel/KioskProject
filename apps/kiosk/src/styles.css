@@ -1324,6 +1324,18 @@ p {
   font-size: 0.75rem;
 }
 
+.payment-card__error {
+  margin: 0.9rem 0 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid #e7b65a;
+  border-radius: 0.8rem;
+  color: #7a5000;
+  background: #fff6df;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
 .terminal-state {
   width: min(720px, 100%);
   margin: auto;

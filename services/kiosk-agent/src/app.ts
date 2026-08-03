@@ -199,6 +199,94 @@ export async function buildAgent(
     }
   );
 
+  app.post<{ Params: { sessionId: string } }>(
+    "/v1/sessions/:sessionId/payments",
+    (request, reply) => {
+      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
+      if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
+      if (!idempotencyKey) return idempotencyKeyRequired(reply);
+
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/payments`,
+        {
+          method: "POST",
+          headers: upstreamHeaders(environment, {
+            accept: "application/json",
+            "content-type": "application/json",
+            "idempotency-key": idempotencyKey
+          }),
+          // The browser names the quote it wants to pay. It never states an
+          // amount, and no card detail passes through this process.
+          body: JSON.stringify(request.body ?? {})
+        },
+        reply
+      );
+    }
+  );
+
+  app.post<{ Params: { paymentId: string } }>(
+    "/v1/payments/:paymentId/confirm",
+    (request, reply) => {
+      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
+      if (!UUID_PATTERN.test(request.params.paymentId)) return invalidPaymentRequest(reply);
+      if (!idempotencyKey) return idempotencyKeyRequired(reply);
+
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/payments/${encodeURIComponent(request.params.paymentId)}/confirm`,
+        {
+          method: "POST",
+          headers: upstreamHeaders(environment, {
+            accept: "application/json",
+            "idempotency-key": idempotencyKey
+          })
+        },
+        reply
+      );
+    }
+  );
+
+  app.get<{ Params: { paymentId: string } }>("/v1/payments/:paymentId", (request, reply) => {
+    if (!UUID_PATTERN.test(request.params.paymentId)) return invalidPaymentRequest(reply);
+    return forwardApiResponse(
+      upstreamFetch,
+      environment,
+      `/v1/payments/${encodeURIComponent(request.params.paymentId)}`,
+      { method: "GET", headers: upstreamHeaders(environment, { accept: "application/json" }) },
+      reply
+    );
+  });
+
+  // Standing in for a payment terminal. The pilot has no card hardware, so the
+  // touchscreen drives the deterministic provider scenarios instead — and only
+  // where configuration has explicitly enabled them outside production, so no
+  // production build of this agent can offer the route at all.
+  if (environment.PAYMENT_TEST_OUTCOMES_ENABLED && environment.NODE_ENV !== "production") {
+    app.post<{ Params: { paymentId: string } }>(
+      "/v1/payments/:paymentId/simulate",
+      (request, reply) => {
+        if (!UUID_PATTERN.test(request.params.paymentId)) return invalidPaymentRequest(reply);
+        return forwardApiResponse(
+          upstreamFetch,
+          environment,
+          `/v1/test/payments/${encodeURIComponent(request.params.paymentId)}/outcomes`,
+          {
+            method: "POST",
+            headers: upstreamHeaders(environment, {
+              accept: "application/json",
+              "content-type": "application/json"
+            }),
+            body: JSON.stringify(request.body ?? {})
+          },
+          reply
+        );
+      }
+    );
+  }
+
   app.get<{ Params: { sessionId: string; fileId: string } }>(
     "/v1/sessions/:sessionId/files/:fileId/pages",
     (request, reply) => {
@@ -503,6 +591,18 @@ function boundedPositiveInteger(value: string | undefined, maximum: number): num
 function invalidFileRequest(reply: FastifyReply) {
   return reply.code(400).send({
     error: { code: "INVALID_FILE_REQUEST", message: "The file request is invalid." }
+  });
+}
+
+function idempotencyKeyRequired(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: { code: "IDEMPOTENCY_KEY_REQUIRED", message: "Idempotency-Key is required." }
+  });
+}
+
+function invalidPaymentRequest(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: { code: "INVALID_PAYMENT_REQUEST", message: "The payment request is invalid." }
   });
 }
 

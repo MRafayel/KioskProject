@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
@@ -8,13 +10,30 @@ import {
   isReadyFile,
   type PrototypeOutcome
 } from "../features/session/model.js";
+import { PaymentRequestError, startKioskPayment } from "../features/session/paymentService.js";
 
 const outcomes: PrototypeOutcome[] = ["SUCCESS", "PAYMENT_DECLINED", "PRINTER_ERROR"];
+
+/**
+ * A refusal that means the price on screen is no longer payable. The customer
+ * is sent back to configure rather than left pressing a button that can only
+ * fail again.
+ */
+const STALE_PRICE_CODES = new Set([
+  "QUOTE_STALE",
+  "QUOTE_EXPIRED",
+  "QUOTE_NOT_FOUND",
+  "INVALID_SESSION_STATE",
+  "DOCUMENTS_CHANGED",
+  "SETTINGS_REVISION_STALE"
+]);
 
 export function CheckoutScreen() {
   const { messages, numberLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
+  const [starting, setStarting] = useState(false);
+  const [startFailure, setStartFailure] = useState<string | null>(null);
 
   const file = state.files[0];
   const quote = state.pricing.quote;
@@ -27,6 +46,33 @@ export function CheckoutScreen() {
 
   const money = (amountMinor: number) =>
     formatMinorAmount(amountMinor, quote.currency, quote.currencyExponent, numberLocale);
+
+  /**
+   * Payment starts in the control plane, against the quote it issued. The
+   * screen sends the price's identifier and nothing else — no amount, and no
+   * card detail ever reaches this browser.
+   */
+  const startPayment = async () => {
+    const session = state.session;
+    if (!session || starting) return;
+
+    setStarting(true);
+    setStartFailure(null);
+    try {
+      const payment = await startKioskPayment(session.id, quote.id, state.payment.attempt);
+      dispatch({ type: "PAYMENT_STARTED", payment });
+      void navigate("/payment");
+    } catch (error) {
+      const code = error instanceof PaymentRequestError ? error.code : "PAYMENT_START_FAILED";
+      setStartFailure(code);
+      if (STALE_PRICE_CODES.has(code)) {
+        dispatch({ type: "PRICING_CLEARED" });
+        void navigate("/configure");
+      }
+    } finally {
+      setStarting(false);
+    }
+  };
 
   return (
     <div className="checkout-grid">
@@ -131,10 +177,16 @@ export function CheckoutScreen() {
         <button
           className="button button--primary button--wide"
           type="button"
-          onClick={() => void navigate("/payment")}
+          disabled={starting}
+          onClick={() => void startPayment()}
         >
           {messages.checkout.pay(money(quote.totalMinor))} <span aria-hidden="true">→</span>
         </button>
+        {startFailure ? (
+          <p className="payment-card__error" role="alert">
+            {messages.checkout.paymentStartFailed}
+          </p>
+        ) : null}
         <p className="payment-card__note">{messages.checkout.demoNotice}</p>
       </aside>
     </div>

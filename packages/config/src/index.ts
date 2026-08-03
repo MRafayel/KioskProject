@@ -119,7 +119,18 @@ const environmentSchema = z
     MAX_PRINTED_SIDES: z.coerce.number().int().min(1).max(20_000).default(1_000),
     QUOTE_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
     PRINTER_ADAPTER: z.literal("mock").default("mock"),
-    PAYMENT_PROVIDER: z.literal("mock").default("mock")
+    PAYMENT_PROVIDER: z.literal("mock").default("mock"),
+    PAYMENT_WEBHOOK_SECRET: z
+      .string()
+      .min(32)
+      .default("development-only-payment-webhook-secret-change-me"),
+    // How long a customer has to complete a payment. It can never outlive the
+    // price it is paying, so configuration validation ties it to the quote.
+    PAYMENT_TIMEOUT_SECONDS: z.coerce.number().int().min(30).max(900).default(180),
+    PAYMENT_WEBHOOK_TOLERANCE_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
+    // The deterministic outcome control for the mock provider. It is refused
+    // outright in production, so a production build cannot expose it.
+    PAYMENT_TEST_OUTCOMES_ENABLED: stringBooleanSchema.default(false)
   })
   .superRefine((environment, context) => {
     if (environment.SESSION_ABSOLUTE_TTL_MINUTES < environment.SESSION_IDLE_TTL_MINUTES) {
@@ -236,6 +247,16 @@ const environmentSchema = z
       });
     }
 
+    // A payment window that outlives its quote would allow a capture against a
+    // price that has already stopped being payable.
+    if (environment.PAYMENT_TIMEOUT_SECONDS > environment.QUOTE_TTL_SECONDS) {
+      context.addIssue({
+        code: "custom",
+        path: ["PAYMENT_TIMEOUT_SECONDS"],
+        message: "PAYMENT_TIMEOUT_SECONDS must not exceed QUOTE_TTL_SECONDS"
+      });
+    }
+
     if (environment.S3_KMS_KEY_ID && environment.S3_SERVER_SIDE_ENCRYPTION !== "aws:kms") {
       context.addIssue({
         code: "custom",
@@ -266,6 +287,16 @@ const environmentSchema = z
 
     if (environment.NODE_ENV !== "production") return;
 
+    // A route that dictates payment outcomes is a way to print money. It does
+    // not exist in production, whatever else the environment says.
+    if (environment.PAYMENT_TEST_OUTCOMES_ENABLED) {
+      context.addIssue({
+        code: "custom",
+        path: ["PAYMENT_TEST_OUTCOMES_ENABLED"],
+        message: "PAYMENT_TEST_OUTCOMES_ENABLED must be false in production"
+      });
+    }
+
     const productionSecrets = [
       ["COOKIE_SIGNING_KEY", environment.COOKIE_SIGNING_KEY],
       ["UPLOAD_TOKEN_PEPPER", environment.UPLOAD_TOKEN_PEPPER],
@@ -273,7 +304,8 @@ const environmentSchema = z
       ["S3_SECRET_ACCESS_KEY", environment.S3_SECRET_ACCESS_KEY],
       ["S3_WORKER_SECRET_ACCESS_KEY", environment.S3_WORKER_SECRET_ACCESS_KEY],
       ["DOCUMENT_PROCESSOR_AUTH_TOKEN", environment.DOCUMENT_PROCESSOR_AUTH_TOKEN],
-      ["DEV_KIOSK_API_KEY", environment.DEV_KIOSK_API_KEY]
+      ["DEV_KIOSK_API_KEY", environment.DEV_KIOSK_API_KEY],
+      ["PAYMENT_WEBHOOK_SECRET", environment.PAYMENT_WEBHOOK_SECRET]
     ] as const;
 
     for (const [name, value] of productionSecrets) {
@@ -293,7 +325,8 @@ const environmentSchema = z
     const cryptographicKeys = [
       environment.COOKIE_SIGNING_KEY,
       environment.UPLOAD_TOKEN_PEPPER,
-      environment.MOBILE_TOKEN_PEPPER
+      environment.MOBILE_TOKEN_PEPPER,
+      environment.PAYMENT_WEBHOOK_SECRET
     ];
     if (new Set(cryptographicKeys).size !== cryptographicKeys.length) {
       context.addIssue({

@@ -8,6 +8,7 @@ import {
 
 import type { Locale } from "../i18n/messages.js";
 import type { PrototypeFile, PrototypeSession } from "./model.js";
+import { clearStoredPaymentKeys } from "./paymentService.js";
 import { clearStoredPricingKeys } from "./pricingService.js";
 
 const CREATE_KEY_STORAGE = "printing-kiosk.pending-create";
@@ -33,6 +34,19 @@ const BLOCKING_SESSION_CODES = new Set([
   "ACTIVE_SESSION_EXISTS",
   "SESSION_UPLOAD_GRANT_REPLAY_UNAVAILABLE"
 ]);
+const OPERATOR_RECOVERY_STATES = new Set(["PAID", "PRINTING", "FAILED", "RECOVERY_REQUIRED"]);
+const TERMINAL_SESSION_STATES = new Set(["COMPLETED", "CANCELED", "EXPIRED"]);
+const CANCEL_VERSION_ATTEMPTS = 2;
+
+export class SessionRequestError extends Error {
+  constructor(
+    readonly code: string,
+    readonly status: number
+  ) {
+    super(code);
+    this.name = "SessionRequestError";
+  }
+}
 
 export async function createKioskSession(locale: Locale): Promise<PrototypeSession> {
   // A reload loses the in-memory session while the authoritative one stays
@@ -53,8 +67,10 @@ export async function createKioskSession(locale: Locale): Promise<PrototypeSessi
   if (response.status === 409) {
     const failure = await readSessionConflict(response);
     if (!BLOCKING_SESSION_CODES.has(failure.code ?? "")) {
-      throw new Error(failure.code ?? "SESSION_CREATE_FAILED");
+      throw new SessionRequestError(failure.code ?? "SESSION_CREATE_FAILED", response.status);
     }
+
+    assertSessionCanBeDiscarded(failure.currentState);
 
     // Somebody is standing at the screen asking to print, and the kiosk can no
     // longer return them to the session that is in the way — its QR grant is
@@ -82,33 +98,53 @@ async function discardBlockingSession(sessionId: string | undefined): Promise<vo
     cache: "no-store"
   });
   if (!snapshot.ok) {
-    // Already expired or cleaned up; nothing is in the way any more.
-    clearStoredSessionKeys(sessionId);
-    return;
+    if (snapshot.status === 404 || snapshot.status === 410) {
+      // Already expired or cleaned up; nothing is in the way any more.
+      clearStoredSessionKeys(sessionId);
+      return;
+    }
+    throw await sessionRequestError(snapshot, "SESSION_RECOVERY_FAILED");
   }
 
-  const version = getSessionResponseSchema.parse(await snapshot.json()).session.version;
-  await fetch(`/agent/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+  const session = getSessionResponseSchema.parse(await snapshot.json()).session;
+  assertSessionCanBeDiscarded(session.state);
+  const cancelResponse = await fetch(`/agent/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {
     method: "POST",
     headers: {
-      "idempotency-key": `kiosk-recover-${sessionId}-${version}`,
-      "if-match": `"${version}"`
+      "idempotency-key": `kiosk-recover-${sessionId}-${session.version}`,
+      "if-match": `"${session.version}"`
     }
   });
+
+  if (!cancelResponse.ok && cancelResponse.status !== 404 && cancelResponse.status !== 410) {
+    throw await sessionRequestError(cancelResponse, "SESSION_RECOVERY_FAILED");
+  }
   clearStoredSessionKeys(sessionId);
+}
+
+function assertSessionCanBeDiscarded(state: string | undefined): void {
+  if (!state || !OPERATOR_RECOVERY_STATES.has(state)) return;
+  throw new SessionRequestError(
+    state === "PAID" || state === "PRINTING"
+      ? "PAID_SESSION_REQUIRES_FULFILLMENT"
+      : "SESSION_REQUIRES_OPERATOR_RECOVERY",
+    409
+  );
 }
 
 async function readSessionConflict(
   response: Response
-): Promise<{ code?: string; sessionId?: string }> {
+): Promise<{ code?: string; sessionId?: string; currentState?: string }> {
   try {
     const body = (await response.json()) as {
       error?: { code?: string; details?: Record<string, unknown> };
     };
     const sessionId = body.error?.details?.sessionId;
+    const currentState = body.error?.details?.currentState;
     return {
       ...(body.error?.code ? { code: body.error.code } : {}),
-      ...(typeof sessionId === "string" ? { sessionId } : {})
+      ...(typeof sessionId === "string" ? { sessionId } : {}),
+      ...(typeof currentState === "string" ? { currentState } : {})
     };
   } catch {
     return {};
@@ -158,23 +194,50 @@ async function closeKioskSessionOnce(session: PrototypeSession): Promise<void> {
   const idempotencyKey = sessionStorage.getItem(storageKey) ?? newIdempotencyKey();
   sessionStorage.setItem(storageKey, idempotencyKey);
 
-  const response = await fetch(`/agent/v1/sessions/${encodeURIComponent(session.id)}/cancel`, {
-    method: "POST",
-    headers: {
-      "idempotency-key": idempotencyKey,
-      "if-match": `"${session.version}"`
-    },
-    keepalive: true
-  });
+  // Upload processing, settings, quotes, and payments all advance the session
+  // version. The React session is intentionally lightweight and can therefore
+  // be stale by the time a customer presses Cancel. Read the authoritative
+  // version immediately before cancellation instead of sending the version
+  // captured when the session was first created.
+  for (let attempt = 0; attempt < CANCEL_VERSION_ATTEMPTS; attempt += 1) {
+    const snapshot = await fetch(`/agent/v1/sessions/${encodeURIComponent(session.id)}`, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      cache: "no-store"
+    });
+    if (!snapshot.ok) {
+      if (snapshot.status === 404 || snapshot.status === 410) {
+        clearStoredSessionKeys(session.id);
+        return;
+      }
+      throw await sessionRequestError(snapshot, "SESSION_CANCEL_FAILED");
+    }
 
-  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    const current = getSessionResponseSchema.parse(await snapshot.json()).session;
+    if (TERMINAL_SESSION_STATES.has(current.state)) {
+      clearStoredSessionKeys(session.id);
+      return;
+    }
+    assertSessionCanBeDiscarded(current.state);
+
+    const response = await fetch(`/agent/v1/sessions/${encodeURIComponent(session.id)}/cancel`, {
+      method: "POST",
+      headers: {
+        "idempotency-key": idempotencyKey,
+        "if-match": `"${current.version}"`
+      },
+      keepalive: true
+    });
+
+    if (response.ok || response.status === 404 || response.status === 410) {
+      clearStoredSessionKeys(session.id);
+      return;
+    }
+    // A worker or another customer action may advance the version between the
+    // GET and POST. Refresh once and retry with the same stable idempotency key.
+    if (response.status === 412 && attempt + 1 < CANCEL_VERSION_ATTEMPTS) continue;
     throw await sessionRequestError(response, "SESSION_CANCEL_FAILED");
   }
-
-  // Keep both the authoritative session and this stable key while closure is
-  // uncertain. Only a confirmed terminal response permits the kiosk to forget
-  // the customer's session and its replay key.
-  clearStoredSessionKeys(session.id);
 }
 
 export async function listKioskSessionFiles(sessionId: string): Promise<PrototypeFile[]> {
@@ -265,6 +328,7 @@ export function clearStoredSessionKeys(sessionId?: string): void {
   // A kiosk browser stays open for months. Every finished session must take
   // its replay keys with it rather than accumulating them indefinitely.
   clearStoredPricingKeys(sessionId);
+  clearStoredPaymentKeys(sessionId);
 }
 
 function readPendingCreate(): PendingCreate | null {
@@ -295,11 +359,14 @@ function newIdempotencyKey(): string {
   return `kiosk-${crypto.randomUUID()}`;
 }
 
-async function sessionRequestError(response: Response, fallbackCode: string): Promise<Error> {
+async function sessionRequestError(
+  response: Response,
+  fallbackCode: string
+): Promise<SessionRequestError> {
   try {
     const body = (await response.json()) as { error?: { code?: string } };
-    return new Error(body.error?.code ?? fallbackCode);
+    return new SessionRequestError(body.error?.code ?? fallbackCode, response.status);
   } catch {
-    return new Error(fallbackCode);
+    return new SessionRequestError(fallbackCode, response.status);
   }
 }

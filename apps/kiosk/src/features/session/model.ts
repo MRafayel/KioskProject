@@ -1,4 +1,5 @@
 import type {
+  PaymentSnapshot,
   PriceQuote,
   PrintCapabilitiesResponse,
   PrintSettingsSnapshot,
@@ -75,12 +76,26 @@ export interface PricingState {
   errorCode: string | null;
 }
 
+/**
+ * What the control plane last said about collecting the money.
+ *
+ * The kiosk never decides that a payment succeeded. `payment` is the stored
+ * record the control plane returned, and `attempt` is what earns a genuinely
+ * new payment after one was declined rather than replaying the first.
+ */
+export interface PaymentState {
+  payment: PaymentSnapshot | null;
+  attempt: number;
+  errorCode: string | null;
+}
+
 export interface PrototypeState {
   session: PrototypeSession | null;
   files: PrototypeFile[];
   settings: PrintSettings;
   capabilities: PrintCapabilitiesResponse | null;
   pricing: PricingState;
+  payment: PaymentState;
   outcome: PrototypeOutcome;
 }
 
@@ -96,6 +111,10 @@ export type PrototypeAction =
   | { type: "PRICING_RESOLVED"; settings: PrintSettingsSnapshot; quote: PriceQuote }
   | { type: "PRICING_FAILED"; errorCode: string }
   | { type: "PRICING_CLEARED" }
+  | { type: "PAYMENT_STARTED"; payment: PaymentSnapshot }
+  | { type: "PAYMENT_OBSERVED"; payment: PaymentSnapshot }
+  | { type: "PAYMENT_FAILED"; errorCode: string }
+  | { type: "PAYMENT_CLEARED" }
   | { type: "OUTCOME_CHANGED"; outcome: PrototypeOutcome }
   | { type: "RESET" };
 
@@ -115,12 +134,15 @@ export const idlePricingState: PricingState = {
   errorCode: null
 };
 
+export const idlePaymentState: PaymentState = { payment: null, attempt: 1, errorCode: null };
+
 export const initialPrototypeState: PrototypeState = {
   session: null,
   files: [],
   settings: defaultPrintSettings,
   capabilities: null,
   pricing: idlePricingState,
+  payment: idlePaymentState,
   outcome: "SUCCESS"
 };
 
@@ -144,7 +166,11 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         ...state,
         files,
         settings: sameMaterial ? state.settings : { ...state.settings, excludedPages: [] },
-        pricing: sameMaterial ? state.pricing : idlePricingState
+        pricing: sameMaterial ? state.pricing : idlePricingState,
+        // A price that no longer applies cannot be the one being paid, so the
+        // payment on screen goes with it. The control plane holds the same
+        // rule: a settled payment is a row it will not let this screen edit.
+        payment: sameMaterial ? state.payment : nextPaymentAttempt(state.payment)
       };
     }
     case "FILE_REMOVED":
@@ -152,13 +178,15 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         ...state,
         files: state.files.filter((file) => file.id !== action.fileId),
         settings: { ...state.settings, excludedPages: [] },
-        pricing: idlePricingState
+        pricing: idlePricingState,
+        payment: nextPaymentAttempt(state.payment)
       };
     case "SETTINGS_CHANGED":
       return {
         ...state,
         settings: { ...state.settings, ...action.settings },
-        pricing: idlePricingState
+        pricing: idlePricingState,
+        payment: nextPaymentAttempt(state.payment)
       };
     case "PAGE_EXCLUSION_CHANGED": {
       const excludedPages = action.excluded
@@ -172,7 +200,8 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
       return {
         ...state,
         settings: { ...state.settings, excludedPages },
-        pricing: idlePricingState
+        pricing: idlePricingState,
+        payment: nextPaymentAttempt(state.payment)
       };
     }
     case "CAPABILITIES_LOADED":
@@ -195,7 +224,14 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         pricing: { status: "FAILED", settings: null, quote: null, errorCode: action.errorCode }
       };
     case "PRICING_CLEARED":
-      return { ...state, pricing: idlePricingState };
+      return { ...state, pricing: idlePricingState, payment: nextPaymentAttempt(state.payment) };
+    case "PAYMENT_STARTED":
+    case "PAYMENT_OBSERVED":
+      return { ...state, payment: { ...state.payment, payment: action.payment, errorCode: null } };
+    case "PAYMENT_FAILED":
+      return { ...state, payment: { ...state.payment, errorCode: action.errorCode } };
+    case "PAYMENT_CLEARED":
+      return { ...state, payment: nextPaymentAttempt(state.payment) };
     case "OUTCOME_CHANGED":
       return { ...state, outcome: action.outcome };
     case "RESET":
@@ -317,6 +353,15 @@ export function pageExclusionRefusal(
 
 export function isReadyFile(file: PrototypeFile | undefined): file is ReadyPrototypeFile {
   return file?.status === "READY" && file.pageCount !== null && file.sizeBytes !== null;
+}
+
+/**
+ * Forget the payment on screen and move to the next attempt number, so the
+ * request that follows asks for a new payment instead of replaying the old one.
+ */
+function nextPaymentAttempt(payment: PaymentState): PaymentState {
+  if (!payment.payment && payment.errorCode === null) return payment;
+  return { payment: null, attempt: payment.attempt + 1, errorCode: null };
 }
 
 export function isQuotePayable(quote: PriceQuote | null, now: Date): quote is PriceQuote {

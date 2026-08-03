@@ -82,6 +82,8 @@ model PrintSession {
   uploadedFiles           UploadedFile[]
   settingRevisions        PrintSettingRevision[]
   priceQuotes             PriceQuote[]           @relation("SessionQuotes")
+  payments                Payment[]
+  refunds                 Refund[]
   auditEvents             AuditEvent[]
   outboxEvents            OutboxEvent[]
   sessionEvents           SessionEvent[]
@@ -194,11 +196,113 @@ model PriceQuote {
   settings               PrintSettingRevision @relation(fields: [sessionId, settingsRevision], references: [sessionId, revision], onDelete: Cascade)
   ruleSet                PricingRuleSet       @relation(fields: [ruleSetId], references: [id], onDelete: Restrict)
   activeForSession       PrintSession?        @relation("SessionActiveQuote")
+  payments               Payment[]
 
   @@unique([id, sessionId])
   @@index([sessionId, createdAt])
   @@index([status, expiresAt])
   @@map("price_quotes")
+}
+
+/// The accounting record for one attempt to collect one quote's total.
+/// Amount and currency are re-checked against the quote by a trigger, so a
+/// payment can never be stored for a price the control plane did not issue.
+model Payment {
+  id                 String                @id @db.Uuid
+  sessionId          String                @map("session_id") @db.Uuid
+  quoteId            String                @map("quote_id") @db.Uuid
+  provider           String                @db.VarChar(24)
+  providerIntentId   String                @map("provider_intent_id") @db.VarChar(120)
+  status             String                @db.VarChar(24)
+  amountMinor        Int                   @map("amount_minor")
+  currency           String                @db.Char(3)
+  currencyExponent   Int                   @map("currency_exponent")
+  settingsRevision   Int                   @map("settings_revision")
+  manifestHash       String                @map("manifest_hash") @db.VarChar(64)
+  failureCode        String?               @map("failure_code") @db.VarChar(48)
+  createdByActorType String                @map("created_by_actor_type") @db.VarChar(32)
+  createdByActorId   String                @map("created_by_actor_id") @db.VarChar(100)
+  expiresAt          DateTime              @map("expires_at")
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @default(now()) @updatedAt @map("updated_at")
+  authorizedAt       DateTime?             @map("authorized_at")
+  capturedAt         DateTime?             @map("captured_at")
+  failedAt           DateTime?             @map("failed_at")
+  session            PrintSession          @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  quote              PriceQuote            @relation(fields: [quoteId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  attempts           PaymentAttempt[]
+  webhookEvents      PaymentWebhookInbox[]
+  refunds            Refund[]
+
+  @@unique([id, sessionId])
+  @@unique([provider, providerIntentId])
+  @@index([sessionId, createdAt])
+  @@index([status, expiresAt])
+  @@map("payments")
+}
+
+/// One row per provider interaction. Append-only: a retry writes the next
+/// attempt rather than rewriting the previous one.
+model PaymentAttempt {
+  id                   String   @id @db.Uuid
+  paymentId            String   @map("payment_id") @db.Uuid
+  attempt              Int
+  action               String   @db.VarChar(24)
+  status               String   @db.VarChar(24)
+  providerReference    String?  @map("provider_reference") @db.VarChar(120)
+  failureCode          String?  @map("failure_code") @db.VarChar(48)
+  idempotencyKeyDigest String?  @map("idempotency_key_digest") @db.VarChar(64)
+  createdAt            DateTime @default(now()) @map("created_at")
+  payment              Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@unique([paymentId, attempt])
+  @@index([paymentId, createdAt])
+  @@map("payment_attempts")
+}
+
+/// Every verified callback is recorded before it is acted on. The provider
+/// event identifier is unique, so a duplicate delivery is acknowledged and
+/// ignored instead of capturing twice.
+model PaymentWebhookInbox {
+  id               String    @id @db.Uuid
+  provider         String    @db.VarChar(24)
+  providerEventId  String    @map("provider_event_id") @db.VarChar(120)
+  providerIntentId String    @map("provider_intent_id") @db.VarChar(120)
+  paymentId        String?   @map("payment_id") @db.Uuid
+  eventType        String    @map("event_type") @db.VarChar(48)
+  payloadDigest    String    @map("payload_digest") @db.VarChar(64)
+  result           String    @db.VarChar(32)
+  receivedAt       DateTime  @default(now()) @map("received_at")
+  processedAt      DateTime? @map("processed_at")
+  payment          Payment?  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerEventId])
+  @@index([paymentId, receivedAt])
+  @@map("payment_webhook_inbox")
+}
+
+/// A compensation record. It never rewrites the capture it refers to: money
+/// that moved stays recorded, and this row is the obligation to return it.
+model Refund {
+  id               String       @id @db.Uuid
+  paymentId        String       @map("payment_id") @db.Uuid
+  sessionId        String       @map("session_id") @db.Uuid
+  provider         String       @db.VarChar(24)
+  providerRefundId String?      @map("provider_refund_id") @db.VarChar(120)
+  reason           String       @db.VarChar(32)
+  amountMinor      Int          @map("amount_minor")
+  currency         String       @db.Char(3)
+  currencyExponent Int          @map("currency_exponent")
+  status           String       @db.VarChar(24)
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @default(now()) @updatedAt @map("updated_at")
+  completedAt      DateTime?    @map("completed_at")
+  payment          Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  session          PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([paymentId, reason])
+  @@index([status, createdAt])
+  @@map("refunds")
 }
 
 model SessionUploadGrant {

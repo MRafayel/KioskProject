@@ -34,6 +34,7 @@ export interface MessageCatalog {
     starting: string;
     start: string;
     startError: string;
+    paidSessionError: string;
     footerSecure: string;
     footerNoAccount: string;
     footerTouchscreen: string;
@@ -153,6 +154,7 @@ export interface MessageCatalog {
     applied: string;
     totalDue: string;
     pay: (price: string) => string;
+    paymentStartFailed: string;
     demoNotice: string;
   };
   status: {
@@ -255,6 +257,8 @@ const english: MessageCatalog = {
     starting: "Starting…",
     start: "Start printing",
     startError: "Could not start a print session. Please try again.",
+    paidSessionError:
+      "The previous paid print has not finished. Operator assistance is required before a new print can start.",
     footerSecure: "Secure session",
     footerNoAccount: "No account needed",
     footerTouchscreen: "Touchscreen kiosk"
@@ -378,6 +382,7 @@ const english: MessageCatalog = {
     applied: "Applied",
     totalDue: "Total due",
     pay: (price) => `Pay ${price}`,
+    paymentStartFailed: "Payment could not be started. Please try again.",
     demoNotice: "Demo only. No card data or real charge is involved."
   },
   status: {
@@ -466,6 +471,8 @@ const russian: MessageCatalog = {
     starting: "Создаём сеанс…",
     start: "Начать печать",
     startError: "Не удалось создать сеанс печати. Попробуйте ещё раз.",
+    paidSessionError:
+      "Предыдущая оплаченная печать ещё не завершена. Для запуска новой печати обратитесь к оператору.",
     footerSecure: "Защищённый сеанс",
     footerNoAccount: "Без регистрации",
     footerTouchscreen: "Сенсорный терминал"
@@ -594,6 +601,7 @@ const russian: MessageCatalog = {
     applied: "Применена",
     totalDue: "Итого",
     pay: (price) => `Оплатить ${price}`,
+    paymentStartFailed: "Не удалось начать оплату. Попробуйте ещё раз.",
     demoNotice: "Демонстрационный режим: данные карты не используются, списания не будет."
   },
   status: {
@@ -683,6 +691,8 @@ const armenian: MessageCatalog = {
     starting: "Սկսում ենք…",
     start: "Սկսել տպումը",
     startError: "Չհաջողվեց սկսել տպումը։ Փորձեք կրկին։",
+    paidSessionError:
+      "Նախորդ վճարված տպումը դեռ ավարտված չէ։ Նոր տպում սկսելու համար դիմեք սպասարկողին։",
     footerSecure: "Անվտանգ կապ",
     footerNoAccount: "Գրանցում պետք չէ",
     footerTouchscreen: "Սենսորային էկրան"
@@ -808,6 +818,7 @@ const armenian: MessageCatalog = {
     applied: "Կիրառված է",
     totalDue: "Ընդամենը",
     pay: (price) => `Վճարել ${price}`,
+    paymentStartFailed: "Չհաջողվեց սկսել վճարումը։ Փորձեք կրկին։",
     demoNotice: "Փորձնական ռեժիմ է․ քարտի տվյալներ չեն օգտագործվում, իրական գումար չի գանձվում։"
   },
   status: {

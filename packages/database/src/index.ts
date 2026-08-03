@@ -11,3 +11,9 @@ export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };
 export { invalidateSessionPricing } from "./session-pricing.js";
 export type { QuoteInvalidationReason, SessionPricingInvalidation } from "./session-pricing.js";
+export {
+  nextAttemptNumber,
+  releaseSessionPayments,
+  OPEN_PAYMENT_STATUSES
+} from "./session-payments.js";
+export type { SessionPaymentRelease } from "./session-payments.js";

@@ -92,7 +92,10 @@ const developmentScopes = [
   "files:delete",
   "settings:write",
   "quotes:create",
-  "quotes:read"
+  "quotes:read",
+  "payments:create",
+  "payments:write",
+  "payments:read"
 ];
 
 await database.kioskCredential.upsert({

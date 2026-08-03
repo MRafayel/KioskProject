@@ -28,7 +28,9 @@
     "db:migrate": "pnpm --filter @printing-kiosk/database migrate",
     "db:seed": "pnpm --filter @printing-kiosk/database seed",
     "db:verify-phase5-upgrade": "pnpm --filter @printing-kiosk/database verify:phase5-upgrade",
-    "db:verify-phase6-upgrade": "pnpm --filter @printing-kiosk/database verify:phase6-upgrade"
+    "db:verify-phase6-upgrade": "pnpm --filter @printing-kiosk/database verify:phase6-upgrade",
+    "db:verify-phase7-upgrade": "pnpm --filter @printing-kiosk/database verify:phase7-upgrade",
+    "db:recover-paid-session": "pnpm --filter @printing-kiosk/database recover:paid-session"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "3.1086.0",

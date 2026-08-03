@@ -185,6 +185,8 @@ importers:
 
   packages/file-processing: {}
 
+  packages/payment-adapters: {}
+
   packages/pricing:
     devDependencies:
       fast-check:
@@ -229,6 +231,9 @@ importers:
       '@printing-kiosk/file-processing':
         specifier: workspace:*
         version: link:../../packages/file-processing
+      '@printing-kiosk/payment-adapters':
+        specifier: workspace:*
+        version: link:../../packages/payment-adapters
       '@printing-kiosk/pricing':
         specifier: workspace:*
         version: link:../../packages/pricing
@@ -319,6 +324,9 @@ importers:
       '@printing-kiosk/file-processing':
         specifier: workspace:*
         version: link:../../packages/file-processing
+      '@printing-kiosk/payment-adapters':
+        specifier: workspace:*
+        version: link:../../packages/payment-adapters
       bullmq:
         specifier: 5.80.2
         version: 5.80.2

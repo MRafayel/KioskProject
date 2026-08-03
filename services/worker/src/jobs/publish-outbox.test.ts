@@ -119,6 +119,67 @@ describe("OutboxPublisher", () => {
     await publisher.close();
   });
 
+  it("publishes a payment event carrying only what the screen needs", async () => {
+    const upsert = vi.fn().mockImplementation((args: { create: Record<string, unknown> }) =>
+      Promise.resolve({
+        id: outboxId,
+        sessionId,
+        kioskId: "kiosk_dev_001",
+        sequence: 9,
+        type: "payment.succeeded",
+        payload: args.create.payload,
+        occurredAt: new Date("2030-01-01T00:00:00.000Z")
+      })
+    );
+    const database = {
+      outboxEvent: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: outboxId,
+          aggregateType: "PRINT_SESSION",
+          aggregateId: sessionId,
+          sequence: 9,
+          type: "payment.succeeded",
+          payload: {
+            sessionId,
+            paymentId: "01900000-0000-7000-8000-0000000000bb",
+            quoteId: "01900000-0000-7000-8000-0000000000aa",
+            state: "PAID",
+            version: 6,
+            currency: "AMD",
+            currencyExponent: 2,
+            amountMinor: 60_000,
+            capturedAt: "2030-01-01T00:00:00.000Z",
+            // A provider reference has no business reaching a browser, so the
+            // publisher must drop it even when a writer includes it.
+            providerIntentId: "mock_pi_secret"
+          },
+          status: "PENDING",
+          publishAttempts: 0,
+          createdAt: new Date("2030-01-01T00:00:00.000Z"),
+          session: { kioskId: "kiosk_dev_001" }
+        }),
+        updateMany: updateManyMock().mockResolvedValue({ count: 1 })
+      },
+      sessionEvent: { upsert }
+    } as unknown as PrismaClient;
+
+    await expect(publisherWith(database).publishNext()).resolves.toBe(true);
+
+    const stored = upsert.mock.lastCall?.[0] as { create: { payload: Record<string, unknown> } };
+    expect(stored.create.payload).toEqual({
+      sessionId,
+      paymentId: "01900000-0000-7000-8000-0000000000bb",
+      quoteId: "01900000-0000-7000-8000-0000000000aa",
+      state: "PAID",
+      version: 6,
+      currency: "AMD",
+      currencyExponent: 2,
+      amountMinor: 60_000,
+      capturedAt: "2030-01-01T00:00:00.000Z"
+    });
+    expect(JSON.stringify(queueAdd.mock.calls)).not.toContain("mock_pi_secret");
+  });
+
   it("cannot complete a row after a competing publisher reclaims its stale lease", async () => {
     const updateMany = updateManyMock()
       .mockResolvedValueOnce({ count: 1 })

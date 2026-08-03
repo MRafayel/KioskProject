@@ -16,6 +16,7 @@
     "@printing-kiosk/database": "workspace:*",
     "@printing-kiosk/domain": "workspace:*",
     "@printing-kiosk/file-processing": "workspace:*",
+    "@printing-kiosk/payment-adapters": "workspace:*",
     "@printing-kiosk/pricing": "workspace:*",
     "bullmq": "5.80.2",
     "fastify": "5.10.0",

@@ -2,7 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createKioskSession } from "./sessionService.js";
+import { closeKioskSession, createKioskSession } from "./sessionService.js";
+import type { SessionRequestError } from "./sessionService.js";
 
 const createdSession = {
   session: {
@@ -127,5 +128,129 @@ describe("createKioskSession", () => {
     expect(attempts).toHaveLength(1);
     expect(attempts[0]?.key).toMatch(/^kiosk-/);
     expect(attempts[0]?.locale).toBe("ru");
+  });
+
+  it("does not forget the blocking session when its cancellation is rejected", async () => {
+    const blockingSessionId = "01900000-0000-7000-8000-000000000020";
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+
+        if (url.endsWith("/agent/v1/sessions")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                error: {
+                  code: "ACTIVE_SESSION_EXISTS",
+                  details: { sessionId: blockingSessionId, currentState: "FILES_UPLOADED" }
+                }
+              }),
+              { status: 409, headers: { "content-type": "application/json" } }
+            )
+          );
+        }
+
+        if (url.endsWith("/cancel")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: { code: "PAYMENT_ALREADY_CAPTURED" } }), {
+              status: 409,
+              headers: { "content-type": "application/json" }
+            })
+          );
+        }
+
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              session: {
+                ...createdSession.session,
+                id: blockingSessionId,
+                state: "FILES_UPLOADED",
+                version: 2
+              }
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )
+        );
+      })
+    );
+
+    await expect(createKioskSession("hy")).rejects.toEqual(
+      expect.objectContaining<Partial<SessionRequestError>>({
+        code: "PAYMENT_ALREADY_CAPTURED",
+        status: 409
+      })
+    );
+    expect(calls).toHaveLength(3);
+    expect(calls[2]).toContain("/cancel");
+    expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).not.toBeNull();
+  });
+});
+
+describe("closeKioskSession", () => {
+  it("refreshes a stale version and retries once if the session changes again", async () => {
+    const versions = [5, 6];
+    const ifMatches: string[] = [];
+    const cancelKeys: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (init?.method === "GET") {
+          const version = versions.shift();
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                session: {
+                  ...createdSession.session,
+                  state: "CONFIGURING",
+                  version
+                }
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            )
+          );
+        }
+
+        expect(url).toContain("/cancel");
+        const headers = new Headers(init?.headers);
+        ifMatches.push(headers.get("if-match") ?? "");
+        cancelKeys.push(headers.get("idempotency-key") ?? "");
+        return Promise.resolve(
+          new Response(
+            ifMatches.length === 1
+              ? JSON.stringify({ error: { code: "STALE_SESSION_VERSION" } })
+              : "{}",
+            {
+              status: ifMatches.length === 1 ? 412 : 200,
+              headers: { "content-type": "application/json" }
+            }
+          )
+        );
+      })
+    );
+
+    window.sessionStorage.setItem("printing-kiosk.pending-create", "original-create-key");
+    await closeKioskSession({
+      id: createdSession.session.id,
+      publicId: createdSession.session.publicId,
+      version: 1,
+      uploadUrl: createdSession.upload.qrUrl,
+      expiresAt: createdSession.session.expiresAt,
+      hardExpiresAt: createdSession.session.hardExpiresAt
+    });
+
+    expect(ifMatches).toEqual(['"5"', '"6"']);
+    expect(cancelKeys[0]).toBeTruthy();
+    expect(cancelKeys[1]).toBe(cancelKeys[0]);
+    expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).toBeNull();
+    expect(
+      window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${createdSession.session.id}`)
+    ).toBeNull();
   });
 });

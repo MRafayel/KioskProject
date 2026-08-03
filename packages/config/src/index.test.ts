@@ -319,6 +319,46 @@ describe("loadEnvironment", () => {
     ).toContain("127.0.0.1");
   });
 
+  it("refuses a payment window that would outlive the price it is paying", () => {
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        QUOTE_TTL_SECONDS: "120",
+        PAYMENT_TIMEOUT_SECONDS: "180"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        NODE_ENV: "test",
+        QUOTE_TTL_SECONDS: "300",
+        PAYMENT_TIMEOUT_SECONDS: "180"
+      })
+    ).toMatchObject({ PAYMENT_TIMEOUT_SECONDS: 180 });
+  });
+
+  it("refuses the payment outcome control in production", () => {
+    // A route that dictates payment outcomes is a way to print money, so a
+    // production configuration cannot express one that offers it.
+    expect(() =>
+      loadEnvironment({ ...secureProductionEnvironment, PAYMENT_TEST_OUTCOMES_ENABLED: "true" })
+    ).toThrow();
+    expect(
+      loadEnvironment({ ...secureProductionEnvironment, PAYMENT_TEST_OUTCOMES_ENABLED: "false" })
+    ).toMatchObject({ PAYMENT_TEST_OUTCOMES_ENABLED: false });
+    expect(loadEnvironment({ NODE_ENV: "test" })).toMatchObject({
+      PAYMENT_TEST_OUTCOMES_ENABLED: false
+    });
+  });
+
+  it("requires the payment webhook secret to be its own production value", () => {
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        PAYMENT_WEBHOOK_SECRET: secureProductionEnvironment.UPLOAD_TOKEN_PEPPER
+      })
+    ).toThrow();
+  });
+
   it("loads the documented root environment file from a package working directory", () => {
     const root = mkdtempSync(join(tmpdir(), "printing-kiosk-config-"));
     const nested = join(root, "services", "api");
@@ -355,6 +395,7 @@ const secureProductionEnvironment = {
   DOCUMENT_PROCESSOR_IMAGE:
     "registry.example.test/printing-kiosk-processor@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   DOCUMENT_PROCESSOR_AUTH_TOKEN: "production-processor-auth-token-at-least-32-characters",
+  PAYMENT_WEBHOOK_SECRET: "production-payment-webhook-secret-at-least-32-characters",
   MALWARE_SCANNER_ADAPTER: "clamav",
   S3_SERVER_SIDE_ENCRYPTION: "AES256"
 } as const;

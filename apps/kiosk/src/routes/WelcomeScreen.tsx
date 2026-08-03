@@ -4,7 +4,10 @@ import { useKioskNavigate } from "../app/router.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import { createKioskSession } from "../features/session/sessionService.js";
+import {
+  createKioskSession,
+  SessionRequestError
+} from "../features/session/sessionService.js";
 
 export function WelcomeScreen() {
   const { locale, messages } = useLanguage();
@@ -17,6 +20,11 @@ export function WelcomeScreen() {
       void navigate("/upload");
     }
   });
+  const startError =
+    createSession.error instanceof SessionRequestError &&
+    createSession.error.code === "PAID_SESSION_REQUIRES_FULFILLMENT"
+      ? messages.welcome.paidSessionError
+      : messages.welcome.startError;
 
   return (
     <main className="welcome">
@@ -63,7 +71,7 @@ export function WelcomeScreen() {
             <span aria-hidden="true">→</span>
           </button>
           {createSession.isError ? (
-            <p className="inline-error">{messages.welcome.startError}</p>
+            <p className="inline-error">{startError}</p>
           ) : null}
         </article>
       </section>

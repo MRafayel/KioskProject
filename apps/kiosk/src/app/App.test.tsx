@@ -6,7 +6,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
-import type { SessionEvent, UpdatePrintSettingsBody } from "@printing-kiosk/contracts";
+import type {
+  PaymentSnapshot,
+  SessionEvent,
+  UpdatePrintSettingsBody
+} from "@printing-kiosk/contracts";
 import {
   calculateSheetUsage,
   countSelectedPages,
@@ -92,6 +96,21 @@ const quoteFixture = {
   expiresAt: "2030-01-01T00:05:00.000Z"
 };
 
+const paymentFixture = {
+  id: "01900000-0000-7000-8000-0000000000bb",
+  sessionId: testSession.id,
+  quoteId: quoteFixture.id,
+  provider: "MOCK" as const,
+  status: "PENDING" as const,
+  amountMinor: quoteFixture.totalMinor,
+  currency: "AMD",
+  currencyExponent: 2,
+  failureCode: null,
+  createdAt: "2030-01-01T00:00:00.000Z",
+  expiresAt: "2030-01-01T00:03:00.000Z",
+  capturedAt: null
+};
+
 const capabilitiesFixture = {
   capabilityVersion: 2,
   paperSizes: ["A4"],
@@ -175,6 +194,9 @@ let fileDeleteFailuresRemaining: number;
 let fileDeleteIdempotencyKeys: string[];
 let settingsRequests: Array<{ body: string; ifMatch: string; idempotencyKey: string }>;
 let quoteRequests: Array<{ body: string; idempotencyKey: string }>;
+let paymentRequests: Array<{ body: string; idempotencyKey: string }>;
+let simulatedOutcomes: string[];
+let paymentSnapshot: PaymentSnapshot;
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -185,6 +207,9 @@ beforeEach(() => {
   fileDeleteIdempotencyKeys = [];
   settingsRequests = [];
   quoteRequests = [];
+  paymentRequests = [];
+  simulatedOutcomes = [];
+  paymentSnapshot = { ...paymentFixture };
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -226,6 +251,62 @@ beforeEach(() => {
         return Promise.resolve(
           new Response(JSON.stringify({ quote: quoteFixture }), {
             status: 201,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      // The control plane owns the payment. These stubs answer exactly as it
+      // does: the kiosk starts one against a quote, confirms it, and then only
+      // ever reads back the status the server reports.
+      if (url.endsWith("/payments") && init?.method === "POST") {
+        paymentRequests.push({
+          body: readRequestBody(init.body),
+          idempotencyKey: new Headers(init.headers).get("idempotency-key") ?? ""
+        });
+        return Promise.resolve(
+          new Response(JSON.stringify({ payment: paymentSnapshot }), {
+            status: 201,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      if (url.endsWith("/confirm") && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ payment: paymentSnapshot }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      if (url.endsWith("/simulate") && init?.method === "POST") {
+        const requested = JSON.parse(readRequestBody(init.body) || "{}") as { outcome?: string };
+        simulatedOutcomes.push(requested.outcome ?? "");
+        paymentSnapshot =
+          requested.outcome === "DECLINED"
+            ? { ...paymentSnapshot, status: "DECLINED", failureCode: "CARD_DECLINED" }
+            : {
+                ...paymentSnapshot,
+                status: "CAPTURED",
+                capturedAt: "2030-01-01T00:01:00.000Z"
+              };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ payment: paymentSnapshot, delivered: 1, scheduled: false }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            }
+          )
+        );
+      }
+
+      if (url.includes("/v1/payments/") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ payment: paymentSnapshot }), {
+            status: 200,
             headers: { "content-type": "application/json" }
           })
         );
@@ -637,7 +718,7 @@ describe("kiosk prototype journey", () => {
     ).toBeNull();
   });
 
-  it("keeps the completed Phase 1 payment, printing, and recovery screens covered as test fixtures", async () => {
+  it("pays through the control plane and never sends an amount", async () => {
     vi.useFakeTimers();
     renderKiosk({
       initialEntries: ["/checkout"],
@@ -657,11 +738,25 @@ describe("kiosk prototype journey", () => {
     fireEvent.click(screen.getByLabelText("Printer error"));
     fireEvent.click(screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) }));
 
-    expect(screen.getByRole("heading", { name: "Processing payment" })).toBeVisible();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_200);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("heading", { name: "Processing payment" })).toBeVisible();
+
+    // The kiosk names the price it is paying and nothing else. An amount in
+    // this request would mean the browser could propose what to charge.
+    expect(paymentRequests).toHaveLength(1);
+    const started = JSON.parse(paymentRequests[0]?.body ?? "{}") as Record<string, unknown>;
+    expect(started).toEqual({ quoteId: quoteFixture.id, provider: "MOCK" });
+    expect(paymentRequests[0]?.idempotencyKey).not.toBe("");
+    expect(simulatedOutcomes).toEqual(["SUCCEEDED"]);
+
+    // Only the status the control plane reports moves the screen on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_200);
     });
@@ -672,6 +767,45 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(1_200);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+  });
+
+  it("shows the recovery screen when the control plane declines the payment", async () => {
+    vi.useFakeTimers();
+    renderKiosk({
+      initialEntries: ["/checkout"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    fireEvent.click(screen.getByLabelText("Payment declined"));
+    fireEvent.click(screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(simulatedOutcomes).toEqual(["DECLINED"]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(screen.getByRole("heading", { name: "Payment was declined" })).toBeVisible();
+
+    // A settled payment is final, so retrying returns to the checkout to ask
+    // the control plane for a new one rather than watching the old one again.
+    fireEvent.click(screen.getByRole("button", { name: "Retry payment" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
   });
 
   it("recovers a kiosk blocked by a session it can no longer resume", async () => {
@@ -781,6 +915,44 @@ describe("kiosk prototype journey", () => {
     expect(cancelled).toEqual([{ sessionId: blockingSessionId, ifMatch: '"2"' }]);
     expect(createAttempts).toHaveLength(2);
     expect(createAttempts[0]).not.toBe(createAttempts[1]);
+  });
+
+  it("protects a paid session and explains that operator recovery is required", async () => {
+    const blockingSessionId = "01900000-0000-7000-8000-0000000000c1";
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = requestUrl(input);
+        requests.push(`${init?.method ?? "GET"} ${url}`);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: "ACTIVE_SESSION_EXISTS",
+                message: "This kiosk already has an active session.",
+                requestId: "req_paid_test",
+                details: { sessionId: blockingSessionId, currentState: "PAID" }
+              }
+            }),
+            { status: 409, headers: { "content-type": "application/json" } }
+          )
+        );
+      })
+    );
+
+    const user = userEvent.setup();
+    renderKiosk();
+    await user.click(screen.getByRole("button", { name: "Սկսել տպումը" }));
+
+    expect(
+      await screen.findByText(
+        "Նախորդ վճարված տպումը դեռ ավարտված չէ։ Նոր տպում սկսելու համար դիմեք սպասարկողին։"
+      )
+    ).toBeVisible();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain("POST");
+    expect(requests[0]).not.toContain("/cancel");
   });
 
   it("cancels safely and returns to the only available service", async () => {

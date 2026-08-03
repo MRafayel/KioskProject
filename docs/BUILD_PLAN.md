@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: active implementation plan; Phases 0–6 implemented
+Status: active implementation plan; Phases 0–7 implemented
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated

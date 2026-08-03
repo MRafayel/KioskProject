@@ -160,6 +160,18 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
   await expect(page.getByRole("button", { name: /Pay\s+AMD\s*60\.00/ })).toBeEnabled();
   await expect(page.getByText(/AMD\s*10\.00/)).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  // Paying is a request to the control plane naming the quote, and the screen
+  // moves on only once the control plane reports the capture.
+  await page.getByRole("button", { name: /Pay\s+AMD\s*60\.00/ }).click();
+  await expect(page.getByRole("heading", { name: "Processing payment" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Printing your document" })).toBeVisible({
+    timeout: 15_000
+  });
+
+  // Still nothing the kiosk sent named a price of its own.
+  expect(requestBodies.join("\n")).not.toMatch(/minor|amount|currency|total|price/i);
+  expect(requestBodies.join("\n")).toContain("01900000-0000-7000-8000-0000000000aa");
 });
 
 test("offers a safe cancel path while an uploaded file is quarantined", async ({ page }) => {
@@ -386,6 +398,16 @@ async function stubReadyDocumentAndPricing(
       return;
     }
 
+    if (pathname.endsWith("/payments") && request.method() === "POST") {
+      requestBodies.push(request.postData() ?? "");
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({ payment: pendingPayment })
+      });
+      return;
+    }
+
     if (pathname.endsWith("/files")) {
       await route.fulfill({
         status: 200,
@@ -425,7 +447,59 @@ async function stubReadyDocumentAndPricing(
 
     await route.fallback();
   });
+
+  // The control plane owns the payment. The kiosk asks it to start one, then
+  // only ever reads back the status it reports.
+  await page.route("**/agent/v1/payments/**", async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+
+    if (pathname.endsWith("/simulate")) {
+      requestBodies.push(request.postData() ?? "");
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ payment: capturedPayment, delivered: 1, scheduled: false })
+      });
+      return;
+    }
+    if (pathname.endsWith("/confirm")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ payment: pendingPayment })
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ payment: capturedPayment })
+    });
+  });
 }
+
+const pendingPayment = {
+  id: "01900000-0000-7000-8000-0000000000bb",
+  sessionId: "01900000-0000-7000-8000-000000000020",
+  quoteId: "01900000-0000-7000-8000-0000000000aa",
+  provider: "MOCK",
+  status: "PENDING",
+  amountMinor: 6_000,
+  currency: "AMD",
+  currencyExponent: 2,
+  failureCode: null,
+  createdAt: "2030-01-01T00:00:00.000Z",
+  expiresAt: "2030-01-01T00:03:00.000Z",
+  capturedAt: null
+};
+
+const capturedPayment = {
+  ...pendingPayment,
+  status: "CAPTURED",
+  capturedAt: "2030-01-01T00:01:00.000Z"
+};
 
 async function switchToEnglish(page: Page): Promise<void> {
   await page.getByRole("button", { name: "English" }).click();

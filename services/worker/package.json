@@ -11,6 +11,7 @@
     "@printing-kiosk/database": "workspace:*",
     "@printing-kiosk/domain": "workspace:*",
     "@printing-kiosk/file-processing": "workspace:*",
+    "@printing-kiosk/payment-adapters": "workspace:*",
     "bullmq": "5.80.2",
     "pino": "10.3.1",
     "tar-stream": "3.2.0"

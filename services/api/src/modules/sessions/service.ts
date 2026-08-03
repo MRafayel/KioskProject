@@ -9,7 +9,12 @@ import {
   type SessionSnapshot,
   type SessionState
 } from "@printing-kiosk/contracts";
-import { invalidateSessionPricing, Prisma, type PrismaClient } from "@printing-kiosk/database";
+import {
+  invalidateSessionPricing,
+  Prisma,
+  releaseSessionPayments,
+  type PrismaClient
+} from "@printing-kiosk/database";
 import { isSessionExpired, SessionDomainError, transitionSession } from "@printing-kiosk/domain";
 
 import { processingArtifactCleanupDueAt } from "../files/cleanup-policy.js";
@@ -332,17 +337,43 @@ export class SessionService {
               throw new ApiError(410, "SESSION_EXPIRED", "This session has expired.");
             }
 
+            // Money that has already moved cannot be cancelled away. The
+            // answer to a paid session is fulfilment or a refund, and both are
+            // deliberate acts rather than a side effect of pressing cancel.
+            const captured = await transaction.payment.findFirst({
+              where: { sessionId: session.id, status: "CAPTURED" },
+              select: { id: true }
+            });
+            if (captured) {
+              throw new ApiError(
+                409,
+                "PAYMENT_ALREADY_CAPTURED",
+                "This session has already been paid.",
+                { paymentId: captured.id }
+              );
+            }
+
             const next = transitionSession(
               { state: session.state as SessionState, version: session.stateVersion },
               "CANCELED",
               input.expectedVersion
             );
             const now = this.options.clock.now();
+            // A payment still open at the provider is closed first, so the
+            // ledger never keeps an in-flight charge against a dead session.
+            const release = await releaseSessionPayments(transaction, {
+              sessionId: session.id,
+              now,
+              startingSequence: session.eventSequence,
+              newId: () => this.options.random.uuid(now),
+              nextState: next.state,
+              nextVersion: next.version
+            });
             const invalidation = await invalidateSessionPricing(transaction, {
               sessionId: session.id,
               reason: "SESSION_TERMINAL",
               now,
-              startingSequence: session.eventSequence,
+              startingSequence: release.nextSequence,
               newEventId: () => this.options.random.uuid(now),
               clearSettingsRevision: false
             });
@@ -701,11 +732,19 @@ async function expireSession(
     "EXPIRED",
     session.stateVersion
   );
+  const release = await releaseSessionPayments(transaction, {
+    sessionId: session.id,
+    now,
+    startingSequence: session.eventSequence,
+    newId: () => random.uuid(now),
+    nextState: next.state,
+    nextVersion: next.version
+  });
   const invalidation = await invalidateSessionPricing(transaction, {
     sessionId: session.id,
     reason: "SESSION_TERMINAL",
     now,
-    startingSequence: session.eventSequence,
+    startingSequence: release.nextSequence,
     newEventId: () => random.uuid(now),
     clearSettingsRevision: false
   });

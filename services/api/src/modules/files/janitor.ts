@@ -1,5 +1,11 @@
 import { uploadedFileSnapshotSchema } from "@printing-kiosk/contracts";
-import { invalidateSessionPricing, type Prisma, type PrismaClient } from "@printing-kiosk/database";
+import {
+  invalidateSessionPricing,
+  OPEN_PAYMENT_STATUSES,
+  releaseSessionPayments,
+  type Prisma,
+  type PrismaClient
+} from "@printing-kiosk/database";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { processingArtifactCleanupDueAt } from "./cleanup-policy.js";
@@ -91,15 +97,26 @@ export class FileJanitor {
             return;
           }
 
+          const nextVersion = session.stateVersion + 1;
+          // An expiring session may still hold an open provider intent. It is
+          // closed here so the ledger cannot keep a live charge against a
+          // session nobody can complete.
+          const release = await releaseSessionPayments(transaction, {
+            sessionId: session.id,
+            now,
+            startingSequence: session.eventSequence,
+            newId: () => this.options.random.uuid(now),
+            nextState: "EXPIRED",
+            nextVersion
+          });
           const invalidation = await invalidateSessionPricing(transaction, {
             sessionId: session.id,
             reason: "SESSION_TERMINAL",
             now,
-            startingSequence: session.eventSequence,
+            startingSequence: release.nextSequence,
             newEventId: () => this.options.random.uuid(now),
             clearSettingsRevision: false
           });
-          const nextVersion = session.stateVersion + 1;
           const nextSequence = invalidation.nextSequence + 1;
           const reason =
             now.getTime() >= session.hardExpiresAt.getTime() ? "HARD_TIMEOUT" : "IDLE_TIMEOUT";
@@ -164,7 +181,15 @@ export class FileJanitor {
   private async expireQuotes(): Promise<void> {
     const now = this.options.clock.now();
     const expired = await this.options.database.priceQuote.findMany({
-      where: { status: "ACTIVE", expiresAt: { lte: now } },
+      where: {
+        status: "ACTIVE",
+        expiresAt: { lte: now },
+        // A quote being paid is left alone. Its payment window was cut to fit
+        // inside its deadline, so the payment settles first; retiring the
+        // price underneath an in-flight capture would turn a valid payment
+        // into a compensation case for no reason.
+        payments: { none: { status: { in: [...OPEN_PAYMENT_STATUSES] } } }
+      },
       select: { id: true },
       orderBy: { expiresAt: "asc" },
       take: 100

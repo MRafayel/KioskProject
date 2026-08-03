@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { paymentFailureCodeSchema, paymentStatusSchema } from "./payments.js";
 import { quoteInvalidationReasonSchema } from "./quotes.js";
 import { sessionStateSchema } from "./sessions.js";
 import { readyUploadedFileSnapshotSchema, uploadedFileSnapshotSchema } from "./uploads.js";
@@ -113,6 +114,54 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
         sessionId: sessionIdSchema,
         quoteId: z.string().uuid(),
         reason: quoteInvalidationReasonSchema
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("payment.pending"),
+    // The amount is the one the control plane locked, so the screen can show
+    // what is being charged. No provider reference, card detail or document
+    // identity is ever carried here.
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        paymentId: z.string().uuid(),
+        quoteId: z.string().uuid(),
+        state: sessionStateSchema,
+        version: z.number().int().positive(),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        currencyExponent: z.number().int().min(0).max(4),
+        amountMinor: z.number().int().nonnegative(),
+        expiresAt: z.string().datetime()
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("payment.succeeded"),
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        paymentId: z.string().uuid(),
+        quoteId: z.string().uuid(),
+        state: sessionStateSchema,
+        version: z.number().int().positive(),
+        currency: z.string().regex(/^[A-Z]{3}$/),
+        currencyExponent: z.number().int().min(0).max(4),
+        amountMinor: z.number().int().nonnegative(),
+        capturedAt: z.string().datetime()
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("payment.failed"),
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        paymentId: z.string().uuid(),
+        state: sessionStateSchema,
+        version: z.number().int().positive(),
+        status: paymentStatusSchema,
+        failureCode: paymentFailureCodeSchema
       })
       .strict()
   }),
