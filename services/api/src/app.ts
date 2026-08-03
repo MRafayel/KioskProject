@@ -25,6 +25,9 @@ import {
   registerPaymentWebhookRoutes
 } from "./modules/payments/routes.js";
 import { PaymentService } from "./modules/payments/service.js";
+import { AgentCommandService } from "./modules/print-jobs/agent-service.js";
+import { registerAgentCommandRoutes, registerPrintJobRoutes } from "./modules/print-jobs/routes.js";
+import { PrintJobService } from "./modules/print-jobs/service.js";
 import { registerQuoteRoutes } from "./modules/quotes/routes.js";
 import { QuoteService } from "./modules/quotes/service.js";
 import { registerSettingsRoutes } from "./modules/settings/routes.js";
@@ -85,6 +88,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
               "req.headers.cookie",
               "req.headers['x-csrf-token']",
               "req.headers['idempotency-key']",
+              "req.headers['x-print-claim-token']",
               "res.headers['set-cookie']"
             ],
             censor: "[REDACTED]"
@@ -196,6 +200,27 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
     idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
     paymentTimeoutSeconds: options.environment.PAYMENT_TIMEOUT_SECONDS
+  });
+  // The scenario control never exists in a production build: configuration
+  // validation refuses to enable it there, and this second check means a
+  // mistaken environment still cannot expose a way to fail a paid print.
+  const printTestOutcomesEnabled =
+    options.environment.PRINT_TEST_OUTCOMES_ENABLED &&
+    options.environment.NODE_ENV !== "production";
+  const printJobs = new PrintJobService({
+    database,
+    clock,
+    random,
+    idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
+    idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
+    printJobTimeoutSeconds: options.environment.PRINT_JOB_TIMEOUT_SECONDS,
+    testOutcomesEnabled: printTestOutcomesEnabled
+  });
+  const agentCommands = new AgentCommandService({
+    database,
+    clock,
+    random,
+    leaseSeconds: options.environment.PRINT_COMMAND_LEASE_SECONDS
   });
   const janitor = new FileJanitor({
     database,
@@ -426,6 +451,21 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       mockProvider: paymentProvider
     });
   }
+  registerPrintJobRoutes(app, {
+    database,
+    clock,
+    printJobs,
+    kioskAuthentication,
+    testOutcomesEnabled: printTestOutcomesEnabled
+  });
+  registerAgentCommandRoutes(app, {
+    database,
+    clock,
+    objectStore,
+    commands: agentCommands,
+    kioskAuthentication,
+    maxDocumentBytes: options.environment.MAX_NORMALIZED_FILE_BYTES
+  });
   registerDocumentPreviewRoutes(app, {
     database,
     objectStore,

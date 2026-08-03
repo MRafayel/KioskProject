@@ -148,6 +148,7 @@ export interface MessageCatalog {
     outcomeSuccess: string;
     outcomePaymentDeclined: string;
     outcomePrinterError: string;
+    outcomePrinterUnconfirmed: string;
     paymentSummary: string;
     monochromeSides: (count: number) => string;
     minimumTransaction: string;
@@ -179,10 +180,14 @@ export interface MessageCatalog {
     printerErrorDescription: string;
     paymentDeclinedCode: string;
     printerErrorCode: string;
+    printerRefundNotice: string;
+    printerRecoveryTitle: string;
+    printerRecoveryDescription: string;
+    printerRecoveryCode: string;
+    printerRecoveryDetail: string;
     failureDetail: string;
     reviewSettings: string;
     retryPayment: string;
-    retryPrinting: string;
     completeEyebrow: string;
     completeTitle: string;
     collectSheets: (count: number) => string;
@@ -382,6 +387,7 @@ const english: MessageCatalog = {
     outcomeSuccess: "Successful print",
     outcomePaymentDeclined: "Payment declined",
     outcomePrinterError: "Printer error",
+    outcomePrinterUnconfirmed: "Unconfirmed print",
     paymentSummary: "Payment summary",
     monochromeSides: (count) => `${count} black-and-white ${count === 1 ? "side" : "sides"}`,
     minimumTransaction: "Minimum transaction",
@@ -414,13 +420,18 @@ const english: MessageCatalog = {
     paymentDeclinedDescription:
       "Nothing was charged. You can retry the demo payment or return to your settings.",
     printerErrorDescription:
-      "Printing stopped before completion. Keep this session open while you retry.",
+      "Nothing was printed. Your payment has been recorded for a refund and your documents have been deleted.",
     paymentDeclinedCode: "PAYMENT DECLINED",
-    printerErrorCode: "PRINTER UNAVAILABLE",
+    printerErrorCode: "NOTHING PRINTED",
+    printerRefundNotice: "Refund recorded · Ask an operator if it does not appear.",
+    printerRecoveryTitle: "The printer could not confirm your job",
+    printerRecoveryDescription:
+      "Some or all of your pages may have printed. Check the output tray and ask an operator before paying again.",
+    printerRecoveryCode: "RESULT UNCONFIRMED",
+    printerRecoveryDetail: "An operator will settle this · No automatic refund has been recorded.",
     failureDetail: "Prototype failure · Your file is still available in this session.",
     reviewSettings: "Review settings",
     retryPayment: "Retry payment",
-    retryPrinting: "Retry printing",
     completeEyebrow: "Print complete",
     completeTitle: "Your documents are ready",
     collectSheets: (count) =>
@@ -608,6 +619,7 @@ const russian: MessageCatalog = {
     outcomeSuccess: "Успешная печать",
     outcomePaymentDeclined: "Платёж отклонён",
     outcomePrinterError: "Ошибка принтера",
+    outcomePrinterUnconfirmed: "Печать не подтверждена",
     paymentSummary: "Сумма к оплате",
     monochromeSides: (count) =>
       `${count} ${russianPlural(count, "чёрно-белая сторона", "чёрно-белые стороны", "чёрно-белых сторон")}`,
@@ -637,17 +649,22 @@ const russian: MessageCatalog = {
       "Этот платёж нельзя использовать для печати; он зарегистрирован для возврата. Если появилось реальное списание, обратитесь к оператору.",
     paymentCompensatedCode: "ТРЕБУЕТСЯ ВОЗВРАТ",
     paymentDeclinedTitle: "Платёж отклонён",
-    printerErrorTitle: "Принтер требует внимания",
+    printerErrorTitle: "Печать не выполнена",
     paymentDeclinedDescription:
       "Деньги не списаны. Повторите тестовую оплату или вернитесь к настройкам.",
     printerErrorDescription:
-      "Печать остановилась до завершения. Не закрывайте сеанс и повторите попытку.",
+      "Ничего не напечатано. Возврат средств зафиксирован, а документы удалены.",
     paymentDeclinedCode: "ПЛАТЁЖ ОТКЛОНЁН",
-    printerErrorCode: "ПРИНТЕР НЕДОСТУПЕН",
+    printerErrorCode: "НИЧЕГО НЕ НАПЕЧАТАНО",
+    printerRefundNotice: "Возврат зафиксирован · Обратитесь к оператору, если он не поступит.",
+    printerRecoveryTitle: "Принтер не подтвердил задание",
+    printerRecoveryDescription:
+      "Часть страниц могла быть напечатана. Проверьте лоток выдачи и обратитесь к оператору, прежде чем платить снова.",
+    printerRecoveryCode: "РЕЗУЛЬТАТ НЕ ПОДТВЕРЖДЁН",
+    printerRecoveryDetail: "Вопрос решает оператор · Автоматический возврат не оформлен.",
     failureDetail: "Тестовая ошибка · Файл по-прежнему доступен в этом сеансе.",
     reviewSettings: "Проверить настройки",
     retryPayment: "Повторить оплату",
-    retryPrinting: "Повторить печать",
     completeEyebrow: "Печать завершена",
     completeTitle: "Документы готовы",
     collectSheets: (count) =>
@@ -834,6 +851,7 @@ const armenian: MessageCatalog = {
     outcomeSuccess: "Տպումը հաջողվել է",
     outcomePaymentDeclined: "Վճարումը մերժվել է",
     outcomePrinterError: "Տպիչի խափանում",
+    outcomePrinterUnconfirmed: "Չհաստատված տպում",
     paymentSummary: "Վճարման տվյալներ",
     monochromeSides: (count) => `${count} սև-սպիտակ կողմ`,
     minimumTransaction: "Նվազագույն վճար",
@@ -862,15 +880,20 @@ const armenian: MessageCatalog = {
       "Այս վճարումը չի կարող օգտագործվել տպման համար և գրանցվել է վերադարձի համար։ Իրական գանձում տեսնելու դեպքում դիմեք սպասարկողին։",
     paymentCompensatedCode: "ԳՈՒՄԱՐԸ ՊԵՏՔ Է ՎԵՐԱԴԱՐՁՎԻ",
     paymentDeclinedTitle: "Վճարումը մերժվել է",
-    printerErrorTitle: "Տպիչի աշխատանքը խափանվել է",
+    printerErrorTitle: "Տպումը չի կատարվել",
     paymentDeclinedDescription: "Գումար չի գանձվել։ Փորձեք կրկին կամ վերադարձեք կարգավորումներին։",
-    printerErrorDescription: "Տպումը չի ավարտվել։ Մի ավարտեք տպման գործընթացը և փորձեք կրկին։",
+    printerErrorDescription: "Ոչինչ չի տպվել։ Գումարի վերադարձը գրանցված է, փաստաթղթերը՝ ջնջված։",
     paymentDeclinedCode: "ՎՃԱՐՈՒՄԸ ՄԵՐԺՎԵԼ Է",
-    printerErrorCode: "ՏՊԻՉՆ ԱՆՀԱՍԱՆԵԼԻ Է",
+    printerErrorCode: "ՈՉԻՆՉ ՉԻ ՏՊՎԵԼ",
+    printerRefundNotice: "Վերադարձը գրանցված է · Դիմեք օպերատորին, եթե այն չհասնի։",
+    printerRecoveryTitle: "Տպիչը չհաստատեց աշխատանքը",
+    printerRecoveryDescription:
+      "Էջերի մի մասը կարող է տպված լինել։ Ստուգեք ելքի դարակը և դիմեք օպերատորին՝ նախքան կրկին վճարելը։",
+    printerRecoveryCode: "ԱՐԴՅՈՒՆՔԸ ՀԱՍՏԱՏՎԱԾ ՉԷ",
+    printerRecoveryDetail: "Հարցը կլուծի օպերատորը · Ավտոմատ վերադարձ չի գրանցվել։",
     failureDetail: "Փորձնական սխալ · Ձեր ֆայլը դեռ հասանելի է։",
     reviewSettings: "Վերադառնալ կարգավորումներին",
     retryPayment: "Կրկնել վճարումը",
-    retryPrinting: "Կրկին տպել",
     completeEyebrow: "Տպումն ավարտված է",
     completeTitle: "Փաստաթուղթը պատրաստ է",
     collectSheets: (count) =>

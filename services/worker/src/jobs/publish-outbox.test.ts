@@ -18,6 +18,7 @@ import { OutboxPublisher } from "./publish-outbox.js";
 
 const sessionId = "01900000-0000-7000-8000-000000000010";
 const outboxId = "01900000-0000-7000-8000-000000000011";
+const printJobId = "01900000-0000-7000-8000-000000000012";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 type UpdateManyMock = Mock<(input: Prisma.OutboxEventUpdateManyArgs) => Promise<{ count: number }>>;
 
@@ -181,47 +182,72 @@ describe("OutboxPublisher", () => {
   });
 
   it.each([
-    ["print.started", "PRINTING", 10],
-    ["session.completed", "COMPLETED", 11]
-  ])("publishes the mock-paid recovery event %s", async (type, state, sequence) => {
-    const upsert = vi.fn().mockImplementation((args: { create: Record<string, unknown> }) =>
-      Promise.resolve({
-        id: outboxId,
-        sessionId,
-        kioskId: "kiosk_dev_001",
-        sequence,
-        type,
-        payload: args.create.payload,
-        occurredAt: new Date("2030-01-01T00:00:00.000Z")
-      })
-    );
-    const database = {
-      outboxEvent: {
-        findFirst: vi.fn().mockResolvedValue({
+    ["print.started", "PRINTING", 10, { printJobId }],
+    ["session.completed", "COMPLETED", 11, {}],
+    [
+      "print.failed",
+      "FAILED",
+      12,
+      { printJobId, failureCode: "OUT_OF_PAPER", resultConfidence: "CONFIRMED" }
+    ],
+    [
+      "print.recovery_required",
+      "RECOVERY_REQUIRED",
+      13,
+      { printJobId, failureCode: "SUBMISSION_UNCONFIRMED", resultConfidence: "UNCONFIRMED" }
+    ]
+  ] as const)(
+    "publishes the print lifecycle event %s without operator detail",
+    async (type, state, sequence, extra) => {
+      const upsert = vi.fn().mockImplementation((args: { create: Record<string, unknown> }) =>
+        Promise.resolve({
           id: outboxId,
-          aggregateType: "PRINT_SESSION",
-          aggregateId: sessionId,
+          sessionId,
+          kioskId: "kiosk_dev_001",
           sequence,
           type,
-          payload: { sessionId, state, version: sequence, operatorNote: "must-not-publish" },
-          status: "PENDING",
-          publishAttempts: 0,
-          createdAt: new Date("2030-01-01T00:00:00.000Z"),
-          session: { kioskId: "kiosk_dev_001" }
-        }),
-        updateMany: updateManyMock().mockResolvedValue({ count: 1 })
-      },
-      sessionEvent: { upsert }
-    } as unknown as PrismaClient;
+          payload: args.create.payload,
+          occurredAt: new Date("2030-01-01T00:00:00.000Z")
+        })
+      );
+      const database = {
+        outboxEvent: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: outboxId,
+            aggregateType: "PRINT_SESSION",
+            aggregateId: sessionId,
+            sequence,
+            type,
+            payload: {
+              sessionId,
+              state,
+              version: sequence,
+              ...extra,
+              operatorNote: "must-not-publish"
+            },
+            status: "PENDING",
+            publishAttempts: 0,
+            createdAt: new Date("2030-01-01T00:00:00.000Z"),
+            session: { kioskId: "kiosk_dev_001" }
+          }),
+          updateMany: updateManyMock().mockResolvedValue({ count: 1 })
+        },
+        sessionEvent: { upsert }
+      } as unknown as PrismaClient;
 
-    await expect(publisherWith(database).publishNext()).resolves.toBe(true);
+      await expect(publisherWith(database).publishNext()).resolves.toBe(true);
 
-    const stored = upsert.mock.lastCall?.[0] as { create: { payload: Record<string, unknown> } };
-    expect(stored.create.payload).toEqual({ sessionId, state, version: sequence });
-    expect(realtimeDeliveryJobSchema.parse(queueAdd.mock.lastCall?.[1] as unknown)).toMatchObject({
-      event: { type, payload: { sessionId, state, version: sequence } }
-    });
-  });
+      const stored = upsert.mock.lastCall?.[0] as { create: { payload: Record<string, unknown> } };
+      // Only what the screen must say survives. An operator note written into
+      // the outbox row never reaches the kiosk.
+      expect(stored.create.payload).toEqual({ sessionId, state, version: sequence, ...extra });
+      expect(realtimeDeliveryJobSchema.parse(queueAdd.mock.lastCall?.[1] as unknown)).toMatchObject(
+        {
+          event: { type, payload: { sessionId, state, version: sequence, ...extra } }
+        }
+      );
+    }
+  );
 
   it("cannot complete a row after a competing publisher reclaims its stale lease", async () => {
     const updateMany = updateManyMock()

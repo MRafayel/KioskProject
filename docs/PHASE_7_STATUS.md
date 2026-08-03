@@ -61,19 +61,9 @@ partial capture, or multi-currency settlement.
 
 ### Recovering a mock-paid development session
 
-Until Phase 8 owns print fulfilment, a successful mock payment can remain in
-`PAID`. Do not cancel it or edit the payment row. Complete the simulated print
-by listing the affected sessions and then using the exact UUID:
-
-```bash
-pnpm db:recover-paid-session -- --list
-pnpm db:recover-paid-session -- <session-uuid>
-```
-
-The command refuses production, remote databases, non-mock providers,
-non-`PAID` sessions, and sessions without exactly one applied captured mock
-payment. It records `PAID -> PRINTING -> COMPLETED`, writes the audit/outbox
-evidence, revokes upload access, and schedules the private files for cleanup.
+Phase 8 owns print fulfilment, so a paid session now reaches a terminal state
+through the real print path. The interim `pnpm db:recover-paid-session`
+command that stood in for it has been removed. See `docs/PHASE_8_STATUS.md`.
 
 ## Request path
 
@@ -311,8 +301,12 @@ capture owing money back cannot be deleted.
   and `refunds` in the retention schedule, keeping the commercial and
   accounting record for as long as law and provider rules require while
   scrubbing anything that identifies a document.
-- Phase 8 must create the print job from the capture through the transactional
-  outbox, and must decide the refund policy for a job that fails after payment.
+- Phase 8 creates the print job from the capture and commits it with its
+  `print.started` outbox event in one transaction, and settles the refund
+  policy for a job that fails after payment: a definite failure that produced
+  nothing records a `PRINT_FAILED` obligation immediately, while a result the
+  device could not confirm records none and waits for an operator. See
+  `docs/PHASE_8_STATUS.md`.
 
 ## Phase 7 audit hardening — 2026-08-03
 

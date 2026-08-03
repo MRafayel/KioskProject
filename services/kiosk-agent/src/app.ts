@@ -6,6 +6,7 @@ import type { Environment } from "@printing-kiosk/config";
 import {
   PRODUCT_SCOPE,
   createPaymentBodySchema,
+  createPrintJobBodySchema,
   healthResponseSchema,
   idempotencyKeySchema,
   simulatePaymentOutcomeBodySchema
@@ -302,6 +303,82 @@ export async function buildAgent(
       }
     );
   }
+
+  app.post<{ Params: { sessionId: string } }>(
+    "/v1/sessions/:sessionId/print-jobs",
+    (request, reply) => {
+      const idempotencyKey = idempotencyKeySchema.safeParse(
+        singleHeader(request.headers["idempotency-key"])
+      );
+      // The browser names the capture it is printing. It cannot describe what
+      // to print: re-serializing the allowlisted contract also ensures an
+      // unexpected field cannot be forwarded under the device credential.
+      const body = createPrintJobBodySchema.safeParse(request.body ?? {});
+      if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
+      if (!idempotencyKey.success) return idempotencyKeyRequired(reply);
+      if (!body.success) return invalidPrintRequest(reply);
+      // The scenario control exists only where the deployment enabled it, so a
+      // production agent cannot forward a request to fail a paid print.
+      if (
+        body.data.simulatedOutcome !== undefined &&
+        !(environment.PRINT_TEST_OUTCOMES_ENABLED && environment.NODE_ENV !== "production")
+      ) {
+        return invalidPrintRequest(reply);
+      }
+
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/sessions/${encodeURIComponent(request.params.sessionId)}/print-jobs`,
+        {
+          method: "POST",
+          headers: upstreamHeaders(environment, {
+            accept: "application/json",
+            "content-type": "application/json",
+            "idempotency-key": idempotencyKey.data
+          }),
+          body: JSON.stringify(body.data)
+        },
+        reply
+      );
+    }
+  );
+
+  app.get<{ Params: { printJobId: string } }>("/v1/print-jobs/:printJobId", (request, reply) => {
+    if (!UUID_PATTERN.test(request.params.printJobId)) return invalidPrintRequest(reply);
+    return forwardApiResponse(
+      upstreamFetch,
+      environment,
+      `/v1/print-jobs/${encodeURIComponent(request.params.printJobId)}`,
+      { method: "GET", headers: upstreamHeaders(environment, { accept: "application/json" }) },
+      reply
+    );
+  });
+
+  app.post<{ Params: { printJobId: string } }>(
+    "/v1/print-jobs/:printJobId/cancel",
+    (request, reply) => {
+      const idempotencyKey = idempotencyKeySchema.safeParse(
+        singleHeader(request.headers["idempotency-key"])
+      );
+      if (!UUID_PATTERN.test(request.params.printJobId)) return invalidPrintRequest(reply);
+      if (!idempotencyKey.success) return idempotencyKeyRequired(reply);
+
+      return forwardApiResponse(
+        upstreamFetch,
+        environment,
+        `/v1/print-jobs/${encodeURIComponent(request.params.printJobId)}/cancel`,
+        {
+          method: "POST",
+          headers: upstreamHeaders(environment, {
+            accept: "application/json",
+            "idempotency-key": idempotencyKey.data
+          })
+        },
+        reply
+      );
+    }
+  );
 
   app.get<{ Params: { sessionId: string; fileId: string } }>(
     "/v1/sessions/:sessionId/files/:fileId/pages",
@@ -622,6 +699,12 @@ function idempotencyKeyRequired(reply: FastifyReply) {
 function invalidPaymentRequest(reply: FastifyReply) {
   return reply.code(400).send({
     error: { code: "INVALID_PAYMENT_REQUEST", message: "The payment request is invalid." }
+  });
+}
+
+function invalidPrintRequest(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: { code: "INVALID_PRINT_REQUEST", message: "The print request is invalid." }
   });
 }
 

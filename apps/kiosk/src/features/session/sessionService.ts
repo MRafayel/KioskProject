@@ -10,6 +10,7 @@ import type { Locale } from "../i18n/messages.js";
 import type { PrototypeFile, PrototypeSession } from "./model.js";
 import { clearStoredPaymentKeys } from "./paymentService.js";
 import { clearStoredPricingKeys } from "./pricingService.js";
+import { clearStoredPrintKeys } from "./printService.js";
 
 const CREATE_KEY_STORAGE = "printing-kiosk.pending-create";
 const CANCEL_KEY_PREFIX = "printing-kiosk.pending-cancel.";
@@ -329,6 +330,7 @@ export function clearStoredSessionKeys(sessionId?: string): void {
   // its replay keys with it rather than accumulating them indefinitely.
   clearStoredPricingKeys(sessionId);
   clearStoredPaymentKeys(sessionId);
+  clearStoredPrintKeys(sessionId);
 }
 
 function readPendingCreate(): PendingCreate | null {

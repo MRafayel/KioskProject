@@ -3,12 +3,11 @@ import {
   invalidateSessionPricing,
   OPEN_PAYMENT_STATUSES,
   releaseSessionPayments,
-  type Prisma,
   type PrismaClient
 } from "@printing-kiosk/database";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
-import { processingArtifactCleanupDueAt } from "./cleanup-policy.js";
+import { scheduleSessionFilesForCleanup } from "./cleanup-policy.js";
 import type { ObjectStore } from "./object-store.js";
 
 const EXPIRABLE_STATES = [
@@ -438,34 +437,4 @@ async function deleteObjectKeys(objectStore: ObjectStore, keys: readonly string[
 
 function addSeconds(date: Date, seconds: number): Date {
   return new Date(date.getTime() + seconds * 1_000);
-}
-
-async function scheduleSessionFilesForCleanup(
-  transaction: Prisma.TransactionClient,
-  sessionId: string,
-  now: Date
-): Promise<void> {
-  const common = {
-    status: "DELETE_PENDING",
-    processingGeneration: { increment: 1 },
-    processingClaimToken: null,
-    processingLeaseExpiresAt: null,
-    processingEnqueuedAt: null,
-    deleteRequestedAt: now,
-    cleanupErrorCode: null,
-    updatedAt: now
-  } as const;
-
-  await transaction.uploadedFile.updateMany({
-    where: { sessionId, status: { in: ["DELETE_PENDING", "DELETING"] } },
-    data: common
-  });
-  await transaction.uploadedFile.updateMany({
-    where: { sessionId, status: { in: ["QUARANTINED", "READY"] } },
-    data: { ...common, cleanupDueAt: now }
-  });
-  await transaction.uploadedFile.updateMany({
-    where: { sessionId, status: "VALIDATING" },
-    data: { ...common, cleanupDueAt: processingArtifactCleanupDueAt(now) }
-  });
 }

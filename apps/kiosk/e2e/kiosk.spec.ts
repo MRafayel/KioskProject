@@ -169,9 +169,25 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
     timeout: 15_000
   });
 
-  // Still nothing the kiosk sent named a price of its own.
+  // Printing is a request naming the capture, and the receipt appears only
+  // once the control plane reports a confirmed completion.
+  await expect(page.getByRole("heading", { name: "Your documents are ready" })).toBeVisible({
+    timeout: 15_000
+  });
+  await expect(page.getByText(/Collect all 1 sheet/)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // Still nothing the kiosk sent named a price of its own, or described what
+  // to print.
   expect(requestBodies.join("\n")).not.toMatch(/minor|amount|currency|total|price/i);
   expect(requestBodies.join("\n")).toContain("01900000-0000-7000-8000-0000000000aa");
+  // The print request names the capture and nothing else: it cannot describe
+  // what to print, how many copies, or which pages.
+  const printRequest = requestBodies.find((body) => body.includes("paymentId"));
+  expect(printRequest).toBeDefined();
+  expect(JSON.parse(printRequest ?? "{}")).toEqual({
+    paymentId: "01900000-0000-7000-8000-0000000000bb"
+  });
 });
 
 test("offers a safe cancel path while an uploaded file is quarantined", async ({ page }) => {
@@ -398,6 +414,18 @@ async function stubReadyDocumentAndPricing(
       return;
     }
 
+    // Printing is owned by the control plane too: the kiosk names the capture
+    // that paid, and never describes what should come out of the printer.
+    if (pathname.endsWith("/print-jobs") && request.method() === "POST") {
+      requestBodies.push(request.postData() ?? "");
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({ printJob: queuedPrintJob })
+      });
+      return;
+    }
+
     if (pathname.endsWith("/payments") && request.method() === "POST") {
       requestBodies.push(request.postData() ?? "");
       await route.fulfill({
@@ -446,6 +474,14 @@ async function stubReadyDocumentAndPricing(
     }
 
     await route.fallback();
+  });
+
+  await page.route("**/agent/v1/print-jobs/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ printJob: completedPrintJob })
+    });
   });
 
   // The control plane owns the payment. The kiosk asks it to start one, then
@@ -501,6 +537,34 @@ const capturedPayment = {
   status: "CAPTURED",
   appliedToSession: true,
   capturedAt: "2030-01-01T00:01:00.000Z"
+};
+
+const queuedPrintJob = {
+  id: "01900000-0000-7000-8000-0000000000cc",
+  sessionId: "01900000-0000-7000-8000-000000000020",
+  quoteId: "01900000-0000-7000-8000-0000000000aa",
+  paymentId: "01900000-0000-7000-8000-0000000000bb",
+  settingsRevision: 1,
+  status: "QUEUED",
+  resultConfidence: "UNKNOWN",
+  failureCode: null,
+  warningCode: null,
+  copies: 1,
+  printedSides: 1,
+  physicalSheets: 1,
+  sheetsProduced: null,
+  createdAt: "2030-01-01T00:01:00.000Z",
+  deadlineAt: "2030-01-01T00:06:00.000Z",
+  completedAt: null
+};
+
+/** Only a confirmed completion reaches the receipt screen. */
+const completedPrintJob = {
+  ...queuedPrintJob,
+  status: "COMPLETED",
+  resultConfidence: "CONFIRMED",
+  sheetsProduced: 1,
+  completedAt: "2030-01-01T00:02:00.000Z"
 };
 
 async function switchToEnglish(page: Page): Promise<void> {

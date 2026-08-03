@@ -494,7 +494,123 @@ describe("payment routes", () => {
     // credential before it will sign anything.
     expect(present.statusCode).toBe(401);
   });
+});
 
+describe("print job routes", () => {
+  const printJobId = "01900000-0000-7000-8000-0000000000cc";
+  const paymentId = "01900000-0000-7000-8000-0000000000bb";
+
+  it("refuses every print route without a kiosk credential", async () => {
+    const app = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(app);
+
+    const requests = [
+      app.inject({
+        method: "POST",
+        url: "/v1/sessions/01900000-0000-7000-8000-000000000010/print-jobs",
+        headers: { "idempotency-key": "unauthenticated-print" },
+        payload: { paymentId }
+      }),
+      app.inject({ method: "GET", url: `/v1/print-jobs/${printJobId}` }),
+      app.inject({
+        method: "POST",
+        url: `/v1/print-jobs/${printJobId}/cancel`,
+        headers: { "idempotency-key": "unauthenticated-print-cancel" }
+      })
+    ];
+
+    for (const response of await Promise.all(requests)) {
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+    }
+  });
+
+  it("refuses every agent operation without the device credential", async () => {
+    const app = await buildApp({ environment: loadEnvironment({ NODE_ENV: "test" }) });
+    openApps.push(app);
+    const operationId = "01900000-0000-7000-8000-0000000000dd";
+    const claimToken = "01900000-0000-7000-8000-0000000000ee";
+
+    const requests = [
+      app.inject({ method: "POST", url: "/v1/agent/commands/claim", payload: { max: 1 } }),
+      app.inject({
+        method: "POST",
+        url: `/v1/agent/commands/${operationId}/progress`,
+        payload: { claimToken, state: "SUBMITTED" }
+      }),
+      app.inject({
+        method: "POST",
+        url: `/v1/agent/commands/${operationId}/result`,
+        payload: {
+          claimToken,
+          state: "COMPLETED",
+          confidence: "CONFIRMED",
+          failureCode: null,
+          warningCode: null,
+          sheetsProduced: 1
+        }
+      }),
+      app.inject({
+        method: "GET",
+        url: `/v1/agent/print-jobs/${printJobId}/documents/${paymentId}`,
+        headers: { "x-print-claim-token": claimToken }
+      })
+    ];
+
+    for (const response of await Promise.all(requests)) {
+      expect(response.statusCode).toBe(401);
+    }
+  });
+
+  it("answers a device scenario identically whether or not it is enabled, until authenticated", async () => {
+    const withoutControl = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(withoutControl);
+    const withControl = await buildApp({
+      environment: loadEnvironment({ NODE_ENV: "test", PRINT_TEST_OUTCOMES_ENABLED: "true" }),
+      database: noMatchingCredentialDatabase()
+    });
+    openApps.push(withControl);
+    const url = "/v1/sessions/01900000-0000-7000-8000-000000000010/print-jobs";
+    const payload = { paymentId, simulatedOutcome: "OUT_OF_PAPER" };
+    const headers = {
+      "idempotency-key": "print-scenario-request",
+      authorization: "Bearer development-only-kiosk-key-0000"
+    };
+
+    const refused = await withoutControl.inject({ method: "POST", url, headers, payload });
+    const allowed = await withControl.inject({ method: "POST", url, headers, payload });
+
+    // Authentication happens before the body is looked at, so an anonymous
+    // caller cannot use this field to learn how a deployment is configured.
+    expect(refused.statusCode).toBe(401);
+    expect(allowed.statusCode).toBe(401);
+    expect(refused.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+    expect(allowed.json()).toMatchObject({ error: { code: "INVALID_KIOSK_CREDENTIAL" } });
+  });
+
+  it("gives a print request room for a payment and a scenario and nothing else", async () => {
+    const { createPrintJobBodySchema } = await import("@printing-kiosk/contracts");
+
+    expect(createPrintJobBodySchema.safeParse({ paymentId }).success).toBe(true);
+    expect(
+      createPrintJobBodySchema.safeParse({ paymentId, simulatedOutcome: "PAPER_JAM" }).success
+    ).toBe(true);
+    // A browser cannot describe what to print, how many copies, or where the
+    // output should go.
+    expect(createPrintJobBodySchema.safeParse({ paymentId, copies: 99 }).success).toBe(false);
+    expect(
+      createPrintJobBodySchema.safeParse({ paymentId, documents: ["../../etc/passwd"] }).success
+    ).toBe(false);
+    expect(
+      createPrintJobBodySchema.safeParse({ paymentId, simulatedOutcome: "SET_ON_FIRE" }).success
+    ).toBe(false);
+  });
+});
+
+describe("payment request contract", () => {
   it("gives a payment request room for a quote and nothing else", async () => {
     const { createPaymentBodySchema } = await import("@printing-kiosk/contracts");
     const quoteId = "01900000-0000-7000-8000-0000000000aa";

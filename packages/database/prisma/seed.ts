@@ -95,7 +95,14 @@ const developmentScopes = [
   "quotes:read",
   "payments:create",
   "payments:write",
-  "payments:read"
+  "payments:read",
+  "print-jobs:create",
+  "print-jobs:read",
+  "print-jobs:write",
+  // The local agent leases print work and reports results with this scope. It
+  // is separate from the customer-facing print scopes so a compromised
+  // touchscreen credential could not impersonate the device.
+  "print-jobs:agent"
 ];
 
 await database.kioskCredential.upsert({

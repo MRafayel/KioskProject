@@ -23,9 +23,9 @@
     "verify:phase5-upgrade": "node scripts/verify-phase5-upgrade.mjs",
     "verify:phase6-upgrade": "node scripts/verify-phase6-upgrade.mjs",
     "verify:phase7-upgrade": "node scripts/verify-phase7-upgrade.mjs",
-    "recover:paid-session": "node scripts/recover-paid-session.mjs",
     "typecheck": "pnpm generate && tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src --passWithNoTests"
+    "test": "vitest run src --passWithNoTests",
+    "verify:phase8-upgrade": "node scripts/verify-phase8-upgrade.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.0",

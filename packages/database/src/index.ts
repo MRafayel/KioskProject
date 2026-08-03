@@ -17,3 +17,21 @@ export {
   OPEN_PAYMENT_STATUSES
 } from "./session-payments.js";
 export type { SessionPaymentRelease } from "./session-payments.js";
+export {
+  applyPrintJobSettlement,
+  nextPrintJobEventSequence,
+  recordPrintFailureCompensation,
+  recordPrintJobEvent,
+  OPEN_PRINT_JOB_STATUSES
+} from "./print-jobs.js";
+export type {
+  ApplyPrintJobSettlementInput,
+  PrintJobLedgerType,
+  PrintJobSettlementOutcome
+} from "./print-jobs.js";
+export {
+  processingArtifactCleanupDueAt,
+  revokeSessionAccess,
+  scheduleSessionFilesForCleanup,
+  PROCESSING_ARTIFACT_SETTLE_MILLISECONDS
+} from "./session-cleanup.js";

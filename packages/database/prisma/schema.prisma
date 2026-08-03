@@ -34,6 +34,8 @@ model Kiosk {
   sessions            PrintSession[]
   auditEvents         AuditEvent[]
   sessionEvents       SessionEvent[]
+  printJobs           PrintJob[]
+  agentCommands       AgentCommand[]
 
   @@index([status])
   @@index([lastSeenAt])
@@ -84,6 +86,8 @@ model PrintSession {
   priceQuotes             PriceQuote[]           @relation("SessionQuotes")
   payments                Payment[]
   refunds                 Refund[]
+  printJobs               PrintJob[]
+  agentCommands           AgentCommand[]
   auditEvents             AuditEvent[]
   outboxEvents            OutboxEvent[]
   sessionEvents           SessionEvent[]
@@ -118,6 +122,7 @@ model PrintSettingRevision {
   createdAt          DateTime     @default(now()) @map("created_at")
   session            PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   quotes             PriceQuote[]
+  printJobs          PrintJob[]
 
   @@unique([sessionId, revision])
   @@index([sessionId, createdAt])
@@ -197,6 +202,7 @@ model PriceQuote {
   ruleSet                PricingRuleSet       @relation(fields: [ruleSetId], references: [id], onDelete: Restrict)
   activeForSession       PrintSession?        @relation("SessionActiveQuote")
   payments               Payment[]
+  printJobs              PrintJob[]
 
   @@unique([id, sessionId])
   @@index([sessionId, createdAt])
@@ -237,6 +243,7 @@ model Payment {
   attempts           PaymentAttempt[]
   webhookEvents      PaymentWebhookInbox[]
   refunds            Refund[]
+  printJobs          PrintJob[]
 
   @@unique([id, sessionId])
   @@unique([provider, providerIntentId])
@@ -307,6 +314,113 @@ model Refund {
   @@unique([paymentId, reason])
   @@index([status, createdAt])
   @@map("refunds")
+}
+
+/// One paid session's print job. The manifest, the counts and the money it was
+/// paid with are frozen at creation: triggers refuse to rewrite the snapshot,
+/// refuse a job without a capture applied to its own session, and refuse to
+/// move a settled job. There is at most one per session.
+model PrintJob {
+  id                   String               @id @db.Uuid
+  sessionId            String               @map("session_id") @db.Uuid
+  kioskId              String               @map("kiosk_id") @db.VarChar(64)
+  quoteId              String               @map("quote_id") @db.Uuid
+  paymentId            String               @map("payment_id") @db.Uuid
+  settingsRevision     Int                  @map("settings_revision")
+  settingsManifestHash String               @map("settings_manifest_hash") @db.VarChar(64)
+  jobManifest          Json                 @map("job_manifest")
+  jobManifestHash      String               @map("job_manifest_hash") @db.VarChar(64)
+  status               String               @db.VarChar(24)
+  /// Acceptance by a queue is not proof that paper came out. UNCONFIRMED is a
+  /// real answer and is never rounded up to a success.
+  resultConfidence     String               @default("UNKNOWN") @map("result_confidence") @db.VarChar(16)
+  failureCode          String?              @map("failure_code") @db.VarChar(48)
+  warningCode          String?              @map("warning_code") @db.VarChar(32)
+  /// Development only; a production configuration cannot set it.
+  simulatedOutcome     String?              @map("simulated_outcome") @db.VarChar(32)
+  copies               Int
+  printedSides         Int                  @map("printed_sides")
+  physicalSheets       Int                  @map("physical_sheets")
+  sheetsProduced       Int?                 @map("sheets_produced")
+  dispatchAttempts     Int                  @default(0) @map("dispatch_attempts")
+  availableAt          DateTime             @default(now()) @map("available_at")
+  deadlineAt           DateTime             @map("deadline_at")
+  cancelRequestedAt    DateTime?            @map("cancel_requested_at")
+  createdByActorType   String               @map("created_by_actor_type") @db.VarChar(32)
+  createdByActorId     String               @map("created_by_actor_id") @db.VarChar(100)
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @default(now()) @updatedAt @map("updated_at")
+  dispatchedAt         DateTime?            @map("dispatched_at")
+  startedAt            DateTime?            @map("started_at")
+  completedAt          DateTime?            @map("completed_at")
+  failedAt             DateTime?            @map("failed_at")
+  session              PrintSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kiosk                Kiosk                @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  payment              Payment              @relation(fields: [paymentId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  quote                PriceQuote           @relation(fields: [quoteId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  settings             PrintSettingRevision @relation(fields: [sessionId, settingsRevision], references: [sessionId, revision], onDelete: Restrict)
+  events               PrintJobEvent[]
+  commands             AgentCommand[]
+
+  @@unique([sessionId], map: "print_jobs_one_per_session_idx")
+  @@index([status, availableAt])
+  @@index([status, deadlineAt])
+  @@index([kioskId, createdAt])
+  @@map("print_jobs")
+}
+
+/// The operation ledger. Append-only: what the device said is evidence, and a
+/// retry writes the next entry rather than rewriting the previous one.
+model PrintJobEvent {
+  id          String   @id @db.Uuid
+  printJobId  String   @map("print_job_id") @db.Uuid
+  sequence    Int
+  type        String   @db.VarChar(32)
+  operationId String?  @map("operation_id") @db.Uuid
+  status      String   @db.VarChar(24)
+  confidence  String?  @db.VarChar(16)
+  failureCode String?  @map("failure_code") @db.VarChar(48)
+  warningCode String?  @map("warning_code") @db.VarChar(32)
+  detail      Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+  printJob    PrintJob @relation(fields: [printJobId], references: [id], onDelete: Cascade)
+
+  @@unique([printJobId, sequence])
+  @@index([printJobId, createdAt])
+  @@map("print_job_events")
+}
+
+/// Durable work for a kiosk agent. The kiosk opens no inbound port: it leases
+/// a command over its own outbound connection and reports the result back.
+/// The operation identifier is stable across redeliveries, so a device that
+/// already saw it can recognise it rather than printing twice.
+model AgentCommand {
+  id              String        @id @db.Uuid
+  kioskId         String        @map("kiosk_id") @db.VarChar(64)
+  sessionId       String?       @map("session_id") @db.Uuid
+  printJobId      String?       @map("print_job_id") @db.Uuid
+  operationId     String        @unique @map("operation_id") @db.Uuid
+  type            String        @db.VarChar(32)
+  status          String        @db.VarChar(24)
+  payload         Json
+  attempts        Int           @default(0)
+  availableAt     DateTime      @default(now()) @map("available_at")
+  claimToken      String?       @unique @map("claim_token") @db.Uuid
+  claimedAt       DateTime?     @map("claimed_at")
+  leaseExpiresAt  DateTime?     @map("lease_expires_at")
+  expiresAt       DateTime      @map("expires_at")
+  resultCode      String?       @map("result_code") @db.VarChar(48)
+  completedAt     DateTime?     @map("completed_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @default(now()) @updatedAt @map("updated_at")
+  kiosk           Kiosk         @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+  session         PrintSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  printJob        PrintJob?     @relation(fields: [printJobId], references: [id], onDelete: Cascade)
+
+  @@unique([printJobId], map: "agent_commands_one_per_print_job_idx")
+  @@index([kioskId, status, availableAt])
+  @@index([status, leaseExpiresAt])
+  @@map("agent_commands")
 }
 
 model SessionUploadGrant {

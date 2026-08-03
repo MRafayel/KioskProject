@@ -17,7 +17,7 @@ import {
 } from "@printing-kiosk/database";
 import { isSessionExpired, SessionDomainError, transitionSession } from "@printing-kiosk/domain";
 
-import { processingArtifactCleanupDueAt } from "../files/cleanup-policy.js";
+import { scheduleSessionFilesForCleanup } from "../files/cleanup-policy.js";
 import type { Clock, RandomSource } from "./crypto.js";
 import {
   deriveUploadSecrets,
@@ -29,7 +29,20 @@ import {
 import { ApiError } from "./errors.js";
 import { isRetryableTransactionError } from "./transactions.js";
 
-const TERMINAL_STATES: SessionState[] = ["COMPLETED", "CANCELED", "EXPIRED"];
+/**
+ * States a session never leaves. `FAILED` and `RECOVERY_REQUIRED` are here
+ * because Phase 8 ends the print workflow there: the documents are already
+ * scheduled for deletion and any money owed back is already recorded, so the
+ * kiosk must be free to serve the next customer rather than staying blocked
+ * until an operator arrives.
+ */
+const TERMINAL_STATES: SessionState[] = [
+  "COMPLETED",
+  "CANCELED",
+  "EXPIRED",
+  "FAILED",
+  "RECOVERY_REQUIRED"
+];
 const EXPIRABLE_STATES: SessionState[] = [
   "CREATED",
   "WAITING_FOR_UPLOAD",
@@ -588,37 +601,6 @@ export class SessionService {
 type TransactionClient = Prisma.TransactionClient;
 type IdempotencyClient = Pick<PrismaClient, "idempotencyRecord"> | TransactionClient;
 type IdempotencyRecord = NonNullable<Awaited<ReturnType<typeof findIdempotencyRecord>>>;
-
-async function scheduleSessionFilesForCleanup(
-  transaction: TransactionClient,
-  sessionId: string,
-  now: Date
-): Promise<void> {
-  const common = {
-    status: "DELETE_PENDING",
-    processingGeneration: { increment: 1 },
-    processingClaimToken: null,
-    processingLeaseExpiresAt: null,
-    processingEnqueuedAt: null,
-    deleteRequestedAt: now,
-    cleanupErrorCode: null,
-    updatedAt: now
-  } as const;
-
-  // Repeated terminal transitions must preserve an existing future barrier.
-  await transaction.uploadedFile.updateMany({
-    where: { sessionId, status: { in: ["DELETE_PENDING", "DELETING"] } },
-    data: common
-  });
-  await transaction.uploadedFile.updateMany({
-    where: { sessionId, status: { in: ["QUARANTINED", "READY"] } },
-    data: { ...common, cleanupDueAt: now }
-  });
-  await transaction.uploadedFile.updateMany({
-    where: { sessionId, status: "VALIDATING" },
-    data: { ...common, cleanupDueAt: processingArtifactCleanupDueAt(now) }
-  });
-}
 
 async function lockKiosk(transaction: TransactionClient, kioskId: string): Promise<void> {
   const rows = await transaction.$queryRaw<Array<{ id: string }>>`

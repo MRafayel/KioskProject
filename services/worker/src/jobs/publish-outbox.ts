@@ -311,8 +311,25 @@ function toSafeSessionEvent(input: {
       status: payload.status,
       failureCode: payload.failureCode
     };
+  } else if (input.type === "print.started") {
+    safePayload = {
+      sessionId,
+      state: payload.state,
+      version: payload.version,
+      printJobId: payload.printJobId
+    };
+  } else if (input.type === "print.failed" || input.type === "print.recovery_required") {
+    // No device string and no document identity: only the closed failure code
+    // the screen must show and how much the device was able to promise.
+    safePayload = {
+      sessionId,
+      state: payload.state,
+      version: payload.version,
+      printJobId: payload.printJobId,
+      failureCode: payload.failureCode,
+      resultConfidence: payload.resultConfidence
+    };
   } else if (
-    input.type === "print.started" ||
     input.type === "session.completed" ||
     input.type === "session.canceled" ||
     input.type === "session.expired"

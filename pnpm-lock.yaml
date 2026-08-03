@@ -193,6 +193,8 @@ importers:
         specifier: 3.23.2
         version: 3.23.2
 
+  packages/printer-adapters: {}
+
   services/api:
     dependencies:
       '@aws-sdk/client-s3':
@@ -290,6 +292,9 @@ importers:
       '@printing-kiosk/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@printing-kiosk/printer-adapters':
+        specifier: workspace:*
+        version: link:../../packages/printer-adapters
       fastify:
         specifier: 5.10.0
         version: 5.10.0

@@ -4,10 +4,7 @@ import { useKioskNavigate } from "../app/router.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import {
-  createKioskSession,
-  SessionRequestError
-} from "../features/session/sessionService.js";
+import { createKioskSession, SessionRequestError } from "../features/session/sessionService.js";
 
 export function WelcomeScreen() {
   const { locale, messages } = useLanguage();
@@ -70,9 +67,7 @@ export function WelcomeScreen() {
             {createSession.isPending ? messages.welcome.starting : messages.welcome.start}
             <span aria-hidden="true">→</span>
           </button>
-          {createSession.isError ? (
-            <p className="inline-error">{startError}</p>
-          ) : null}
+          {createSession.isError ? <p className="inline-error">{startError}</p> : null}
         </article>
       </section>
 

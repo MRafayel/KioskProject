@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: active implementation plan; Phases 0–7 implemented
+Status: active implementation plan; Phases 0–8 implemented
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
@@ -596,6 +596,11 @@ key, overwriting captured state with a late failure, and erasing original
 payment records.
 
 ### Phase 8 — virtual printing
+
+**Implementation:** complete for the pilot/prototype boundary. See
+`docs/PHASE_8_STATUS.md` for the print model, the refund policy for a job that
+fails after payment, migrations, acceptance evidence, and commercial follow-up
+requirements.
 
 **Objective:** exercise asynchronous printing and failures without hardware.
 

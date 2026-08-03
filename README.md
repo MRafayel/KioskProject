@@ -49,6 +49,9 @@ Read these documents before implementation:
   server-authoritative pricing, quote invalidation, and migration evidence.
 - docs/PHASE_7_STATUS.md — simulated payment, the payment ledger, signed
   provider callbacks, compensation records, and migration evidence.
+- docs/PHASE_8_STATUS.md — the immutable print job, the durable kiosk command
+  channel, the simulated printer, the refund policy for a failed print, and
+  migration evidence.
 - SECURITY.md — handling rules for secrets and private customer documents.
 
 ## Development commands
@@ -79,7 +82,7 @@ pnpm typecheck
 pnpm test
 pnpm test:e2e
 pnpm infra:up
-pnpm db:verify-phase7-upgrade
+pnpm db:verify-phase8-upgrade
 pnpm db:migrate
 pnpm db:seed
 pnpm dev

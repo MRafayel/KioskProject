@@ -119,6 +119,24 @@ const environmentSchema = z
     MAX_PRINTED_SIDES: z.coerce.number().int().min(1).max(20_000).default(1_000),
     QUOTE_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
     PRINTER_ADAPTER: z.literal("mock").default("mock"),
+    // Where the simulated printer writes its output. It is a private local
+    // directory, never a web root, and it holds one folder per operation.
+    PRINTER_MOCK_OUTPUT_DIR: z.string().min(1).default("var/mock-printer/output"),
+    // The agent's local spool. A print-ready artifact is written here under a
+    // random name, verified, printed, and deleted.
+    PRINTER_SPOOL_DIR: z.string().min(1).default(".tmp/kiosk-agent-spool"),
+    // How long a whole print job may take before it is settled without the
+    // device. It never claims an outcome: a job past its deadline that was
+    // already handed over becomes RECOVERY_REQUIRED.
+    PRINT_JOB_TIMEOUT_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
+    PRINT_COMMAND_LEASE_SECONDS: z.coerce.number().int().min(15).max(900).default(120),
+    // A lease may be handed back at most this many times. Every redelivery
+    // makes the agent ask the device what it already did before submitting.
+    PRINT_COMMAND_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
+    PRINT_DISPATCH_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+    // The deterministic device scenarios. Refused outright in production, so a
+    // production build cannot be told to fail a print on request.
+    PRINT_TEST_OUTCOMES_ENABLED: stringBooleanSchema.default(false),
     PAYMENT_PROVIDER: z.literal("mock").default("mock"),
     PAYMENT_WEBHOOK_SECRET: z
       .string()
@@ -257,6 +275,27 @@ const environmentSchema = z
       });
     }
 
+    // A lease that outlives the job it belongs to could hand work to a device
+    // after the control plane has already settled the job without it.
+    if (environment.PRINT_COMMAND_LEASE_SECONDS >= environment.PRINT_JOB_TIMEOUT_SECONDS) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINT_COMMAND_LEASE_SECONDS"],
+        message: "PRINT_COMMAND_LEASE_SECONDS must be shorter than PRINT_JOB_TIMEOUT_SECONDS"
+      });
+    }
+
+    // Printing happens after payment, inside a session that no longer refreshes
+    // its idle window. A job that could outlive its session would be settled by
+    // expiry rather than by the device.
+    if (environment.PRINT_JOB_TIMEOUT_SECONDS > environment.SESSION_ABSOLUTE_TTL_MINUTES * 60) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINT_JOB_TIMEOUT_SECONDS"],
+        message: "PRINT_JOB_TIMEOUT_SECONDS must not outlive the absolute session window"
+      });
+    }
+
     if (environment.S3_KMS_KEY_ID && environment.S3_SERVER_SIDE_ENCRYPTION !== "aws:kms") {
       context.addIssue({
         code: "custom",
@@ -294,6 +333,16 @@ const environmentSchema = z
         code: "custom",
         path: ["PAYMENT_TEST_OUTCOMES_ENABLED"],
         message: "PAYMENT_TEST_OUTCOMES_ENABLED must be false in production"
+      });
+    }
+
+    // A route that dictates print outcomes is a way to fail a paid job on
+    // request. It does not exist in production either.
+    if (environment.PRINT_TEST_OUTCOMES_ENABLED) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINT_TEST_OUTCOMES_ENABLED"],
+        message: "PRINT_TEST_OUTCOMES_ENABLED must be false in production"
       });
     }
 

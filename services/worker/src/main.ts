@@ -5,6 +5,7 @@ import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
 import { createDatabaseClient } from "@printing-kiosk/database";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { PrintDispatcher } from "./jobs/dispatch-print.js";
 import { PaymentReconciler } from "./jobs/reconcile-payments.js";
 import { OutboxPublisher } from "./jobs/publish-outbox.js";
 import { DocumentProcessingCoordinator } from "./jobs/process-document.js";
@@ -72,10 +73,20 @@ const paymentReconciler = new PaymentReconciler({
   logger
 });
 
+const printDispatcher = new PrintDispatcher({
+  database,
+  redisUrl: environment.REDIS_URL,
+  logger,
+  leaseMilliseconds: environment.PRINT_COMMAND_LEASE_SECONDS * 1_000,
+  maxCommandAttempts: environment.PRINT_COMMAND_MAX_ATTEMPTS,
+  maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS
+});
+
 logger.info({ productScope: PRODUCT_SCOPE }, "worker started");
 publisher.start();
 documentProcessing.start();
 paymentReconciler.start();
+printDispatcher.start();
 
 const shutdown = async (signal: string) => {
   logger.info({ signal }, "worker stopped");
@@ -83,7 +94,8 @@ const shutdown = async (signal: string) => {
     publisher.close(),
     documentProcessing.close(),
     processorScratch.close(),
-    paymentReconciler.close()
+    paymentReconciler.close(),
+    printDispatcher.close()
   ]);
   await database.$disconnect();
   process.exit(0);

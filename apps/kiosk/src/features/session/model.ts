@@ -2,7 +2,9 @@ import type {
   PaymentSnapshot,
   PriceQuote,
   PrintCapabilitiesResponse,
+  PrintJobSnapshot,
   PrintSettingsSnapshot,
+  SimulatedPrintOutcome,
   UploadedFileKind,
   UploadedFileRejectionCode,
   UploadedFileStatus
@@ -15,7 +17,26 @@ import {
 } from "@printing-kiosk/domain";
 
 export type Orientation = "PORTRAIT" | "LANDSCAPE";
-export type PrototypeOutcome = "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR";
+/**
+ * Which deterministic scenario the touchscreen asks the simulated hardware
+ * for. It exists because the pilot has no card terminal and no printer; a
+ * deployment that has not enabled the scenarios prints and charges normally
+ * whatever is selected here.
+ */
+export type PrototypeOutcome =
+  "SUCCESS" | "PAYMENT_DECLINED" | "PRINTER_ERROR" | "PRINTER_UNCONFIRMED";
+
+/** The device behaviour each touchscreen scenario stands in for. */
+export const simulatedPrintOutcomeFor: Readonly<
+  Record<PrototypeOutcome, SimulatedPrintOutcome | undefined>
+> = {
+  SUCCESS: undefined,
+  PAYMENT_DECLINED: undefined,
+  // A definite failure with nothing produced: the capture is owed back.
+  PRINTER_ERROR: "OUT_OF_PAPER",
+  // Output was written but never acknowledged, so nobody may claim to know.
+  PRINTER_UNCONFIRMED: "UNKNOWN_AFTER_SUBMIT"
+};
 
 export interface PrototypeSession {
   id: string;
@@ -89,6 +110,18 @@ export interface PaymentState {
   errorCode: string | null;
 }
 
+/**
+ * What the control plane last said about the print itself.
+ *
+ * The kiosk never decides that a job printed. `job` is the stored record the
+ * control plane returned, and a job it could not confirm stays unconfirmed on
+ * screen rather than becoming a success or a failure.
+ */
+export interface PrintState {
+  job: PrintJobSnapshot | null;
+  errorCode: string | null;
+}
+
 export interface PrototypeState {
   session: PrototypeSession | null;
   files: PrototypeFile[];
@@ -96,6 +129,7 @@ export interface PrototypeState {
   capabilities: PrintCapabilitiesResponse | null;
   pricing: PricingState;
   payment: PaymentState;
+  print: PrintState;
   outcome: PrototypeOutcome;
 }
 
@@ -115,6 +149,8 @@ export type PrototypeAction =
   | { type: "PAYMENT_OBSERVED"; payment: PaymentSnapshot }
   | { type: "PAYMENT_FAILED"; errorCode: string }
   | { type: "PAYMENT_CLEARED" }
+  | { type: "PRINT_OBSERVED"; printJob: PrintJobSnapshot }
+  | { type: "PRINT_FAILED"; errorCode: string }
   | { type: "OUTCOME_CHANGED"; outcome: PrototypeOutcome }
   | { type: "RESET" };
 
@@ -136,6 +172,8 @@ export const idlePricingState: PricingState = {
 
 export const idlePaymentState: PaymentState = { payment: null, attempt: 1, errorCode: null };
 
+export const idlePrintState: PrintState = { job: null, errorCode: null };
+
 export const initialPrototypeState: PrototypeState = {
   session: null,
   files: [],
@@ -143,6 +181,7 @@ export const initialPrototypeState: PrototypeState = {
   capabilities: null,
   pricing: idlePricingState,
   payment: idlePaymentState,
+  print: idlePrintState,
   outcome: "SUCCESS"
 };
 
@@ -232,6 +271,10 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
       return { ...state, payment: { ...state.payment, errorCode: action.errorCode } };
     case "PAYMENT_CLEARED":
       return { ...state, payment: nextPaymentAttempt(state.payment) };
+    case "PRINT_OBSERVED":
+      return { ...state, print: { job: action.printJob, errorCode: null } };
+    case "PRINT_FAILED":
+      return { ...state, print: { ...state.print, errorCode: action.errorCode } };
     case "OUTCOME_CHANGED":
       return { ...state, outcome: action.outcome };
     case "RESET":

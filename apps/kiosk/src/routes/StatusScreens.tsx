@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { PaymentSnapshot } from "@printing-kiosk/contracts";
+import type { PaymentSnapshot, PrintJobSnapshot } from "@printing-kiosk/contracts";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
@@ -9,7 +9,8 @@ import {
   calculatePrintSummary,
   fileExtension,
   formatMinorAmount,
-  isReadyFile
+  isReadyFile,
+  simulatedPrintOutcomeFor
 } from "../features/session/model.js";
 import {
   confirmKioskPayment,
@@ -19,12 +20,21 @@ import {
   readKioskPayment,
   requestSimulatedOutcome
 } from "../features/session/paymentService.js";
+import {
+  isPrintJobSettled,
+  isPrintJobSuccessful,
+  isPrintRecoveryRequired,
+  PrintRequestError,
+  readKioskPrintJob,
+  startKioskPrintJob
+} from "../features/session/printService.js";
 import { closeKioskSession } from "../features/session/sessionService.js";
 
-const PROTOTYPE_STEP_DELAY_MS = 1_200;
 const PAYMENT_POLL_INTERVAL_MS = 1_500;
+const PRINT_POLL_INTERVAL_MS = 1_500;
 /** Consecutive unreadable statuses before the screen stops waiting. */
 const PAYMENT_READ_FAILURE_LIMIT = 5;
+const PRINT_READ_FAILURE_LIMIT = 5;
 
 /**
  * Watches one payment the control plane already created.
@@ -129,21 +139,97 @@ export function PaymentScreen() {
   );
 }
 
+/**
+ * Watches one print job the control plane owns.
+ *
+ * Nothing here prints, and nothing here decides an outcome. The screen asks the
+ * control plane to start the job that the capture already paid for, then reads
+ * it back until it settles. Only a confirmed completion reaches the receipt;
+ * anything the device could not confirm goes to the recovery screen instead of
+ * being called a success or a failure.
+ */
 export function PrintingScreen() {
   const { messages } = useLanguage();
-  const { state } = usePrototypeSession();
+  const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
+  const sessionId = state.session?.id ?? null;
+  const captured = state.payment.payment;
+  const paymentId = captured && isPaymentSuccessful(captured) ? captured.id : null;
+  const requestedScenario = simulatedPrintOutcomeFor[state.outcome];
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void navigate(state.outcome === "PRINTER_ERROR" ? "/failure/printer" : "/complete", {
-        replace: true
-      });
-    }, PROTOTYPE_STEP_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [navigate, state.outcome]);
+    if (!sessionId || !paymentId) return;
+    let active = true;
+    let timer: number | undefined;
+    let readFailures = 0;
+
+    const leave = (path: string) => {
+      if (!active) return;
+      active = false;
+      void navigate(path, { replace: true });
+    };
+
+    const observe = (printJob: PrintJobSnapshot): boolean => {
+      if (!active) return true;
+      dispatch({ type: "PRINT_OBSERVED", printJob });
+      if (!isPrintJobSettled(printJob)) return false;
+      leave(isPrintJobSuccessful(printJob) ? "/complete" : "/failure/printer");
+      return true;
+    };
+
+    const poll = (printJobId: string) => {
+      timer = window.setTimeout(() => {
+        void (async () => {
+          if (!active) return;
+          try {
+            const printJob = await readKioskPrintJob(printJobId);
+            readFailures = 0;
+            if (!observe(printJob)) poll(printJobId);
+          } catch (error) {
+            if (!active) return;
+            readFailures += 1;
+            // A job nobody can read is not a job that failed. The screen keeps
+            // asking, and gives up only after several refusals so a customer is
+            // never left watching a spinner forever.
+            if (readFailures < PRINT_READ_FAILURE_LIMIT) {
+              poll(printJobId);
+              return;
+            }
+            dispatch({
+              type: "PRINT_FAILED",
+              errorCode: error instanceof PrintRequestError ? error.code : "PRINT_READ_FAILED"
+            });
+            leave("/failure/printer");
+          }
+        })();
+      }, PRINT_POLL_INTERVAL_MS);
+    };
+
+    void (async () => {
+      try {
+        const started = await startKioskPrintJob(sessionId, paymentId, requestedScenario);
+        if (observe(started)) return;
+        poll(started.id);
+      } catch (error) {
+        if (!active) return;
+        dispatch({
+          type: "PRINT_FAILED",
+          errorCode: error instanceof PrintRequestError ? error.code : "PRINT_START_FAILED"
+        });
+        leave("/failure/printer");
+      }
+    })();
+
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [dispatch, navigate, paymentId, requestedScenario, sessionId]);
 
   if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
+  // Printing is only ever watched, never invented: without a capture the
+  // control plane applied to this session, this screen has nothing to show.
+  if (!paymentId) return <KioskRedirect to="/checkout" />;
 
   return (
     <TerminalProgress
@@ -157,7 +243,7 @@ export function PrintingScreen() {
 }
 
 export function FailureScreen({ failureType }: { failureType: "payment" | "printer" }) {
-  const { messages } = useLanguage();
+  const { messages, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
   const paymentFailure = failureType === "payment";
@@ -169,6 +255,11 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
     paymentFailure &&
     state.payment.payment?.status === "CAPTURED" &&
     !state.payment.payment.appliedToSession;
+  // A print the device could not confirm is neither a success nor a failure.
+  // The customer is told exactly that, and no refund is promised on screen
+  // because whether paper emerged is an operator's decision.
+  const printRecovery =
+    !paymentFailure && state.print.job !== null && isPrintRecoveryRequired(state.print.job);
 
   if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
 
@@ -185,7 +276,9 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
             : compensatedCapture
               ? messages.status.paymentCompensatedTitle
               : messages.status.paymentDeclinedTitle
-          : messages.status.printerErrorTitle}
+          : printRecovery
+            ? messages.status.printerRecoveryTitle
+            : messages.status.printerErrorTitle}
       </h1>
       <p>
         {paymentFailure
@@ -194,7 +287,9 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
             : compensatedCapture
               ? messages.status.paymentCompensatedDescription
               : messages.status.paymentDeclinedDescription
-          : messages.status.printerErrorDescription}
+          : printRecovery
+            ? messages.status.printerRecoveryDescription
+            : messages.status.printerErrorDescription}
       </p>
       <div className="failure-detail" role="status">
         <strong>
@@ -204,16 +299,24 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
               : compensatedCapture
                 ? messages.status.paymentCompensatedCode
                 : messages.status.paymentDeclinedCode
-            : messages.status.printerErrorCode}
+            : printRecovery
+              ? messages.status.printerRecoveryCode
+              : messages.status.printerErrorCode}
         </strong>
-        <span>{messages.status.failureDetail}</span>
+        <span>
+          {paymentFailure
+            ? messages.status.failureDetail
+            : printRecovery
+              ? messages.status.printerRecoveryDetail
+              : messages.status.printerRefundNotice}
+        </span>
       </div>
       <div className="button-row button-row--center">
-        {!pendingPayment ? (
+        {paymentFailure && !pendingPayment ? (
           <button
             className="button button--secondary"
             type="button"
-            onClick={() => void navigate(paymentFailure ? "/checkout" : "/configure")}
+            onClick={() => void navigate("/checkout")}
           >
             {messages.status.reviewSettings}
           </button>
@@ -222,18 +325,27 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
           className="button button--primary"
           type="button"
           onClick={() => {
+            if (!paymentFailure) {
+              // A settled print job is final: the session is already closed and
+              // its documents are already scheduled for deletion. There is
+              // nothing to retry here, only a screen to hand to the next
+              // customer.
+              dispatch({ type: "RESET" });
+              resetLocale();
+              void navigate("/", { replace: true });
+              return;
+            }
+
             dispatch({ type: "OUTCOME_CHANGED", outcome: "SUCCESS" });
             // A declined payment is settled and final. Retrying means asking
             // the control plane for a new one. A transient confirm/read failure
             // keeps its pending payment identifier and resumes watching it,
             // so the retry cannot collide with PAYMENT_IN_PROGRESS.
-            if (paymentFailure && !pendingPayment) dispatch({ type: "PAYMENT_CLEARED" });
-            void navigate(
-              paymentFailure ? (pendingPayment ? "/payment" : "/checkout") : "/printing"
-            );
+            if (!pendingPayment) dispatch({ type: "PAYMENT_CLEARED" });
+            void navigate(pendingPayment ? "/payment" : "/checkout");
           }}
         >
-          {paymentFailure ? messages.status.retryPayment : messages.status.retryPrinting}
+          {paymentFailure ? messages.status.retryPayment : messages.status.finish}
         </button>
       </div>
     </div>
@@ -251,7 +363,10 @@ export function CompleteScreen() {
 
   const quote = state.pricing.quote;
   const localSummary = calculatePrintSummary(state.files, state.settings);
-  const collectedSheets = quote?.physicalSheets ?? localSummary.totalSheets;
+  // What the device says it produced, then what was paid for, then the local
+  // arithmetic. The screen never counts sheets the printer did not report.
+  const collectedSheets =
+    state.print.job?.sheetsProduced ?? quote?.physicalSheets ?? localSummary.totalSheets;
   // What was actually captured, when a capture happened. The quote is the
   // fallback for a receipt shown before a payment exists.
   const captured = state.payment.payment;

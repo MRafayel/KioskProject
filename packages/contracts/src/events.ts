@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { paymentFailureCodeSchema, paymentStatusSchema } from "./payments.js";
+import { printFailureCodeSchema, printResultConfidenceSchema } from "./print-jobs.js";
 import { quoteInvalidationReasonSchema } from "./quotes.js";
 import { sessionStateSchema } from "./sessions.js";
 import { readyUploadedFileSnapshotSchema, uploadedFileSnapshotSchema } from "./uploads.js";
@@ -167,7 +168,31 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
   }),
   eventBaseSchema.extend({
     type: z.literal("print.started"),
+    payload: statePayloadSchema.extend({ printJobId: z.string().uuid() }).strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("print.failed"),
+    // A definite failure: nothing usable came out, and the money is owed back.
+    // No device string, no filename — only what the screen must say.
     payload: statePayloadSchema
+      .extend({
+        printJobId: z.string().uuid(),
+        failureCode: printFailureCodeSchema,
+        resultConfidence: printResultConfidenceSchema
+      })
+      .strict()
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("print.recovery_required"),
+    // The device could not say whether paper emerged. Nobody guesses here:
+    // the kiosk shows a recovery screen and an operator settles it.
+    payload: statePayloadSchema
+      .extend({
+        printJobId: z.string().uuid(),
+        failureCode: printFailureCodeSchema,
+        resultConfidence: printResultConfidenceSchema
+      })
+      .strict()
   }),
   eventBaseSchema.extend({
     type: z.literal("session.completed"),

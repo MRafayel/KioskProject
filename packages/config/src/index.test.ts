@@ -200,6 +200,47 @@ describe("loadEnvironment", () => {
     ).toThrow();
   });
 
+  it("refuses a print command lease that could outlive the job it belongs to", () => {
+    // A lease that survives its job could hand work to a device after the
+    // control plane has already settled the job without it.
+    expect(() =>
+      loadEnvironment({
+        PRINT_JOB_TIMEOUT_SECONDS: "120",
+        PRINT_COMMAND_LEASE_SECONDS: "120"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        PRINT_JOB_TIMEOUT_SECONDS: "120",
+        PRINT_COMMAND_LEASE_SECONDS: "119"
+      }).PRINT_COMMAND_LEASE_SECONDS
+    ).toBe(119);
+  });
+
+  it("refuses a print job that could outlive its own session", () => {
+    expect(() =>
+      loadEnvironment({
+        SESSION_IDLE_TTL_MINUTES: "5",
+        SESSION_ABSOLUTE_TTL_MINUTES: "5",
+        QUOTE_TTL_SECONDS: "300",
+        PRINT_JOB_TIMEOUT_SECONDS: "600",
+        PRINT_COMMAND_LEASE_SECONDS: "60"
+      })
+    ).toThrow();
+  });
+
+  it("refuses the deterministic device scenarios in production", () => {
+    // A route that dictates print outcomes is a way to fail a paid job on
+    // request. A production configuration cannot express one that offers it.
+    expect(() =>
+      loadEnvironment({ ...secureProductionEnvironment, PRINT_TEST_OUTCOMES_ENABLED: "true" })
+    ).toThrow();
+    expect(
+      loadEnvironment({ ...secureProductionEnvironment, PRINT_TEST_OUTCOMES_ENABLED: "false" })
+        .PRINT_TEST_OUTCOMES_ENABLED
+    ).toBe(false);
+  });
+
   it("requires the processing lease to outlive the processor timeout", () => {
     expect(() =>
       loadEnvironment({

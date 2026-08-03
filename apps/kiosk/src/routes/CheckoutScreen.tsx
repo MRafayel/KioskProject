@@ -12,7 +12,12 @@ import {
 } from "../features/session/model.js";
 import { PaymentRequestError, startKioskPayment } from "../features/session/paymentService.js";
 
-const outcomes: PrototypeOutcome[] = ["SUCCESS", "PAYMENT_DECLINED", "PRINTER_ERROR"];
+const outcomes: PrototypeOutcome[] = [
+  "SUCCESS",
+  "PAYMENT_DECLINED",
+  "PRINTER_ERROR",
+  "PRINTER_UNCONFIRMED"
+];
 
 /**
  * A refusal that means the price on screen is no longer payable. The customer
@@ -199,9 +204,11 @@ function outcomeLabel(
     outcomeSuccess: string;
     outcomePaymentDeclined: string;
     outcomePrinterError: string;
+    outcomePrinterUnconfirmed: string;
   }
 ): string {
   if (outcome === "PAYMENT_DECLINED") return messages.outcomePaymentDeclined;
   if (outcome === "PRINTER_ERROR") return messages.outcomePrinterError;
+  if (outcome === "PRINTER_UNCONFIRMED") return messages.outcomePrinterUnconfirmed;
   return messages.outcomeSuccess;
 }

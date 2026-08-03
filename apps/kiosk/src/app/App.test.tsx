@@ -8,6 +8,7 @@ import "@testing-library/jest-dom/vitest";
 
 import type {
   PaymentSnapshot,
+  PrintJobSnapshot,
   SessionEvent,
   UpdatePrintSettingsBody
 } from "@printing-kiosk/contracts";
@@ -112,6 +113,25 @@ const paymentFixture = {
   capturedAt: null
 };
 
+const printJobFixture: PrintJobSnapshot = {
+  id: "01900000-0000-7000-8000-0000000000cc",
+  sessionId: testSession.id,
+  quoteId: quoteFixture.id,
+  paymentId: paymentFixture.id,
+  settingsRevision: 1,
+  status: "QUEUED",
+  resultConfidence: "UNKNOWN",
+  failureCode: null,
+  warningCode: null,
+  copies: 1,
+  printedSides: 3,
+  physicalSheets: 3,
+  sheetsProduced: null,
+  createdAt: "2030-01-01T00:01:00.000Z",
+  deadlineAt: "2030-01-01T00:06:00.000Z",
+  completedAt: null
+};
+
 const capabilitiesFixture = {
   capabilityVersion: 2,
   paperSizes: ["A4"],
@@ -199,6 +219,9 @@ let paymentRequests: Array<{ body: string; idempotencyKey: string }>;
 let simulatedOutcomes: string[];
 let paymentSnapshot: PaymentSnapshot;
 let confirmFailuresRemaining: number;
+let printJobRequests: Array<{ body: string; idempotencyKey: string }>;
+let printJobSnapshot: PrintJobSnapshot;
+let settledPrintJob: PrintJobSnapshot;
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -213,6 +236,15 @@ beforeEach(() => {
   simulatedOutcomes = [];
   paymentSnapshot = { ...paymentFixture };
   confirmFailuresRemaining = 0;
+  printJobRequests = [];
+  printJobSnapshot = { ...printJobFixture };
+  settledPrintJob = {
+    ...printJobFixture,
+    status: "COMPLETED",
+    resultConfidence: "CONFIRMED",
+    sheetsProduced: printJobFixture.physicalSheets,
+    completedAt: "2030-01-01T00:02:00.000Z"
+  };
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -321,6 +353,52 @@ beforeEach(() => {
       if (url.includes("/v1/payments/") && (init?.method ?? "GET") === "GET") {
         return Promise.resolve(
           new Response(JSON.stringify({ payment: paymentSnapshot }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      // Printing is owned by the control plane too. The kiosk asks it to print
+      // what a capture already paid for and then only reads back the status.
+      if (url.endsWith("/print-jobs") && init?.method === "POST") {
+        const requested = JSON.parse(readRequestBody(init.body) || "{}") as {
+          simulatedOutcome?: string;
+        };
+        printJobRequests.push({
+          body: readRequestBody(init.body),
+          idempotencyKey: new Headers(init.headers).get("idempotency-key") ?? ""
+        });
+        settledPrintJob =
+          requested.simulatedOutcome === "OUT_OF_PAPER"
+            ? {
+                ...printJobFixture,
+                status: "FAILED",
+                resultConfidence: "CONFIRMED",
+                failureCode: "OUT_OF_PAPER",
+                sheetsProduced: 0
+              }
+            : requested.simulatedOutcome === "UNKNOWN_AFTER_SUBMIT"
+              ? {
+                  ...printJobFixture,
+                  status: "RECOVERY_REQUIRED",
+                  resultConfidence: "UNCONFIRMED",
+                  failureCode: "SUBMISSION_UNCONFIRMED",
+                  sheetsProduced: null
+                }
+              : settledPrintJob;
+        return Promise.resolve(
+          new Response(JSON.stringify({ printJob: printJobSnapshot }), {
+            status: 201,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      if (url.includes("/v1/print-jobs/") && (init?.method ?? "GET") === "GET") {
+        printJobSnapshot = settledPrintJob;
+        return Promise.resolve(
+          new Response(JSON.stringify({ printJob: printJobSnapshot }), {
             status: 200,
             headers: { "content-type": "application/json" }
           })
@@ -772,16 +850,115 @@ describe("kiosk prototype journey", () => {
     });
     expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
 
+    // Printing is asked for by naming the capture. The browser never describes
+    // what to print, and the deterministic device scenario is the only extra.
+    expect(printJobRequests).toHaveLength(1);
+    expect(JSON.parse(printJobRequests[0]?.body ?? "{}")).toEqual({
+      paymentId: paymentSnapshot.id,
+      simulatedOutcome: "OUT_OF_PAPER"
+    });
+
+    // Only the status the control plane reports moves the screen on.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_200);
+      await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(screen.getByRole("heading", { name: "The printer needs attention" })).toBeVisible();
+    expect(screen.getByText("NOTHING PRINTED")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry printing" }));
+    // A settled print job is final. There is nothing to retry, only a screen
+    // to hand back to the next customer.
+    expect(screen.queryByRole("button", { name: "Retry printing" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Finish and delete files" }));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_200);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // The welcome screen returns in the kiosk's own language, ready for
+    // somebody who did not choose English.
+    expect(
+      screen.getByRole("heading", { name: "Տպեք հեռախոսից՝ ընդամենը մի քանի քայլով։" })
+    ).toBeVisible();
+  });
+
+  it("prints a paid session and shows the sheets the device reported", async () => {
+    vi.useFakeTimers();
+    renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+    // The receipt counts the sheets the device reported, never sheets this
+    // screen worked out for itself.
+    expect(screen.getByText("Collect all 3 sheets from the output area below.")).toBeVisible();
+  });
+
+  it("asks for an operator when the device could not confirm the print", async () => {
+    vi.useFakeTimers();
+    renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        outcome: "PRINTER_UNCONFIRMED",
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    // Neither a success nor a failure: the screen says exactly that, and
+    // promises no refund the operator has not decided on.
+    expect(
+      screen.getByRole("heading", { name: "The printer could not confirm your job" })
+    ).toBeVisible();
+    expect(screen.getByText("RESULT UNCONFIRMED")).toBeVisible();
   });
 
   it("shows the recovery screen when the control plane declines the payment", async () => {
