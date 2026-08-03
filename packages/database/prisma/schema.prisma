@@ -214,6 +214,10 @@ model Payment {
   provider           String                @db.VarChar(24)
   providerIntentId   String                @map("provider_intent_id") @db.VarChar(120)
   status             String                @db.VarChar(24)
+  /// True only when this capture moved the session to PAID. A late capture is
+  /// still CAPTURED in the accounting ledger, but remains false because it is
+  /// owed back rather than fulfilled.
+  appliedToSession   Boolean               @default(false) @map("applied_to_session")
   amountMinor        Int                   @map("amount_minor")
   currency           String                @db.Char(3)
   currencyExponent   Int                   @map("currency_exponent")

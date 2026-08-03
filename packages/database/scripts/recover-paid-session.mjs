@@ -55,7 +55,8 @@ try {
       `SELECT s."id", s."public_id", s."state_version", s."updated_at",
               p."id" AS "payment_id", p."provider"
          FROM "print_sessions" s
-         JOIN "payments" p ON p."session_id" = s."id" AND p."status" = 'CAPTURED'
+         JOIN "payments" p ON p."session_id" = s."id"
+          AND p."status" = 'CAPTURED' AND p."applied_to_session" = true
         WHERE s."state" = 'PAID'
         ORDER BY s."updated_at" DESC`
     );
@@ -97,7 +98,8 @@ try {
       const paymentResult = await client.query(
         `SELECT "id", "provider", "status"
          FROM "payments"
-        WHERE "session_id" = $1::uuid AND "status" = 'CAPTURED'
+        WHERE "session_id" = $1::uuid
+          AND "status" = 'CAPTURED' AND "applied_to_session" = true
         FOR UPDATE`,
         [sessionId]
       );

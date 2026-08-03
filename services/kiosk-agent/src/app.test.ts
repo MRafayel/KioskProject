@@ -491,6 +491,18 @@ describe("kiosk agent settings and pricing facade", () => {
       url: `/v1/sessions/${sessionId}/payments`,
       payload: { quoteId }
     });
+    const proposedAmount = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/payments`,
+      headers: { "idempotency-key": "payment-key-000002" },
+      payload: { quoteId, provider: "MOCK", amountMinor: 1 }
+    });
+    const oversizedKey = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/payments`,
+      headers: { "idempotency-key": "k".repeat(129) },
+      payload: { quoteId, provider: "MOCK" }
+    });
 
     expect(started.statusCode).toBe(201);
     expect(upstream.requests[0]?.url).toBe(
@@ -501,6 +513,8 @@ describe("kiosk agent settings and pricing facade", () => {
     expect(headers.get("idempotency-key")).toBe("payment-key-000001");
     expect(upstream.requests[0]?.init?.body).toBe(JSON.stringify({ quoteId, provider: "MOCK" }));
     expect(unkeyed.statusCode).toBe(400);
+    expect(proposedAmount.statusCode).toBe(400);
+    expect(oversizedKey.statusCode).toBe(400);
     expect(upstream.requests).toHaveLength(1);
   });
 

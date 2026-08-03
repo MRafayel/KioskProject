@@ -167,6 +167,12 @@ export interface MessageCatalog {
     printingDescription: string;
     printingDetail: string;
     actionNeeded: string;
+    paymentStatusUnavailableTitle: string;
+    paymentStatusUnavailableDescription: string;
+    paymentStatusUnavailableCode: string;
+    paymentCompensatedTitle: string;
+    paymentCompensatedDescription: string;
+    paymentCompensatedCode: string;
     paymentDeclinedTitle: string;
     printerErrorTitle: string;
     paymentDeclinedDescription: string;
@@ -395,6 +401,14 @@ const english: MessageCatalog = {
     printingDescription: "Your payment was approved. Please wait for every sheet.",
     printingDetail: "Preparing · Sending · Printing",
     actionNeeded: "Action needed",
+    paymentStatusUnavailableTitle: "Payment status is temporarily unavailable",
+    paymentStatusUnavailableDescription:
+      "The payment may still be in progress. Retry the status check without starting another payment.",
+    paymentStatusUnavailableCode: "PAYMENT STATUS UNKNOWN",
+    paymentCompensatedTitle: "Payment arrived too late",
+    paymentCompensatedDescription:
+      "This payment cannot be used for printing and has been recorded for compensation. Ask an operator for help if a real charge appears.",
+    paymentCompensatedCode: "COMPENSATION REQUIRED",
     paymentDeclinedTitle: "Payment was declined",
     printerErrorTitle: "The printer needs attention",
     paymentDeclinedDescription:
@@ -614,6 +628,14 @@ const russian: MessageCatalog = {
     printingDescription: "Оплата подтверждена. Дождитесь выхода всех листов.",
     printingDetail: "Подготовка · Отправка · Печать",
     actionNeeded: "Требуется действие",
+    paymentStatusUnavailableTitle: "Статус платежа временно недоступен",
+    paymentStatusUnavailableDescription:
+      "Платёж всё ещё может обрабатываться. Повторите проверку статуса, не начиная новый платёж.",
+    paymentStatusUnavailableCode: "СТАТУС ПЛАТЕЖА НЕИЗВЕСТЕН",
+    paymentCompensatedTitle: "Платёж поступил слишком поздно",
+    paymentCompensatedDescription:
+      "Этот платёж нельзя использовать для печати; он зарегистрирован для возврата. Если появилось реальное списание, обратитесь к оператору.",
+    paymentCompensatedCode: "ТРЕБУЕТСЯ ВОЗВРАТ",
     paymentDeclinedTitle: "Платёж отклонён",
     printerErrorTitle: "Принтер требует внимания",
     paymentDeclinedDescription:
@@ -831,6 +853,14 @@ const armenian: MessageCatalog = {
     printingDescription: "Վճարումը հաստատվել է։ Սպասեք, մինչև բոլոր թերթերը դուրս գան։",
     printingDetail: "Նախապատրաստում · Ուղարկում · Տպում",
     actionNeeded: "Ձեր միջամտությունն է պետք",
+    paymentStatusUnavailableTitle: "Վճարման կարգավիճակը ժամանակավորապես հասանելի չէ",
+    paymentStatusUnavailableDescription:
+      "Վճարումը կարող է դեռ ընթացքի մեջ լինել։ Կրկին ստուգեք կարգավիճակը՝ առանց նոր վճարում սկսելու։",
+    paymentStatusUnavailableCode: "ՎՃԱՐՄԱՆ ԿԱՐԳԱՎԻՃԱԿՆ ԱՆՀԱՅՏ Է",
+    paymentCompensatedTitle: "Վճարումը չափազանց ուշ է ստացվել",
+    paymentCompensatedDescription:
+      "Այս վճարումը չի կարող օգտագործվել տպման համար և գրանցվել է վերադարձի համար։ Իրական գանձում տեսնելու դեպքում դիմեք սպասարկողին։",
+    paymentCompensatedCode: "ԳՈՒՄԱՐԸ ՊԵՏՔ Է ՎԵՐԱԴԱՐՁՎԻ",
     paymentDeclinedTitle: "Վճարումը մերժվել է",
     printerErrorTitle: "Տպիչի աշխատանքը խափանվել է",
     paymentDeclinedDescription: "Գումար չի գանձվել։ Փորձեք կրկին կամ վերադարձեք կարգավորումներին։",

@@ -486,6 +486,7 @@ const pendingPayment = {
   quoteId: "01900000-0000-7000-8000-0000000000aa",
   provider: "MOCK",
   status: "PENDING",
+  appliedToSession: false,
   amountMinor: 6_000,
   currency: "AMD",
   currencyExponent: 2,
@@ -498,6 +499,7 @@ const pendingPayment = {
 const capturedPayment = {
   ...pendingPayment,
   status: "CAPTURED",
+  appliedToSession: true,
   capturedAt: "2030-01-01T00:01:00.000Z"
 };
 

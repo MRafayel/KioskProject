@@ -496,8 +496,11 @@ export class PaymentService {
         );
         return;
       } catch (error) {
-        // The inbox key is what makes a concurrent duplicate delivery a no-op.
-        if (isUniqueConstraintError(error)) return;
+        // Only an inbox collision is a duplicate delivery. Treating every
+        // unique-constraint failure as a duplicate would acknowledge a
+        // callback whose transaction actually rolled back for another
+        // accounting invariant.
+        if (isUniqueConstraintError(error) && (await this.webhookWasRecorded(event))) return;
         if (isRetryableTransactionError(error)) continue;
         throw error;
       }
@@ -540,20 +543,59 @@ export class PaymentService {
       event.amount.currency !== payment.currency.trim() ||
       event.amount.currencyExponent !== payment.currencyExponent
     ) {
-      // The provider settled something other than the quoted total. Nothing is
-      // captured on that basis; the difference becomes an obligation to
-      // investigate and return.
-      await this.recordWebhook(transaction, event, payment.id, "AMOUNT_MISMATCH", now);
+      // The provider settled something other than the quoted total. It cannot
+      // fulfil the session, but it is still a real capture and must close the
+      // local intent; leaving it open would strand the manifest because the
+      // reconciler will continue to observe CAPTURED upstream.
       if (event.type === "PAYMENT_CAPTURED") {
-        await this.recordCompensation(transaction, payment, "AMOUNT_MISMATCH", now);
+        if (payment.status !== "CAPTURED" && payment.status !== "DECLINED") {
+          const recorded = await transaction.payment.updateMany({
+            where: { id: payment.id, status: payment.status },
+            data: {
+              status: "CAPTURED",
+              appliedToSession: false,
+              capturedAt: now,
+              updatedAt: now
+            }
+          });
+          if (recorded.count !== 1) throw new Error("PAYMENT_MISMATCH_CAPTURE_LOST_RACE");
+        }
+        await transaction.paymentAttempt.create({
+          data: {
+            id: this.options.random.uuid(now),
+            paymentId: payment.id,
+            attempt: await nextAttemptNumber(transaction, payment.id),
+            action: "CAPTURE",
+            status: "CAPTURED",
+            providerReference: event.providerEventId,
+            createdAt: now
+          }
+        });
+        await this.recordCompensation(transaction, payment, "AMOUNT_MISMATCH", event.amount, now);
+        const session = await transaction.printSession.findUniqueOrThrow({
+          where: { id: payment.sessionId }
+        });
+        await this.releaseAfterCompensatedCapture(
+          transaction,
+          payment,
+          session,
+          "AMOUNT_MISMATCH",
+          now
+        );
       }
+      await this.recordWebhook(transaction, event, payment.id, "AMOUNT_MISMATCH", now);
       await this.recordPaymentAudit(transaction, {
         payment,
         action: "payment.amount_mismatch",
         outcome: "REFUSED",
         requestId,
         now,
-        metadata: { providerEventId: event.providerEventId }
+        metadata: {
+          providerEventId: event.providerEventId,
+          amountMinor: event.amount.amountMinor,
+          currency: event.amount.currency,
+          currencyExponent: event.amount.currencyExponent
+        }
       });
       return;
     }
@@ -586,6 +628,7 @@ export class PaymentService {
     const effective =
       OPEN_STATUSES.includes(payment.status as PaymentStatus) &&
       session.state === "AWAITING_PAYMENT" &&
+      payment.expiresAt.getTime() > now.getTime() &&
       quote !== null &&
       quote.status === "ACTIVE" &&
       quote.expiresAt.getTime() > now.getTime();
@@ -595,13 +638,37 @@ export class PaymentService {
       // A declined payment keeps its status — the trigger refuses to rewrite
       // it — but the obligation is recorded either way.
       if (payment.status !== "DECLINED") {
-        await transaction.payment.updateMany({
+        const recorded = await transaction.payment.updateMany({
           where: { id: payment.id, status: payment.status },
-          data: { status: "CAPTURED", capturedAt: now, updatedAt: now }
+          data: {
+            status: "CAPTURED",
+            appliedToSession: false,
+            capturedAt: now,
+            updatedAt: now
+          }
         });
+        if (recorded.count !== 1) throw new Error("PAYMENT_LATE_CAPTURE_LOST_RACE");
       }
-      await this.recordCompensation(transaction, payment, "LATE_CAPTURE", now);
+      await transaction.paymentAttempt.create({
+        data: {
+          id: this.options.random.uuid(now),
+          paymentId: payment.id,
+          attempt: await nextAttemptNumber(transaction, payment.id),
+          action: "CAPTURE",
+          status: "CAPTURED",
+          providerReference: event.providerEventId,
+          createdAt: now
+        }
+      });
+      await this.recordCompensation(transaction, payment, "LATE_CAPTURE", event.amount, now);
       await this.recordWebhook(transaction, event, payment.id, "LATE_CAPTURE", now);
+      await this.releaseAfterCompensatedCapture(
+        transaction,
+        payment,
+        session,
+        "PROVIDER_TIMEOUT",
+        now
+      );
       await this.recordPaymentAudit(transaction, {
         payment,
         action: "payment.late_capture",
@@ -615,7 +682,12 @@ export class PaymentService {
 
     const captured = await transaction.payment.updateMany({
       where: { id: payment.id, status: payment.status },
-      data: { status: "CAPTURED", capturedAt: now, updatedAt: now }
+      data: {
+        status: "CAPTURED",
+        appliedToSession: true,
+        capturedAt: now,
+        updatedAt: now
+      }
     });
     if (captured.count !== 1) throw new Error("PAYMENT_CAPTURE_LOST_RACE");
 
@@ -803,8 +875,14 @@ export class PaymentService {
     transaction: Prisma.TransactionClient,
     payment: StoredPayment,
     reason: "LATE_CAPTURE" | "AMOUNT_MISMATCH",
+    amount: { amountMinor: number; currency: string; currencyExponent: number },
     now: Date
   ): Promise<void> {
+    // A provider report that it captured zero is still retained in the inbox
+    // and audit trail, but there is no money to return and the refunds table
+    // deliberately represents monetary obligations only.
+    if (amount.amountMinor === 0) return;
+
     // One obligation per payment and reason. A repeated delivery of the same
     // problem must not create a second refund.
     await transaction.refund.upsert({
@@ -815,15 +893,84 @@ export class PaymentService {
         sessionId: payment.sessionId,
         provider: payment.provider,
         reason,
-        amountMinor: payment.amountMinor,
-        currency: payment.currency.trim(),
-        currencyExponent: payment.currencyExponent,
+        amountMinor: amount.amountMinor,
+        currency: amount.currency,
+        currencyExponent: amount.currencyExponent,
         status: "PENDING",
         createdAt: now,
         updatedAt: now
       },
       update: {}
     });
+  }
+
+  /**
+   * A callback can beat the timeout reconciler. If the payment window has
+   * already closed but the session is still waiting, the compensated capture
+   * must release that session itself; otherwise the payment is no longer open
+   * and no worker will ever unlock the customer workflow.
+   */
+  private async releaseAfterCompensatedCapture(
+    transaction: Prisma.TransactionClient,
+    payment: StoredPayment,
+    session: {
+      id: string;
+      state: string;
+      stateVersion: number;
+      eventSequence: number;
+    },
+    failureCode: PaymentFailureCode,
+    now: Date
+  ): Promise<void> {
+    if (session.state !== "AWAITING_PAYMENT") return;
+
+    const next = transitionSession(
+      { state: "AWAITING_PAYMENT", version: session.stateVersion },
+      "CONFIGURING",
+      session.stateVersion
+    );
+    const nextSequence = session.eventSequence + 1;
+    const released = await transaction.printSession.updateMany({
+      where: { id: session.id, stateVersion: session.stateVersion },
+      data: {
+        state: next.state,
+        stateVersion: next.version,
+        eventSequence: nextSequence,
+        updatedAt: now
+      }
+    });
+    if (released.count !== 1) throw new Error("SESSION_RELEASE_LOST_RACE");
+
+    await transaction.outboxEvent.create({
+      data: {
+        id: this.options.random.uuid(now),
+        aggregateType: "PRINT_SESSION",
+        aggregateId: session.id,
+        sequence: nextSequence,
+        type: "payment.failed",
+        payload: {
+          sessionId: session.id,
+          paymentId: payment.id,
+          state: next.state,
+          version: next.version,
+          status: "CAPTURED",
+          failureCode
+        }
+      }
+    });
+  }
+
+  private async webhookWasRecorded(event: ProviderWebhookEvent): Promise<boolean> {
+    const recorded = await this.options.database.paymentWebhookInbox.findUnique({
+      where: {
+        provider_providerEventId: {
+          provider: this.options.provider.name,
+          providerEventId: event.providerEventId
+        }
+      },
+      select: { id: true }
+    });
+    return recorded !== null;
   }
 
   private async recordPaymentAudit(
@@ -911,6 +1058,7 @@ interface StoredPayment {
   provider: string;
   providerIntentId: string;
   status: string;
+  appliedToSession: boolean;
   amountMinor: number;
   currency: string;
   currencyExponent: number;
@@ -928,6 +1076,7 @@ export function toPaymentSnapshot(payment: StoredPayment): PaymentSnapshot {
     quoteId: payment.quoteId,
     provider: payment.provider,
     status: payment.status,
+    appliedToSession: payment.appliedToSession,
     amountMinor: payment.amountMinor,
     currency: payment.currency.trim(),
     currencyExponent: payment.currencyExponent,

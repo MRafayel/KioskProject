@@ -311,7 +311,12 @@ function toSafeSessionEvent(input: {
       status: payload.status,
       failureCode: payload.failureCode
     };
-  } else if (input.type === "session.canceled" || input.type === "session.expired") {
+  } else if (
+    input.type === "print.started" ||
+    input.type === "session.completed" ||
+    input.type === "session.canceled" ||
+    input.type === "session.expired"
+  ) {
     safePayload = {
       sessionId,
       state: payload.state,

@@ -3,11 +3,18 @@ import Fastify, { LogController, type FastifyInstance, type FastifyReply } from 
 import { Readable } from "node:stream";
 
 import type { Environment } from "@printing-kiosk/config";
-import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
+import {
+  PRODUCT_SCOPE,
+  createPaymentBodySchema,
+  healthResponseSchema,
+  idempotencyKeySchema,
+  simulatePaymentOutcomeBodySchema
+} from "@printing-kiosk/contracts";
 
 import type { SessionEventSource } from "./events.js";
 
 type UpstreamFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+const API_FORWARD_TIMEOUT_MS = 10_000;
 
 export interface BuildAgentOptions {
   upstreamFetch?: UpstreamFetch;
@@ -202,9 +209,13 @@ export async function buildAgent(
   app.post<{ Params: { sessionId: string } }>(
     "/v1/sessions/:sessionId/payments",
     (request, reply) => {
-      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
+      const idempotencyKey = idempotencyKeySchema.safeParse(
+        singleHeader(request.headers["idempotency-key"])
+      );
+      const body = createPaymentBodySchema.safeParse(request.body ?? {});
       if (!UUID_PATTERN.test(request.params.sessionId)) return invalidSessionRequest(reply);
-      if (!idempotencyKey) return idempotencyKeyRequired(reply);
+      if (!idempotencyKey.success) return idempotencyKeyRequired(reply);
+      if (!body.success) return invalidPaymentRequest(reply);
 
       return forwardApiResponse(
         upstreamFetch,
@@ -215,11 +226,12 @@ export async function buildAgent(
           headers: upstreamHeaders(environment, {
             accept: "application/json",
             "content-type": "application/json",
-            "idempotency-key": idempotencyKey
+            "idempotency-key": idempotencyKey.data
           }),
           // The browser names the quote it wants to pay. It never states an
-          // amount, and no card detail passes through this process.
-          body: JSON.stringify(request.body ?? {})
+          // amount. Re-serializing the allowlisted contract also ensures an
+          // unexpected field cannot be forwarded under the device credential.
+          body: JSON.stringify(body.data)
         },
         reply
       );
@@ -229,9 +241,11 @@ export async function buildAgent(
   app.post<{ Params: { paymentId: string } }>(
     "/v1/payments/:paymentId/confirm",
     (request, reply) => {
-      const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
+      const idempotencyKey = idempotencyKeySchema.safeParse(
+        singleHeader(request.headers["idempotency-key"])
+      );
       if (!UUID_PATTERN.test(request.params.paymentId)) return invalidPaymentRequest(reply);
-      if (!idempotencyKey) return idempotencyKeyRequired(reply);
+      if (!idempotencyKey.success) return idempotencyKeyRequired(reply);
 
       return forwardApiResponse(
         upstreamFetch,
@@ -241,7 +255,7 @@ export async function buildAgent(
           method: "POST",
           headers: upstreamHeaders(environment, {
             accept: "application/json",
-            "idempotency-key": idempotencyKey
+            "idempotency-key": idempotencyKey.data
           })
         },
         reply
@@ -269,6 +283,8 @@ export async function buildAgent(
       "/v1/payments/:paymentId/simulate",
       (request, reply) => {
         if (!UUID_PATTERN.test(request.params.paymentId)) return invalidPaymentRequest(reply);
+        const body = simulatePaymentOutcomeBodySchema.safeParse(request.body ?? {});
+        if (!body.success) return invalidPaymentRequest(reply);
         return forwardApiResponse(
           upstreamFetch,
           environment,
@@ -279,7 +295,7 @@ export async function buildAgent(
               accept: "application/json",
               "content-type": "application/json"
             }),
-            body: JSON.stringify(request.body ?? {})
+            body: JSON.stringify(body.data)
           },
           reply
         );
@@ -470,8 +486,11 @@ async function forwardApiResponse(
   reply: FastifyReply
 ) {
   try {
-    const response = await upstreamFetch(new URL(path, environment.API_ORIGIN), init);
-    return sendApiResponse(response, reply);
+    const response = await upstreamFetch(new URL(path, environment.API_ORIGIN), {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(API_FORWARD_TIMEOUT_MS)
+    });
+    return await sendApiResponse(response, reply);
   } catch {
     return apiUnavailable(reply);
   }

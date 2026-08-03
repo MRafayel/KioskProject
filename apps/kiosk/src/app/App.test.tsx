@@ -102,6 +102,7 @@ const paymentFixture = {
   quoteId: quoteFixture.id,
   provider: "MOCK" as const,
   status: "PENDING" as const,
+  appliedToSession: false,
   amountMinor: quoteFixture.totalMinor,
   currency: "AMD",
   currencyExponent: 2,
@@ -197,6 +198,7 @@ let quoteRequests: Array<{ body: string; idempotencyKey: string }>;
 let paymentRequests: Array<{ body: string; idempotencyKey: string }>;
 let simulatedOutcomes: string[];
 let paymentSnapshot: PaymentSnapshot;
+let confirmFailuresRemaining: number;
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -210,6 +212,7 @@ beforeEach(() => {
   paymentRequests = [];
   simulatedOutcomes = [];
   paymentSnapshot = { ...paymentFixture };
+  confirmFailuresRemaining = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -273,6 +276,17 @@ beforeEach(() => {
       }
 
       if (url.endsWith("/confirm") && init?.method === "POST") {
+        if (confirmFailuresRemaining > 0) {
+          confirmFailuresRemaining -= 1;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                error: { code: "PAYMENT_UNAVAILABLE", message: "Temporarily unavailable" }
+              }),
+              { status: 503, headers: { "content-type": "application/json" } }
+            )
+          );
+        }
         return Promise.resolve(
           new Response(JSON.stringify({ payment: paymentSnapshot }), {
             status: 200,
@@ -290,6 +304,7 @@ beforeEach(() => {
             : {
                 ...paymentSnapshot,
                 status: "CAPTURED",
+                appliedToSession: true,
                 capturedAt: "2030-01-01T00:01:00.000Z"
               };
         return Promise.resolve(
@@ -806,6 +821,105 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
+  });
+
+  it("retries a transient confirmation failure without starting a second payment", async () => {
+    vi.useFakeTimers();
+    confirmFailuresRemaining = 1;
+    renderKiosk({
+      initialEntries: ["/checkout"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    fireEvent.click(screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      screen.getByRole("heading", { name: "Payment status is temporarily unavailable" })
+    ).toBeVisible();
+    expect(paymentRequests).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry payment" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("heading", { name: "Processing payment" })).toBeVisible();
+    expect(paymentRequests).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+  });
+
+  it("does not print for a captured payment that the control plane marked for compensation", async () => {
+    paymentSnapshot = {
+      ...paymentFixture,
+      status: "CAPTURED",
+      appliedToSession: false,
+      capturedAt: "2030-01-01T00:04:00.000Z",
+      failureCode: "PROVIDER_TIMEOUT"
+    };
+    renderKiosk({
+      initialEntries: ["/payment"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: { payment: paymentSnapshot, attempt: 1, errorCode: null }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect(await screen.findByRole("heading", { name: "Payment arrived too late" })).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Printing your document" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not offer the no-charge cancel path after a payment has started", async () => {
+    vi.useFakeTimers();
+    renderKiosk({
+      initialEntries: ["/checkout"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: { payment: paymentFixture, attempt: 1, errorCode: null }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_250);
+    });
+    expect(cancelIdempotencyKeys).toEqual([]);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("recovers a kiosk blocked by a session it can no longer resume", async () => {

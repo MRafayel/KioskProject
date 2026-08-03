@@ -107,6 +107,11 @@ export function isPaymentSettled(payment: PaymentSnapshot): boolean {
   return payment.status !== "PENDING" && payment.status !== "AUTHORIZED";
 }
 
+/** A capture can be late and owed back; only an applied capture may print. */
+export function isPaymentSuccessful(payment: PaymentSnapshot): boolean {
+  return payment.status === "CAPTURED" && payment.appliedToSession;
+}
+
 async function paymentError(
   response: Response,
   fallbackCode: string

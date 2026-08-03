@@ -42,7 +42,7 @@ export async function releaseSessionPayments(
   }
 ): Promise<SessionPaymentRelease> {
   const captured = await transaction.payment.findFirst({
-    where: { sessionId: input.sessionId, status: "CAPTURED" },
+    where: { sessionId: input.sessionId, status: "CAPTURED", appliedToSession: true },
     select: { id: true }
   });
   if (captured) {

@@ -30,8 +30,9 @@ this system at any point.
    and does nothing a second time.
 5. Payment state is monotonic and the database enforces it. A late decline
    cannot overwrite a capture, a declined payment can never later capture, and
-   a partial unique index permits at most one captured payment per session and
-   at most one payment in flight.
+   partial unique indexes permit at most one payment in flight and at most one
+   capture applied to fulfilment per session. Additional late provider captures
+   remain recordable but are explicitly marked as not applied to the session.
 6. A capture that arrives too late — after cancellation, expiry, or a timeout —
    is still recorded as a capture, and a `refunds` row records the obligation
    to give the money back. Nothing is silently discarded, and no original
@@ -52,7 +53,8 @@ this system at any point.
     no provider intent, no card detail, no document identity.
 11. The touchscreen no longer simulates payment locally. It asks the control
     plane to start one, confirms it, and then displays only the status the
-    control plane reports. Printing begins on a capture and on nothing else.
+    control plane reports. Printing begins only on the capture applied to the
+    session; compensated captures never print.
 
 Phase 7 does not add real payment hardware, refunds execution, print jobs,
 partial capture, or multi-currency settlement.
@@ -69,9 +71,9 @@ pnpm db:recover-paid-session -- <session-uuid>
 ```
 
 The command refuses production, remote databases, non-mock providers,
-non-`PAID` sessions, and sessions without exactly one captured mock payment. It
-records `PAID -> PRINTING -> COMPLETED`, writes the audit/outbox evidence,
-revokes upload access, and schedules the private files for cleanup.
+non-`PAID` sessions, and sessions without exactly one applied captured mock
+payment. It records `PAID -> PRINTING -> COMPLETED`, writes the audit/outbox
+evidence, revokes upload access, and schedules the private files for cleanup.
 
 ## Request path
 
@@ -115,9 +117,11 @@ Payment: PENDING -> AUTHORIZED -> CAPTURED
                     late capture   +--> CAPTURED + refunds(LATE_CAPTURE)
 ```
 
-A capture is effective only when the payment is still open, the session is
-still `AWAITING_PAYMENT`, and the quote is still `ACTIVE` and unexpired. Any
-other capture is compensation, not fulfilment.
+A capture is effective only when the payment is still open and unexpired, the
+session is still `AWAITING_PAYMENT`, and the quote is still `ACTIVE` and
+unexpired. Any other capture is compensation, not fulfilment. This decision is
+stored as `payments.applied_to_session` and returned to the kiosk, so a late
+`CAPTURED` accounting record can never start printing.
 
 The payment window is the earlier of `PAYMENT_TIMEOUT_SECONDS`, the quote's
 deadline, and the session's idle and hard expiry. A window shorter than 30
@@ -155,9 +159,10 @@ without those scopes receives `403` on the new routes.
 ## Database additions
 
 - `payments` — the accounting record: session, quote, provider intent, status,
-  integer amount, currency, the settings revision and manifest hash it is
-  paying for, and its window. Triggers enforce that it equals its quote exactly
-  and that its status only ever moves forwards.
+  whether a capture was applied to fulfilment, integer amount, currency, the
+  settings revision and manifest hash it is paying for, and its window.
+  Triggers enforce that it equals its quote exactly and that its status only
+  ever moves forwards.
 - `payment_attempts` — append-only provider interactions. An `UPDATE` trigger
   rejects in-place edits; only the idempotency key's digest is stored, never
   the key.
@@ -226,8 +231,8 @@ Phase 0–6, inserts a session that already holds a settings revision and a live
 price, applies Phase 7, and then proves in SQL that the existing session and
 quote are untouched, that a payment must equal its quote, that a payment cannot
 borrow another session's price, that only one payment is open and only one
-capture exists per session, that a capture is final and a decline cannot become
-one, that a duplicate callback is refused and received evidence cannot be
+capture is applied per session while late captures remain recordable, that a
+capture is final and a decline cannot become one, that a duplicate callback is refused and received evidence cannot be
 rewritten, that a compensation record is written once per reason, and that a
 capture owing money back cannot be deleted.
 
@@ -308,3 +313,23 @@ capture owing money back cannot be deleted.
   scrubbing anything that identifies a document.
 - Phase 8 must create the print job from the capture through the transactional
   outbox, and must decide the refund policy for a job that fails after payment.
+
+## Phase 7 audit hardening — 2026-08-03
+
+The post-implementation audit added an additive capture-disposition migration.
+It fixes the case where an old timed-out intent captures after a retry has
+already paid: both provider captures now remain in the ledger, exactly one is
+allowed to fulfil the session, and the other retains its refund obligation.
+The callback reducer also treats the payment deadline itself as authoritative,
+releases an awaiting session when a late callback beats reconciliation, records
+the provider-reported amount and currency in mismatch compensation, closes and
+releases a mismatched provider capture so it cannot strand the session, and
+only acknowledges a unique collision when the webhook inbox proves the event
+was already committed.
+
+The kiosk response now carries `appliedToSession`. A `CAPTURED` payment with
+that flag false is a compensated accounting event and never enters printing.
+Transient confirm/read failures retain the existing payment identifier when
+the customer retries. The development paid-session recovery events are also
+part of the safe realtime contract, rather than becoming permanently failed
+outbox rows.

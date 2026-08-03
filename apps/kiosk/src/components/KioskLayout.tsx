@@ -123,7 +123,15 @@ export function KioskLayout({ children }: { children: ReactNode }) {
   if (!state.session) return <KioskRedirect to="/" />;
 
   const currentStep = stepIndex(location.pathname);
-  const canCancel = ["/upload", "/configure", "/checkout"].includes(location.pathname);
+  const paymentStatus = state.payment.payment?.status;
+  // Browser history can return to checkout after payment has started. The
+  // pre-payment cancel copy promises that no charge was made, so it must not be
+  // shown while an intent can still capture or after any kind of capture.
+  const paymentMakesCancellationUnsafe =
+    paymentStatus === "PENDING" || paymentStatus === "AUTHORIZED" || paymentStatus === "CAPTURED";
+  const canCancel =
+    ["/upload", "/configure", "/checkout"].includes(location.pathname) &&
+    !paymentMakesCancellationUnsafe;
   const showSessionTimer = location.pathname !== "/printing";
 
   const cancelSession = async () => {

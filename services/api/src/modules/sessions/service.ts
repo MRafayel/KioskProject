@@ -341,7 +341,7 @@ export class SessionService {
             // answer to a paid session is fulfilment or a refund, and both are
             // deliberate acts rather than a side effect of pressing cancel.
             const captured = await transaction.payment.findFirst({
-              where: { sessionId: session.id, status: "CAPTURED" },
+              where: { sessionId: session.id, status: "CAPTURED", appliedToSession: true },
               select: { id: true }
             });
             if (captured) {

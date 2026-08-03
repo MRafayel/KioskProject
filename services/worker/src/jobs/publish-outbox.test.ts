@@ -180,6 +180,49 @@ describe("OutboxPublisher", () => {
     expect(JSON.stringify(queueAdd.mock.calls)).not.toContain("mock_pi_secret");
   });
 
+  it.each([
+    ["print.started", "PRINTING", 10],
+    ["session.completed", "COMPLETED", 11]
+  ])("publishes the mock-paid recovery event %s", async (type, state, sequence) => {
+    const upsert = vi.fn().mockImplementation((args: { create: Record<string, unknown> }) =>
+      Promise.resolve({
+        id: outboxId,
+        sessionId,
+        kioskId: "kiosk_dev_001",
+        sequence,
+        type,
+        payload: args.create.payload,
+        occurredAt: new Date("2030-01-01T00:00:00.000Z")
+      })
+    );
+    const database = {
+      outboxEvent: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: outboxId,
+          aggregateType: "PRINT_SESSION",
+          aggregateId: sessionId,
+          sequence,
+          type,
+          payload: { sessionId, state, version: sequence, operatorNote: "must-not-publish" },
+          status: "PENDING",
+          publishAttempts: 0,
+          createdAt: new Date("2030-01-01T00:00:00.000Z"),
+          session: { kioskId: "kiosk_dev_001" }
+        }),
+        updateMany: updateManyMock().mockResolvedValue({ count: 1 })
+      },
+      sessionEvent: { upsert }
+    } as unknown as PrismaClient;
+
+    await expect(publisherWith(database).publishNext()).resolves.toBe(true);
+
+    const stored = upsert.mock.lastCall?.[0] as { create: { payload: Record<string, unknown> } };
+    expect(stored.create.payload).toEqual({ sessionId, state, version: sequence });
+    expect(realtimeDeliveryJobSchema.parse(queueAdd.mock.lastCall?.[1] as unknown)).toMatchObject({
+      event: { type, payload: { sessionId, state, version: sequence } }
+    });
+  });
+
   it("cannot complete a row after a competing publisher reclaims its stale lease", async () => {
     const updateMany = updateManyMock()
       .mockResolvedValueOnce({ count: 1 })

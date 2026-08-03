@@ -14,6 +14,7 @@ import {
 import {
   confirmKioskPayment,
   isPaymentSettled,
+  isPaymentSuccessful,
   PaymentRequestError,
   readKioskPayment,
   requestSimulatedOutcome
@@ -56,7 +57,7 @@ export function PaymentScreen() {
       if (!active) return true;
       dispatch({ type: "PAYMENT_OBSERVED", payment: snapshot });
       if (!isPaymentSettled(snapshot)) return false;
-      leave(snapshot.status === "CAPTURED" ? "/printing" : "/failure/payment");
+      leave(isPaymentSuccessful(snapshot) ? "/printing" : "/failure/payment");
       return true;
     };
 
@@ -160,6 +161,14 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
   const paymentFailure = failureType === "payment";
+  const pendingPayment =
+    paymentFailure && state.payment.payment && !isPaymentSettled(state.payment.payment)
+      ? state.payment.payment
+      : null;
+  const compensatedCapture =
+    paymentFailure &&
+    state.payment.payment?.status === "CAPTURED" &&
+    !state.payment.payment.appliedToSession;
 
   if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
 
@@ -170,36 +179,58 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
       </div>
       <p className="eyebrow">{messages.status.actionNeeded}</p>
       <h1>
-        {paymentFailure ? messages.status.paymentDeclinedTitle : messages.status.printerErrorTitle}
+        {paymentFailure
+          ? pendingPayment
+            ? messages.status.paymentStatusUnavailableTitle
+            : compensatedCapture
+              ? messages.status.paymentCompensatedTitle
+              : messages.status.paymentDeclinedTitle
+          : messages.status.printerErrorTitle}
       </h1>
       <p>
         {paymentFailure
-          ? messages.status.paymentDeclinedDescription
+          ? pendingPayment
+            ? messages.status.paymentStatusUnavailableDescription
+            : compensatedCapture
+              ? messages.status.paymentCompensatedDescription
+              : messages.status.paymentDeclinedDescription
           : messages.status.printerErrorDescription}
       </p>
       <div className="failure-detail" role="status">
         <strong>
-          {paymentFailure ? messages.status.paymentDeclinedCode : messages.status.printerErrorCode}
+          {paymentFailure
+            ? pendingPayment
+              ? messages.status.paymentStatusUnavailableCode
+              : compensatedCapture
+                ? messages.status.paymentCompensatedCode
+                : messages.status.paymentDeclinedCode
+            : messages.status.printerErrorCode}
         </strong>
         <span>{messages.status.failureDetail}</span>
       </div>
       <div className="button-row button-row--center">
-        <button
-          className="button button--secondary"
-          type="button"
-          onClick={() => void navigate(paymentFailure ? "/checkout" : "/configure")}
-        >
-          {messages.status.reviewSettings}
-        </button>
+        {!pendingPayment ? (
+          <button
+            className="button button--secondary"
+            type="button"
+            onClick={() => void navigate(paymentFailure ? "/checkout" : "/configure")}
+          >
+            {messages.status.reviewSettings}
+          </button>
+        ) : null}
         <button
           className="button button--primary"
           type="button"
           onClick={() => {
             dispatch({ type: "OUTCOME_CHANGED", outcome: "SUCCESS" });
             // A declined payment is settled and final. Retrying means asking
-            // the control plane for a new one, which starts at the checkout.
-            if (paymentFailure) dispatch({ type: "PAYMENT_CLEARED" });
-            void navigate(paymentFailure ? "/checkout" : "/printing");
+            // the control plane for a new one. A transient confirm/read failure
+            // keeps its pending payment identifier and resumes watching it,
+            // so the retry cannot collide with PAYMENT_IN_PROGRESS.
+            if (paymentFailure && !pendingPayment) dispatch({ type: "PAYMENT_CLEARED" });
+            void navigate(
+              paymentFailure ? (pendingPayment ? "/payment" : "/checkout") : "/printing"
+            );
           }}
         >
           {paymentFailure ? messages.status.retryPayment : messages.status.retryPrinting}
@@ -224,7 +255,7 @@ export function CompleteScreen() {
   // What was actually captured, when a capture happened. The quote is the
   // fallback for a receipt shown before a payment exists.
   const captured = state.payment.payment;
-  const paid = captured?.status === "CAPTURED" ? captured : quote;
+  const paid = captured ? (isPaymentSuccessful(captured) ? captured : null) : quote;
 
   const finish = async () => {
     const session = state.session;

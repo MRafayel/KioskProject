@@ -16,6 +16,7 @@ export const paymentStatusSchema = z.enum([
  * string can never be echoed into an event payload or onto the screen.
  */
 export const paymentFailureCodeSchema = z.enum([
+  "AMOUNT_MISMATCH",
   "CARD_DECLINED",
   "CUSTOMER_CANCELED",
   "PROVIDER_TIMEOUT",
@@ -44,6 +45,8 @@ export const paymentSnapshotSchema = z
     quoteId: z.string().uuid(),
     provider: paymentProviderSchema,
     status: paymentStatusSchema,
+    /** Whether this capture, if any, is the one that fulfilled the session. */
+    appliedToSession: z.boolean(),
     amountMinor: minorAmountSchema,
     currency: z.string().regex(/^[A-Z]{3}$/),
     currencyExponent: z.number().int().min(0).max(4),

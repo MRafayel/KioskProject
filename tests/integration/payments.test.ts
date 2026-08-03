@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -334,21 +334,63 @@ describe.sequential("Phase 7 simulated payment", () => {
       })
     );
 
-    // The callback is acknowledged — a provider must not retry forever — but
-    // nothing is captured on a total the control plane never issued.
+    // The callback is acknowledged — a provider must not retry forever — and
+    // retained as a capture, but it is not allowed to fulfil this session.
     expect(response.statusCode, response.body).toBe(200);
     const stored = await database.payment.findUniqueOrThrow({ where: { id: payment.id } });
-    expect(stored.status).toBe("PENDING");
-    await expectSessionState(priced.sessionId, "AWAITING_PAYMENT");
+    expect(stored).toMatchObject({ status: "CAPTURED", appliedToSession: false });
+    await expectSessionState(priced.sessionId, "CONFIGURING");
 
     const inbox = await database.paymentWebhookInbox.findFirstOrThrow({
       where: { paymentId: payment.id }
     });
     expect(inbox.result).toBe("AMOUNT_MISMATCH");
+    expect(
+      await database.outboxEvent.findFirstOrThrow({
+        where: { aggregateId: priced.sessionId, type: "payment.failed" }
+      })
+    ).toMatchObject({ payload: { failureCode: "AMOUNT_MISMATCH" } });
     const compensation = await database.refund.findFirstOrThrow({
       where: { paymentId: payment.id }
     });
-    expect(compensation).toMatchObject({ reason: "AMOUNT_MISMATCH", status: "PENDING" });
+    expect(compensation).toMatchObject({
+      reason: "AMOUNT_MISMATCH",
+      status: "PENDING",
+      amountMinor: expectedTotalMinor + 100,
+      currency: "AMD",
+      currencyExponent: 2
+    });
+
+    const retry = await startPayment({
+      sessionId: priced.sessionId,
+      quoteId: priced.quote.id,
+      idempotencyKey: "phase7-payment-after-amount-mismatch"
+    });
+    expect(retry.statusCode, retry.body).toBe(201);
+  });
+
+  it("records the provider's currency, not the quote currency, for a mismatched capture", async () => {
+    const priced = await prepareQuotedSession("phase7-currency");
+    const payment = await openPayment(priced, "phase7-payment-currency");
+
+    const response = await deliverWebhook(
+      provider.signOutcome({
+        paymentId: payment.id,
+        outcome: "SUCCEEDED",
+        amount: { amountMinor: expectedTotalMinor, currency: "USD", currencyExponent: 2 },
+        occurredAt: new Date()
+      })
+    );
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(
+      await database.refund.findFirstOrThrow({ where: { paymentId: payment.id } })
+    ).toMatchObject({
+      reason: "AMOUNT_MISMATCH",
+      amountMinor: expectedTotalMinor,
+      currency: "USD",
+      currencyExponent: 2
+    });
   });
 
   it("releases the session after a decline and lets the same price be paid again", async () => {
@@ -473,14 +515,11 @@ describe.sequential("Phase 7 simulated payment", () => {
 
     // The customer walked away. The window closes on the database clock, not
     // on anything the browser says.
-    // The window is moved wholesale into the past: a payment can never be
-    // stored with a deadline before its own creation.
     await database.payment.update({
       where: { id: payment.id },
-      data: {
-        createdAt: new Date(Date.now() - 600_000),
-        expiresAt: new Date(Date.now() - 1_000)
-      }
+      // Keep the database window invariant while closing this test payment
+      // immediately after its immutable creation timestamp.
+      data: { expiresAt: new Date(new Date(payment.createdAt).getTime() + 1) }
     });
     const reconciler = new PaymentReconciler({
       database: serviceDatabase as never,
@@ -500,6 +539,106 @@ describe.sequential("Phase 7 simulated payment", () => {
       where: { aggregateId: priced.sessionId, type: "payment.failed" }
     });
     expect(failure).not.toBeNull();
+  });
+
+  it("treats a capture after the payment deadline as compensation even before reconciliation", async () => {
+    const priced = await prepareQuotedSession("phase7-deadline-capture");
+    const payment = await openPayment(priced, "phase7-payment-deadline-capture");
+
+    await database.payment.update({
+      where: { id: payment.id },
+      data: { expiresAt: new Date(new Date(payment.createdAt).getTime() + 1) }
+    });
+    const response = await deliverOutcome(payment.id, "SUCCEEDED");
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(await database.payment.findUniqueOrThrow({ where: { id: payment.id } })).toMatchObject({
+      status: "CAPTURED",
+      appliedToSession: false
+    });
+    await expectSessionState(priced.sessionId, "CONFIGURING");
+    expect(
+      await database.refund.count({ where: { paymentId: payment.id, reason: "LATE_CAPTURE" } })
+    ).toBe(1);
+
+    // The compensated capture no longer strands the manifest lock, so a fresh
+    // payment can immediately take over the still-current quote.
+    const retry = await startPayment({
+      sessionId: priced.sessionId,
+      quoteId: priced.quote.id,
+      idempotencyKey: "phase7-payment-after-deadline-capture"
+    });
+    expect(retry.statusCode, retry.body).toBe(201);
+  });
+
+  it("records a late old capture after a retry has already paid the session", async () => {
+    const priced = await prepareQuotedSession("phase7-double-provider-capture");
+    const oldPayment = await openPayment(priced, "phase7-payment-old-intent");
+    await deliverOutcome(oldPayment.id, "TIMEOUT");
+    await expectSessionState(priced.sessionId, "CONFIGURING");
+
+    const retry = await startPayment({
+      sessionId: priced.sessionId,
+      quoteId: priced.quote.id,
+      idempotencyKey: "phase7-payment-effective-retry"
+    });
+    expect(retry.statusCode, retry.body).toBe(201);
+    const effectivePayment = createPaymentResponseSchema.parse(retry.json()).payment;
+    await deliverOutcome(effectivePayment.id, "SUCCEEDED");
+    await expectSessionState(priced.sessionId, "PAID");
+
+    const late = await deliverOutcome(oldPayment.id, "SUCCEEDED");
+    expect(late.statusCode, late.body).toBe(200);
+    await expectSessionState(priced.sessionId, "PAID");
+
+    const captures = await database.payment.findMany({
+      where: { sessionId: priced.sessionId, status: "CAPTURED" },
+      orderBy: { createdAt: "asc" }
+    });
+    expect(captures).toHaveLength(2);
+    expect(captures.find((item) => item.id === oldPayment.id)?.appliedToSession).toBe(false);
+    expect(captures.find((item) => item.id === effectivePayment.id)?.appliedToSession).toBe(true);
+    expect(
+      await database.refund.count({
+        where: { paymentId: oldPayment.id, reason: "LATE_CAPTURE" }
+      })
+    ).toBe(1);
+    expect(
+      await database.paymentWebhookInbox.findFirstOrThrow({
+        where: { paymentId: oldPayment.id, eventType: "PAYMENT_CAPTURED" }
+      })
+    ).toMatchObject({ result: "LATE_CAPTURE" });
+  });
+
+  it("does not mistake an unrelated unique-constraint failure for a duplicate callback", async () => {
+    const priced = await prepareQuotedSession("phase7-callback-integrity");
+    const payment = await openPayment(priced, "phase7-payment-callback-integrity");
+    const session = await database.printSession.findUniqueOrThrow({
+      where: { id: priced.sessionId }
+    });
+    await database.outboxEvent.create({
+      data: {
+        id: randomUUID(),
+        aggregateType: "PRINT_SESSION",
+        aggregateId: priced.sessionId,
+        sequence: session.eventSequence + 1,
+        type: "session.canceled",
+        payload: {
+          sessionId: priced.sessionId,
+          state: "CANCELED",
+          version: session.stateVersion + 1
+        }
+      }
+    });
+
+    const response = await deliverOutcome(payment.id, "SUCCEEDED");
+
+    expect(response.statusCode).toBe(500);
+    expect(await database.payment.findUniqueOrThrow({ where: { id: payment.id } })).toMatchObject({
+      status: "PENDING",
+      appliedToSession: false
+    });
+    expect(await database.paymentWebhookInbox.count({ where: { paymentId: payment.id } })).toBe(0);
   });
 
   it("keeps one session's payment invisible to another kiosk", async () => {

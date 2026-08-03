@@ -357,6 +357,18 @@ describe("loadEnvironment", () => {
         PAYMENT_WEBHOOK_SECRET: secureProductionEnvironment.UPLOAD_TOKEN_PEPPER
       })
     ).toThrow();
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        PAYMENT_WEBHOOK_SECRET: secureProductionEnvironment.DEV_KIOSK_API_KEY
+      })
+    ).toThrow();
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        PAYMENT_WEBHOOK_SECRET: secureProductionEnvironment.DOCUMENT_PROCESSOR_AUTH_TOKEN
+      })
+    ).toThrow();
   });
 
   it("loads the documented root environment file from a package working directory", () => {

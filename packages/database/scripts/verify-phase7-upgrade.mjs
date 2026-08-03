@@ -59,8 +59,9 @@ try {
   await verifyPaymentInvariants(temporaryUrl);
   process.stdout.write(
     "Phase 6 -> Phase 7 migration upgrade verified: an existing priced session is untouched, " +
-      "a payment must equal its quote, at most one capture and one open payment exist per " +
-      "session, captured state is final, and callbacks and attempts are write-once evidence.\n"
+      "a payment must equal its quote, at most one applied capture and one open payment exist " +
+      "per session, late captures remain accountable, captured state is final, and callbacks " +
+      "and attempts are write-once evidence.\n"
   );
 } finally {
   await closeQuietly(admin);
@@ -272,8 +273,9 @@ async function verifyPricedSessionSurvives(targetUrl) {
 
 /**
  * The guarantees that must hold in the database itself, whatever application
- * code believes: a payment equals its quote, one session captures at most
- * once, a capture is final, and received evidence cannot be rewritten.
+ * code believes: a payment equals its quote, one capture at most is applied to
+ * a session, late captures remain recordable, a capture is final, and received
+ * evidence cannot be rewritten.
  */
 async function verifyPaymentInvariants(targetUrl) {
   const client = new pg.Client({ connectionString: targetUrl.href });
@@ -337,23 +339,37 @@ async function verifyPaymentInvariants(targetUrl) {
       paymentParameters({ id: capturedId, providerIntentId: `mock_pi_${capturedId}` })
     );
     await client.query(
-      `UPDATE "payments" SET "status" = 'CAPTURED', "captured_at" = CURRENT_TIMESTAMP
+      `UPDATE "payments" SET "status" = 'CAPTURED', "applied_to_session" = true,
+         "captured_at" = CURRENT_TIMESTAMP
        WHERE "id" = $1::uuid`,
       [capturedId]
     );
 
-    // At most one effective capture exists per session.
+    // Another provider capture can be recorded for accounting, but it cannot
+    // also be applied to the session.
     const secondCaptureId = randomUuid();
     await client.query(
       insertPaymentSql(),
       paymentParameters({ id: secondCaptureId, providerIntentId: `mock_pi_${secondCaptureId}` })
     );
-    await expectRejected(
-      client,
+    await client.query(
       `UPDATE "payments" SET "status" = 'CAPTURED', "captured_at" = CURRENT_TIMESTAMP
        WHERE "id" = $1::uuid`,
+      [secondCaptureId]
+    );
+    await expectRejected(
+      client,
+      `UPDATE "payments" SET "applied_to_session" = true
+       WHERE "id" = $1::uuid`,
       [secondCaptureId],
-      "PHASE7_SECOND_CAPTURE_ACCEPTED"
+      "PHASE7_SECOND_APPLIED_CAPTURE_ACCEPTED"
+    );
+
+    await expectRejected(
+      client,
+      `UPDATE "payments" SET "applied_to_session" = true WHERE "id" = $1::uuid`,
+      [fixture.paymentId],
+      "PHASE7_UNCAPTURED_PAYMENT_APPLIED"
     );
 
     // A late failure cannot overwrite a capture.
@@ -363,6 +379,13 @@ async function verifyPaymentInvariants(targetUrl) {
          "failed_at" = CURRENT_TIMESTAMP WHERE "id" = $1::uuid`,
       [capturedId],
       "PHASE7_LATE_DECLINE_OVERWROTE_CAPTURE"
+    );
+    await expectRejected(
+      client,
+      `UPDATE "payments" SET "provider_intent_id" = 'mock_pi_rewritten'
+       WHERE "id" = $1::uuid`,
+      [capturedId],
+      "PHASE7_PAYMENT_IDENTITY_MUTABLE"
     );
 
     // Attempts and callbacks are write-once evidence.
@@ -415,8 +438,34 @@ async function verifyPaymentInvariants(targetUrl) {
       [fixture.inboxId, "f".repeat(64)],
       "PHASE7_CALLBACK_EVIDENCE_MUTABLE"
     );
+    await expectRejected(
+      client,
+      `UPDATE "payment_webhook_inbox" SET "result" = 'FAILED' WHERE "id" = $1::uuid`,
+      [fixture.inboxId],
+      "PHASE7_CALLBACK_DECISION_MUTABLE"
+    );
+    await expectRejected(
+      client,
+      `INSERT INTO "payment_webhook_inbox"
+        ("id", "provider", "provider_event_id", "provider_intent_id", "payment_id",
+         "event_type", "payload_digest", "result")
+       VALUES (gen_random_uuid(), 'MOCK', 'mock_evt_wrong_link', 'mock_pi_wrong', $1::uuid,
+         'PAYMENT_CAPTURED', $2, 'CAPTURED')`,
+      [capturedId, "e".repeat(64)],
+      "PHASE7_CALLBACK_LINK_MISMATCH_ACCEPTED"
+    );
 
     // A compensation record is written once per payment and reason.
+    await expectRejected(
+      client,
+      `INSERT INTO "refunds"
+        ("id", "payment_id", "session_id", "provider", "reason", "amount_minor",
+         "currency", "currency_exponent", "status")
+       VALUES (gen_random_uuid(), $1::uuid, $2::uuid, 'MOCK', 'LATE_CAPTURE', 18000,
+         'AMD', 2, 'PENDING')`,
+      [capturedId, fixture.otherSessionId],
+      "PHASE7_FOREIGN_SESSION_REFUND_ACCEPTED"
+    );
     await client.query(
       `INSERT INTO "refunds"
         ("id", "payment_id", "session_id", "provider", "reason", "amount_minor",
@@ -433,6 +482,12 @@ async function verifyPaymentInvariants(targetUrl) {
          'AMD', 2, 'PENDING')`,
       [capturedId, fixture.sessionId],
       "PHASE7_DUPLICATE_COMPENSATION_ACCEPTED"
+    );
+    await expectRejected(
+      client,
+      `UPDATE "refunds" SET "amount_minor" = 1 WHERE "id" = $1::uuid`,
+      [fixture.refundId],
+      "PHASE7_REFUND_IDENTITY_MUTABLE"
     );
     // A capture that owes money back cannot be deleted out of the ledger.
     await expectRejected(

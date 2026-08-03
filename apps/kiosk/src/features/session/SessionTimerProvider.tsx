@@ -37,7 +37,16 @@ export function SessionTimerProvider({ children }: { children: ReactNode }) {
   const [warningOpen, setWarningOpen] = useState(false);
   const [closureStatus, setClosureStatus] = useState<ClosureStatus>("idle");
 
-  const active = Boolean(state.session) && location.pathname !== "/";
+  const payment = state.payment.payment;
+  // Once a provider intent is open, its own deadline and reconciler own the
+  // outcome. An interface-only idle timer must not cancel it early and create
+  // a possible late-charge/refund race. An applied capture is likewise owned
+  // by fulfillment rather than by pre-payment cleanup.
+  const paymentOwnsLifetime =
+    payment?.status === "PENDING" ||
+    payment?.status === "AUTHORIZED" ||
+    (payment?.status === "CAPTURED" && payment.appliedToSession);
+  const active = Boolean(state.session) && location.pathname !== "/" && !paymentOwnsLifetime;
 
   const updateClosureStatus = useCallback((status: ClosureStatus) => {
     closureStatusRef.current = status;

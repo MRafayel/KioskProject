@@ -166,6 +166,14 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
       .strict()
   }),
   eventBaseSchema.extend({
+    type: z.literal("print.started"),
+    payload: statePayloadSchema
+  }),
+  eventBaseSchema.extend({
+    type: z.literal("session.completed"),
+    payload: statePayloadSchema
+  }),
+  eventBaseSchema.extend({
     type: z.literal("session.canceled"),
     payload: statePayloadSchema
   }),

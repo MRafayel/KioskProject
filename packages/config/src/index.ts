@@ -322,17 +322,21 @@ const environmentSchema = z
       }
     }
 
-    const cryptographicKeys = [
+    const independentSecrets = [
       environment.COOKIE_SIGNING_KEY,
       environment.UPLOAD_TOKEN_PEPPER,
       environment.MOBILE_TOKEN_PEPPER,
+      environment.S3_SECRET_ACCESS_KEY,
+      environment.S3_WORKER_SECRET_ACCESS_KEY,
+      environment.DOCUMENT_PROCESSOR_AUTH_TOKEN,
+      environment.DEV_KIOSK_API_KEY,
       environment.PAYMENT_WEBHOOK_SECRET
     ];
-    if (new Set(cryptographicKeys).size !== cryptographicKeys.length) {
+    if (new Set(independentSecrets).size !== independentSecrets.length) {
       context.addIssue({
         code: "custom",
-        path: ["COOKIE_SIGNING_KEY"],
-        message: "Cookie and token keys must be independent in production"
+        path: ["PAYMENT_WEBHOOK_SECRET"],
+        message: "Every production credential and cryptographic secret must be independent"
       });
     }
 
