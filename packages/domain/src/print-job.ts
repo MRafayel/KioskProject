@@ -51,7 +51,11 @@ export function settlePrintDeviceResult(result: PrintDeviceResult): PrintJobSett
   const warningCode = result.warningCode;
 
   if (result.state === "COMPLETED") {
-    if (result.confidence === "CONFIRMED") {
+    if (
+      result.confidence === "CONFIRMED" &&
+      result.sheetsProduced !== null &&
+      result.sheetsProduced > 0
+    ) {
       return {
         status: "COMPLETED",
         resultConfidence: "CONFIRMED",
@@ -69,12 +73,15 @@ export function settlePrintDeviceResult(result: PrintDeviceResult): PrintJobSett
 
   if (result.state === "NOT_SUBMITTED") {
     // The device is certain it never saw the work, so nothing was printed.
-    return definiteFailure("FAILED", result, "PRINTER_UNAVAILABLE", warningCode, 0);
+    if (result.confidence === "CONFIRMED" && result.sheetsProduced === 0) {
+      return definiteFailure("FAILED", result, "PRINTER_UNAVAILABLE", warningCode, 0);
+    }
+    return recovery(result, "SUBMISSION_UNCONFIRMED", warningCode);
   }
 
   if (result.state === "FAILED") {
     const produced = result.sheetsProduced;
-    if (produced === 0) {
+    if (result.confidence === "CONFIRMED" && produced === 0) {
       return definiteFailure("FAILED", result, DEFAULT_FAILURE_CODE, warningCode, 0);
     }
     // Some paper may already carry ink. Whether the customer got anything
@@ -83,7 +90,7 @@ export function settlePrintDeviceResult(result: PrintDeviceResult): PrintJobSett
   }
 
   if (result.state === "CANCELED") {
-    if (result.confidence === "CONFIRMED") {
+    if (result.confidence === "CONFIRMED" && result.sheetsProduced === 0) {
       return definiteFailure("CANCELED", result, "CANCELED_BEFORE_SUBMIT", warningCode, 0);
     }
     return recovery(result, "CANCELED_AT_DEVICE", warningCode);

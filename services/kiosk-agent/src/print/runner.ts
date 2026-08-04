@@ -116,7 +116,7 @@ export class PrintCommandRunner {
       .update(canonicalPrintManifestJson(command.manifest), "utf8")
       .digest("hex");
     if (localHash !== command.manifestHash) {
-      await this.report(command, {
+      const accepted = await this.report(command, {
         operationId: command.operationId,
         state: "NOT_SUBMITTED",
         confidence: "CONFIRMED",
@@ -124,6 +124,7 @@ export class PrintCommandRunner {
         warningCode: null,
         sheetsProduced: 0
       });
+      if (accepted) await this.ledger.record(command.operationId, "RESULT_REPORTED");
       return;
     }
 
@@ -132,16 +133,18 @@ export class PrintCommandRunner {
     if (command.redelivered || (await this.ledger.hasSubmitted(command.operationId))) {
       const known = await this.askDevice(command);
       if (known.state !== "NOT_SUBMITTED") {
-        await this.report(command, known);
+        const accepted = await this.report(command, known);
+        if (accepted) await this.ledger.record(command.operationId, "RESULT_REPORTED");
         return;
       }
     }
 
-    await this.progress(command, "PRINTING");
-
-    let status: PrintOperationStatus;
+    let documents;
     try {
-      const documents = await this.spool.fetchDocuments(
+      // Renewing while PREPARING keeps artifact retrieval alive without telling
+      // the control plane that a device has seen the job.
+      await this.progress(command, "PREPARING");
+      documents = await this.spool.fetchDocuments(
         command.operationId,
         command.manifest.documents.map((document) => ({
           printJobId: command.printJobId,
@@ -153,11 +156,22 @@ export class PrintCommandRunner {
         }))
       );
 
-      // The intent to submit is durable before the device is touched, so a
-      // crash in the next line is recoverable rather than invisible.
+      // The intent is durable before the submission authorization is requested.
+      // A crash from here is resolved by asking the device, never by guessing.
       await this.ledger.record(command.operationId, "SUBMITTING");
       await this.progress(command, "SUBMITTED");
+    } catch (error) {
+      // Everything above happened before the device call. A timeout, an
+      // integrity error, or a rejected lease therefore proves no output was
+      // submitted; it must not strand a paid customer in operator recovery.
+      await this.spool.discard(command.operationId).catch(() => undefined);
+      const accepted = await this.report(command, notSubmitted(command, error));
+      if (accepted) await this.ledger.record(command.operationId, "RESULT_REPORTED");
+      return;
+    }
 
+    let status: PrintOperationStatus;
+    try {
       status = await this.options.adapter.submit({
         operationId: command.operationId,
         manifest: { ...command.manifest, documents: command.manifest.documents },
@@ -171,14 +185,14 @@ export class PrintCommandRunner {
         }))
       });
     } catch (error) {
-      status = await this.resolveFailure(command, error);
+      status = await this.resolveAdapterFailure(command, error);
     } finally {
       // The local copy of a customer's document lives no longer than the print.
       await this.spool.discard(command.operationId).catch(() => undefined);
     }
 
-    await this.report(command, status);
-    await this.ledger.record(command.operationId, "RESULT_REPORTED");
+    const accepted = await this.report(command, status);
+    if (accepted) await this.ledger.record(command.operationId, "RESULT_REPORTED");
   }
 
   /**
@@ -186,14 +200,12 @@ export class PrintCommandRunner {
    * have started printing is a confirmed failure; anything ambiguous means
    * asking the device what it actually holds.
    */
-  private async resolveFailure(
+  private async resolveAdapterFailure(
     command: AgentPrintCommand,
     error: unknown
   ): Promise<PrintOperationStatus> {
     const adapterError = asPrinterAdapterError(error);
-    const ambiguous = adapterError
-      ? adapterError.submissionAmbiguous
-      : !(error instanceof Error) || !isLocalPreparationFailure(error);
+    const ambiguous = adapterError ? adapterError.submissionAmbiguous : true;
     if (ambiguous) {
       const known = await this.askDevice(command);
       if (known.state !== "NOT_SUBMITTED") return known;
@@ -236,15 +248,18 @@ export class PrintCommandRunner {
 
   private async progress(
     command: AgentPrintCommand,
-    state: "SUBMITTED" | "PRINTING"
+    state: "PREPARING" | "SUBMITTED" | "PRINTING"
   ): Promise<void> {
-    await this.request(`/v1/agent/commands/${encodeURIComponent(command.operationId)}/progress`, {
-      claimToken: command.claimToken,
-      state
-    }).catch(() => undefined);
+    const response = await this.request(
+      `/v1/agent/commands/${encodeURIComponent(command.operationId)}/progress`,
+      { claimToken: command.claimToken, state }
+    );
+    if (!response.ok) throw new Error("PRINT_COMMAND_PROGRESS_REJECTED");
+    const ack = agentCommandAckSchema.parse(await response.json());
+    if (!ack.accepted) throw new Error("PRINT_COMMAND_LEASE_LOST");
   }
 
-  private async report(command: AgentPrintCommand, status: PrintOperationStatus): Promise<void> {
+  private async report(command: AgentPrintCommand, status: PrintOperationStatus): Promise<boolean> {
     const response = await this.request(
       `/v1/agent/commands/${encodeURIComponent(command.operationId)}/result`,
       {
@@ -263,7 +278,7 @@ export class PrintCommandRunner {
         { operationId: command.operationId, status: response.status },
         "print result could not be reported"
       );
-      return;
+      return false;
     }
 
     const ack = agentCommandAckSchema.parse(await response.json());
@@ -278,6 +293,7 @@ export class PrintCommandRunner {
       },
       "print operation reported"
     );
+    return ack.accepted;
   }
 
   private async request(path: string, body: unknown): Promise<Response> {
@@ -329,25 +345,40 @@ export class PrintCommandRunner {
  */
 function asPrinterAdapterError(error: unknown): PrinterAdapterError | null {
   if (error instanceof PrinterAdapterError) return error;
-  if (error instanceof Error && error.name === "PrinterAdapterError") {
+  if (
+    error instanceof Error &&
+    error.name === "PrinterAdapterError" &&
+    typeof Reflect.get(error, "submissionAmbiguous") === "boolean" &&
+    typeof Reflect.get(error, "code") === "string" &&
+    PRINTER_ADAPTER_ERROR_CODES.has(Reflect.get(error, "code") as string)
+  ) {
     return error as PrinterAdapterError;
   }
   return null;
 }
 
-/**
- * Failures that happen entirely on this side of the device: a document that
- * could not be fetched or did not match its digest. Nothing was submitted, so
- * the job can be failed definitely instead of left ambiguous.
- */
-function isLocalPreparationFailure(error: Error): boolean {
-  const adapterError = asPrinterAdapterError(error);
-  return (
-    error.message.startsWith("PRINT_DOCUMENT_") ||
-    error.message === "PRINT_OPERATION_ID_INVALID" ||
-    error.message === "PRINT_SPOOL_PATH_INVALID" ||
-    (adapterError !== null && !adapterError.submissionAmbiguous)
-  );
+const PRINTER_ADAPTER_ERROR_CODES = new Set([
+  "PRINTER_OFFLINE",
+  "OPERATION_ID_INVALID",
+  "MANIFEST_INVALID",
+  "ARTIFACT_UNAVAILABLE",
+  "OUTPUT_WRITE_FAILED",
+  "SUBMISSION_UNCONFIRMED",
+  "DEVICE_ERROR"
+]);
+
+function notSubmitted(command: AgentPrintCommand, error: unknown): PrintOperationStatus {
+  return {
+    operationId: command.operationId,
+    state: "NOT_SUBMITTED",
+    confidence: "CONFIRMED",
+    failureCode:
+      error instanceof Error && error.message.startsWith("PRINT_COMMAND_")
+        ? "CANCELED_BEFORE_SUBMIT"
+        : "ARTIFACT_UNAVAILABLE",
+    warningCode: null,
+    sheetsProduced: 0
+  };
 }
 
 function adapterFailureCode(error: unknown): PrintOperationStatus["failureCode"] {

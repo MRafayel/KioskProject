@@ -350,7 +350,9 @@ async function verifyPrintJobInvariants(targetUrl) {
       ["copies", 9, "PHASE8_PRINT_JOB_COPIES_MUTABLE"],
       ["physical_sheets", 9, "PHASE8_PRINT_JOB_SHEETS_MUTABLE"],
       ["job_manifest_hash", "1".repeat(64), "PHASE8_PRINT_JOB_MANIFEST_MUTABLE"],
-      ["settings_revision", 2, "PHASE8_PRINT_JOB_SETTINGS_MUTABLE"]
+      ["settings_revision", 2, "PHASE8_PRINT_JOB_SETTINGS_MUTABLE"],
+      ["simulated_outcome", "OFFLINE", "PHASE8_PRINT_JOB_SCENARIO_MUTABLE"],
+      ["created_by_actor_id", "rewritten", "PHASE8_PRINT_JOB_CREATOR_MUTABLE"]
     ]) {
       await expectRejected(
         client,
@@ -366,12 +368,33 @@ async function verifyPrintJobInvariants(targetUrl) {
       "PHASE8_PRINT_JOB_SNAPSHOT_MUTABLE"
     );
 
+    await expectRejected(
+      client,
+      `INSERT INTO "idempotency_records"
+        ("id", "actor_id", "action", "key_digest", "request_hash", "response_status",
+         "response_body", "expires_at")
+       VALUES (gen_random_uuid(), 'phase8-upgrade', 'print-jobs.create:test', $1, $2, 201,
+         '{"printJob":{"id":"leak","objectKey":"normalized/v1/private"}}'::jsonb,
+         CURRENT_TIMESTAMP + INTERVAL '1 hour')`,
+      ["1".repeat(64), "2".repeat(64)],
+      "PHASE8_UNSAFE_PRINT_REPLAY_STORED"
+    );
+
     // A device cannot report more sheets than the job describes.
     await expectRejected(
       client,
       `UPDATE "print_jobs" SET "sheets_produced" = 99 WHERE "id" = $1::uuid`,
       [fixture.printJobId],
       "PHASE8_IMPOSSIBLE_SHEET_COUNT_ACCEPTED"
+    );
+    await expectRejected(
+      client,
+      `UPDATE "print_jobs"
+       SET "status" = 'COMPLETED', "result_confidence" = 'CONFIRMED',
+           "sheets_produced" = 0, "completed_at" = CURRENT_TIMESTAMP
+       WHERE "id" = $1::uuid`,
+      [fixture.printJobId],
+      "PHASE8_ZERO_SHEET_COMPLETION_ACCEPTED"
     );
 
     // One command per job, ever: a redelivery re-leases this row rather than
@@ -389,12 +412,28 @@ async function verifyPrintJobInvariants(targetUrl) {
       [fixture.commandId],
       "PHASE8_ISSUED_COMMAND_MUTABLE"
     );
+    await expectRejected(
+      client,
+      `UPDATE "agent_commands" SET "expires_at" = "expires_at" + INTERVAL '1 minute'
+       WHERE "id" = $1::uuid`,
+      [fixture.commandId],
+      "PHASE8_COMMAND_DEADLINE_MUTABLE"
+    );
     // A claimed command holds a lease and a token together, or neither.
     await expectRejected(
       client,
       `UPDATE "agent_commands" SET "status" = 'CLAIMED' WHERE "id" = $1::uuid`,
       [fixture.commandId],
       "PHASE8_CLAIM_WITHOUT_LEASE_ACCEPTED"
+    );
+    await expectRejected(
+      client,
+      `UPDATE "agent_commands"
+       SET "status" = 'CLAIMED', "claim_token" = gen_random_uuid(),
+           "lease_expires_at" = "expires_at" + INTERVAL '1 second'
+       WHERE "id" = $1::uuid`,
+      [fixture.commandId],
+      "PHASE8_LEASE_OUTLIVED_DEADLINE"
     );
 
     // The operation ledger is evidence: appended, never rewritten.

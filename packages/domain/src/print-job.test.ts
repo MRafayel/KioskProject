@@ -43,6 +43,13 @@ describe("settlePrintDeviceResult", () => {
     expect(settlement.refundObligation).toBe(false);
   });
 
+  it("refuses to call a zero-sheet completion a success", () => {
+    const settlement = settlePrintDeviceResult(result({ sheetsProduced: 0 }));
+
+    expect(settlement.status).toBe("RECOVERY_REQUIRED");
+    expect(settlement.refundObligation).toBe(false);
+  });
+
   it("owes money back when the device proves nothing was submitted", () => {
     const settlement = settlePrintDeviceResult(
       result({ state: "NOT_SUBMITTED", sheetsProduced: 0, failureCode: null })
@@ -57,11 +64,20 @@ describe("settlePrintDeviceResult", () => {
     });
   });
 
+  it("does not refund a contradictory not-submitted result", () => {
+    const settlement = settlePrintDeviceResult(
+      result({ state: "NOT_SUBMITTED", confidence: "UNCONFIRMED", sheetsProduced: null })
+    );
+
+    expect(settlement.status).toBe("RECOVERY_REQUIRED");
+    expect(settlement.refundObligation).toBe(false);
+  });
+
   it("owes money back for a failure that produced no sheets", () => {
     const settlement = settlePrintDeviceResult(
       result({
         state: "FAILED",
-        confidence: "UNCONFIRMED",
+        confidence: "CONFIRMED",
         failureCode: "OUT_OF_PAPER",
         sheetsProduced: 0
       })
@@ -73,6 +89,20 @@ describe("settlePrintDeviceResult", () => {
       failureCode: "OUT_OF_PAPER",
       refundObligation: true
     });
+  });
+
+  it("does not refund an unconfirmed zero-sheet failure", () => {
+    const settlement = settlePrintDeviceResult(
+      result({
+        state: "FAILED",
+        confidence: "UNCONFIRMED",
+        failureCode: "DEVICE_ERROR",
+        sheetsProduced: 0
+      })
+    );
+
+    expect(settlement.status).toBe("RECOVERY_REQUIRED");
+    expect(settlement.refundObligation).toBe(false);
   });
 
   it("escalates a partial failure to recovery instead of refunding it", () => {
@@ -118,6 +148,16 @@ describe("settlePrintDeviceResult", () => {
       failureCode: "CANCELED_AT_DEVICE",
       refundObligation: false
     });
+  });
+
+  it("does not refund a cancellation that reports produced sheets", () => {
+    const settlement = settlePrintDeviceResult(
+      result({ state: "CANCELED", confidence: "CONFIRMED", sheetsProduced: 1 })
+    );
+
+    expect(settlement.status).toBe("RECOVERY_REQUIRED");
+    expect(settlement.refundObligation).toBe(false);
+    expect(settlement.sheetsProduced).toBe(1);
   });
 
   it("never resolves an open or unknown state into an outcome", () => {

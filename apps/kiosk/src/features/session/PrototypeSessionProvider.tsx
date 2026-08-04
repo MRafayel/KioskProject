@@ -3,6 +3,7 @@ import {
   type Dispatch,
   type ReactNode,
   useContext,
+  useEffect,
   useMemo,
   useReducer
 } from "react";
@@ -13,6 +14,7 @@ import {
   type PrototypeAction,
   type PrototypeState
 } from "./model.js";
+import { persistFulfillmentState, restoreFulfillmentState } from "./fulfillmentPersistence.js";
 
 interface PrototypeSessionContextValue {
   state: PrototypeState;
@@ -28,7 +30,10 @@ export function PrototypeSessionProvider({
   children: ReactNode;
   initialState?: PrototypeState;
 }) {
-  const [state, dispatch] = useReducer(prototypeReducer, initialState);
+  const [state, dispatch] = useReducer(prototypeReducer, initialState, (provided) =>
+    provided === initialPrototypeState ? (restoreFulfillmentState() ?? provided) : provided
+  );
+  useEffect(() => persistFulfillmentState(state), [state]);
   const value = useMemo(() => ({ state, dispatch }), [state]);
 
   return (

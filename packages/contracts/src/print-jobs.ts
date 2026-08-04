@@ -150,7 +150,46 @@ export const printJobManifestSchema = z
     physicalSheets: z.number().int().positive(),
     documents: z.array(printJobDocumentSchema).min(1).max(10)
   })
-  .strict();
+  .strict()
+  .superRefine((manifest, context) => {
+    const documentIds = new Set<string>();
+    const positions = new Set<number>();
+    let selectedPages = 0;
+    for (const [index, document] of manifest.documents.entries()) {
+      if (documentIds.has(document.documentId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["documents", index, "documentId"],
+          message: "A print manifest cannot contain the same document twice."
+        });
+      }
+      if (positions.has(document.position)) {
+        context.addIssue({
+          code: "custom",
+          path: ["documents", index, "position"],
+          message: "Every print manifest position must be unique."
+        });
+      }
+      documentIds.add(document.documentId);
+      positions.add(document.position);
+      selectedPages += document.selectedPages;
+    }
+
+    if (selectedPages !== manifest.selectedPages) {
+      context.addIssue({
+        code: "custom",
+        path: ["selectedPages"],
+        message: "The print manifest page total must match its documents."
+      });
+    }
+    if (manifest.printedSides !== manifest.selectedPages * manifest.copies) {
+      context.addIssue({
+        code: "custom",
+        path: ["printedSides"],
+        message: "The print manifest side total must match its pages and copies."
+      });
+    }
+  });
 
 /**
  * One durable command leased by the kiosk agent. The kiosk opens no inbound
@@ -187,7 +226,8 @@ export const claimAgentCommandsResponseSchema = z
 export const reportAgentCommandProgressBodySchema = z
   .object({
     claimToken: z.string().uuid(),
-    state: z.enum(["SUBMITTED", "PRINTING"])
+    /** PREPARING renews a lease without claiming that the device saw the job. */
+    state: z.enum(["PREPARING", "SUBMITTED", "PRINTING"])
   })
   .strict();
 
@@ -200,7 +240,54 @@ export const reportAgentCommandResultBodySchema = z
     warningCode: printWarningCodeSchema.nullable(),
     sheetsProduced: sheetCountSchema.nullable()
   })
-  .strict();
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.state === "NOT_SUBMITTED" &&
+      (result.confidence !== "CONFIRMED" || result.sheetsProduced !== 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["state"],
+        message: "A not-submitted result must confirm that zero sheets were produced."
+      });
+    }
+    if (
+      result.state === "CANCELED" &&
+      result.confidence === "CONFIRMED" &&
+      result.sheetsProduced !== 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sheetsProduced"],
+        message: "A confirmed cancellation must report zero sheets produced."
+      });
+    }
+    if (
+      result.state === "FAILED" &&
+      result.confidence !== "CONFIRMED" &&
+      result.sheetsProduced === 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["confidence"],
+        message: "A zero-sheet failure must be confirmed before it can be settled definitely."
+      });
+    }
+    if (
+      result.state === "COMPLETED" &&
+      (result.failureCode !== null ||
+        (result.confidence === "CONFIRMED" &&
+          (result.sheetsProduced === null || result.sheetsProduced === 0)))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["state"],
+        message:
+          "A completion cannot include a failure code, and a confirmed completion must report produced sheets."
+      });
+    }
+  });
 
 export const agentCommandAckSchema = z
   .object({ accepted: z.boolean(), printJobStatus: printJobStatusSchema })

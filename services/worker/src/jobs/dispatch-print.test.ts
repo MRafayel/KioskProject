@@ -55,6 +55,7 @@ function stubDatabase(options: StubOptions = {}) {
           ...options.command
         };
 
+  const printJobFindUnique = vi.fn().mockResolvedValue(printJob);
   const printJobUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
   const commandCreate = vi.fn().mockResolvedValue({});
   const commandUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -66,7 +67,7 @@ function stubDatabase(options: StubOptions = {}) {
   const client = {
     printJob: {
       findMany: vi.fn().mockResolvedValue([{ id: printJobId, dispatchAttempts: 0 }]),
-      findUnique: vi.fn().mockResolvedValue(printJob),
+      findUnique: printJobFindUnique,
       updateMany: printJobUpdateMany
     },
     printJobEvent: { findFirst: vi.fn().mockResolvedValue(null), create: ledgerCreate },
@@ -113,6 +114,8 @@ function stubDatabase(options: StubOptions = {}) {
 
   return {
     database,
+    printJob,
+    printJobFindUnique,
     printJobUpdateMany,
     commandCreate,
     commandUpdateMany,
@@ -195,6 +198,20 @@ describe("PrintDispatcher", () => {
     await dispatcher.close().catch(() => undefined);
   });
 
+  it("does not issue a command when cancellation wins while the handler waits for the lock", async () => {
+    const stub = stubDatabase();
+    stub.printJobFindUnique
+      .mockResolvedValueOnce(stub.printJob)
+      .mockResolvedValueOnce({ ...stub.printJob, status: "CANCELED" });
+    const dispatcher = buildDispatcher(stub.database);
+
+    await issue(dispatcher);
+
+    expect(stub.commandCreate).not.toHaveBeenCalled();
+    expect(stub.printJobUpdateMany).not.toHaveBeenCalled();
+    await dispatcher.close().catch(() => undefined);
+  });
+
   it("reuses the existing command rather than opening a second operation", async () => {
     const stub = stubDatabase({ existingCommand: true });
     const dispatcher = buildDispatcher(stub.database);
@@ -221,7 +238,7 @@ describe("PrintDispatcher", () => {
   it("escalates an exhausted lease to operator recovery without a refund", async () => {
     // The agent held the work and never came back, and it may not be handed
     // out again. Whether paper emerged is now unknowable from here.
-    const stub = stubDatabase({ commandAttempts: 2 });
+    const stub = stubDatabase({ commandAttempts: 2, jobStatus: "PRINTING" });
     const dispatcher = buildDispatcher(stub.database);
 
     await dispatcher.reconcileOnce();
@@ -234,6 +251,20 @@ describe("PrintDispatcher", () => {
     ).toBe(true);
     expect(stub.refundUpsert).not.toHaveBeenCalled();
     expect(wrote(stub.outboxCreate, { type: "print.recovery_required" })).toBe(true);
+    await dispatcher.close().catch(() => undefined);
+  });
+
+  it("refunds an exhausted lease when submission was never acknowledged", async () => {
+    const stub = stubDatabase({ commandAttempts: 2, jobStatus: "DISPATCHED" });
+    const dispatcher = buildDispatcher(stub.database);
+
+    await dispatcher.reconcileOnce();
+
+    expect(
+      wrote(stub.printJobUpdateMany, { status: "FAILED", resultConfidence: "CONFIRMED" })
+    ).toBe(true);
+    expect(stub.refundUpsert).toHaveBeenCalledTimes(1);
+    expect(wrote(stub.outboxCreate, { type: "print.failed" })).toBe(true);
     await dispatcher.close().catch(() => undefined);
   });
 
@@ -260,6 +291,7 @@ describe("PrintDispatcher", () => {
 
   it("never calls an overdue job that reached a device a failure", async () => {
     const stub = stubDatabase({
+      jobStatus: "PRINTING",
       deadlineAt: past,
       existingCommand: true,
       commandAttempts: 1,

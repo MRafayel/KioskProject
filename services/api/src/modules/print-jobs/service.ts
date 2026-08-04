@@ -94,7 +94,8 @@ export class PrintJobService {
     const action = `print-jobs.create:${input.sessionId}`;
     const requestHash = hashRequest({
       sessionId: input.sessionId,
-      paymentId: input.paymentId
+      paymentId: input.paymentId,
+      simulatedOutcome: input.simulatedOutcome ?? ""
     });
 
     for (let attempt = 0; attempt < MAX_TRANSACTION_ATTEMPTS; attempt += 1) {
@@ -364,11 +365,10 @@ export class PrintJobService {
               });
             }
 
-            const claimed = await transaction.agentCommand.findFirst({
-              where: { printJobId: printJob.id, status: "CLAIMED" },
-              select: { id: true }
-            });
-            const submitted = printJob.status === "PRINTING" || claimed !== null;
+            // Holding a command while artifacts are prepared is not evidence
+            // that a device saw it. Only an accepted submission/progress report
+            // moves the job to PRINTING and crosses the ambiguous-output boundary.
+            const submitted = printJob.status === "PRINTING";
 
             if (submitted) {
               // The device already has the work. Recording the request is all

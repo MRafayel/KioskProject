@@ -262,7 +262,8 @@ export function registerAgentCommandRoutes(
           kioskId: identity.kioskId,
           status: "CLAIMED",
           claimToken,
-          leaseExpiresAt: { gt: dependencies.clock.now() }
+          leaseExpiresAt: { gt: dependencies.clock.now() },
+          expiresAt: { gt: dependencies.clock.now() }
         },
         select: { id: true }
       });

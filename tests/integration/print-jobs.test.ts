@@ -275,6 +275,22 @@ describe.sequential("Phase 8 virtual printing", () => {
     expect(foreign.json()).toMatchObject({ error: { code: "PRINT_JOB_NOT_FOUND" } });
   });
 
+  it("rejects an idempotency key reused with a different simulated outcome", async () => {
+    const paid = await preparePaidSession("phase8-idempotency-body");
+    await startPrintJob(paid, "phase8-print-scenario-reuse", "OFFLINE");
+
+    const reused = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${paid.sessionId}/print-jobs`,
+      headers: { authorization, "idempotency-key": "phase8-print-scenario-reuse" },
+      payload: { paymentId: paid.paymentId, simulatedOutcome: "SUCCESS" }
+    });
+
+    expect(reused.statusCode, reused.body).toBe(409);
+    expect(reused.json()).toMatchObject({ error: { code: "IDEMPOTENCY_KEY_REUSED" } });
+    expect(await database.printJob.count({ where: { sessionId: paid.sessionId } })).toBe(1);
+  });
+
   it("refuses to print a session that has not been paid", async () => {
     const priced = await prepareQuotedSession("phase8-unpaid");
 
@@ -436,6 +452,34 @@ describe.sequential("Phase 8 virtual printing", () => {
     expect(printer.submissions).toBe(0);
   });
 
+  it("cancels safely while the agent is only preparing the claimed command", async () => {
+    const paid = await preparePaidSession("phase8-cancel-preparing");
+    const created = await startPrintJob(paid, "phase8-print-cancel-preparing");
+    await dispatcher.dispatchOnce();
+    await drainDispatchQueue();
+
+    const claimed = await app.inject({
+      method: "POST",
+      url: "/v1/agent/commands/claim",
+      headers: { authorization },
+      payload: { max: 1 }
+    });
+    expect(claimed.statusCode, claimed.body).toBe(200);
+
+    const canceled = await app.inject({
+      method: "POST",
+      url: `/v1/print-jobs/${created.id}/cancel`,
+      headers: { authorization, "idempotency-key": "phase8-cancel-preparing-request" }
+    });
+
+    expect(canceled.statusCode, canceled.body).toBe(200);
+    expect(getPrintJobResponseSchema.parse(canceled.json()).printJob.status).toBe("CANCELED");
+    expect(await database.refund.count({ where: { sessionId: paid.sessionId } })).toBe(1);
+    expect(
+      (await database.agentCommand.findUniqueOrThrow({ where: { printJobId: created.id } })).status
+    ).toBe("FAILED");
+  });
+
   it("refuses to cancel a print that already finished", async () => {
     const paid = await preparePaidSession("phase8-cancel-late");
     const created = await startPrintJob(paid, "phase8-print-cancel-late");
@@ -549,6 +593,40 @@ describe.sequential("Phase 8 virtual printing", () => {
     expect(await database.refund.count({ where: { sessionId: paid.sessionId } })).toBe(1);
   });
 
+  it("refunds a claimed job that reached its deadline before submission was acknowledged", async () => {
+    const paid = await preparePaidSession("phase8-deadline-preparing");
+    const created = await startPrintJob(paid, "phase8-print-deadline-preparing");
+    await dispatcher.dispatchOnce();
+    await drainDispatchQueue();
+    const claimed = await app.inject({
+      method: "POST",
+      url: "/v1/agent/commands/claim",
+      headers: { authorization },
+      payload: { max: 1 }
+    });
+    expect(claimed.statusCode, claimed.body).toBe(200);
+
+    const later = new PrintDispatcher({
+      database: serviceDatabase,
+      redisUrl: environment.REDIS_URL,
+      logger: silentLogger,
+      leaseMilliseconds: environment.PRINT_COMMAND_LEASE_SECONDS * 1_000,
+      maxCommandAttempts: environment.PRINT_COMMAND_MAX_ATTEMPTS,
+      maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS,
+      now: () => new Date(Date.now() + environment.PRINT_JOB_TIMEOUT_SECONDS * 1_000 + 1_000)
+    });
+    try {
+      await later.reconcileOnce();
+    } finally {
+      await later.close();
+    }
+
+    const settled = await readPrintJob(created.id);
+    expect(settled.status).toBe("FAILED");
+    expect(settled.resultConfidence).toBe("CONFIRMED");
+    expect(await database.refund.count({ where: { sessionId: paid.sessionId } })).toBe(1);
+  });
+
   it("keeps an immutable job snapshot and an append-only operation ledger", async () => {
     const paid = await preparePaidSession("phase8-snapshot");
     const created = await startPrintJob(paid, "phase8-print-snapshot");
@@ -581,8 +659,7 @@ describe.sequential("Phase 8 virtual printing", () => {
       "CREATED",
       "DISPATCHED",
       "CLAIMED",
-      // The agent says it has the work before it hands it over, so an
-      // interrupted print leaves evidence rather than silence.
+      // Preparation renews the lease without claiming device handoff.
       "PROGRESS",
       "SUBMITTED",
       "COMPLETED"

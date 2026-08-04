@@ -200,14 +200,21 @@ export class PrintDispatcher {
     await this.options.database.$transaction(
       async (transaction) => {
         const now = this.now();
-        const printJob = await transaction.printJob.findUnique({
+        const candidate = await transaction.printJob.findUnique({
           where: { id: parsed.printJobId }
         });
         // A duplicate queue delivery, or a job that was cancelled between the
         // reservation and the handler, both land here and do nothing.
-        if (!printJob || printJob.status !== "QUEUED") return;
+        if (!candidate || candidate.status !== "QUEUED") return;
 
-        await lockSessionRow(transaction, printJob.sessionId);
+        await lockSessionRow(transaction, candidate.sessionId);
+        // Cancellation may have settled the row while this handler waited for
+        // the session lock. Re-read after locking so a stale QUEUED snapshot can
+        // never create a command for a terminal job.
+        const printJob = await transaction.printJob.findUnique({
+          where: { id: parsed.printJobId }
+        });
+        if (!printJob || printJob.status !== "QUEUED") return;
 
         const existing = await transaction.agentCommand.findUnique({
           where: { printJobId: printJob.id },
@@ -298,27 +305,40 @@ export class PrintDispatcher {
           return true;
         }
 
-        // The agent held this work and never came back, and it may not be
-        // handed out again. Whether anything reached paper is now unknowable
-        // from here, so a person settles it.
-        const settlement = settlePrintDeviceResult({
-          state: "UNKNOWN",
-          confidence: "UNCONFIRMED",
-          failureCode: "SUBMISSION_UNCONFIRMED",
-          warningCode: null,
-          sheetsProduced: null
+        const printJob = await transaction.printJob.findUnique({
+          where: { id: command.printJobId },
+          select: { status: true }
         });
+        // Exhausting preparation leases is a definite pre-device failure. Once
+        // an accepted submission report moved the job to PRINTING, silence is
+        // ambiguous and only an operator may settle it.
+        const submissionMayHaveStarted = printJob?.status === "PRINTING";
+        const settlement = submissionMayHaveStarted
+          ? settlePrintDeviceResult({
+              state: "UNKNOWN",
+              confidence: "UNCONFIRMED",
+              failureCode: "SUBMISSION_UNCONFIRMED",
+              warningCode: null,
+              sheetsProduced: null
+            })
+          : settlePrintDeviceResult({
+              state: "NOT_SUBMITTED",
+              confidence: "CONFIRMED",
+              failureCode: "PRINTER_UNAVAILABLE",
+              warningCode: null,
+              sheetsProduced: 0
+            });
         const outcome = await applyPrintJobSettlement(transaction, {
           printJobId: command.printJobId,
           ...settlement,
           operationId: command.operationId,
-          ledgerType: "RECOVERY_REQUIRED",
+          ledgerType: submissionMayHaveStarted ? "RECOVERY_REQUIRED" : "FAILED",
           actorType: "SYSTEM",
           actorId: "print-dispatcher",
           now,
           newId: () => this.newId()
         });
-        if (outcome.applied) {
+        if (outcome.applied && submissionMayHaveStarted) {
           this.options.logger.warn(
             { printJobId: command.printJobId, operationId: command.operationId },
             "print operation lease exhausted; operator recovery required"
@@ -343,12 +363,11 @@ export class PrintDispatcher {
           select: { operationId: true, status: true, attempts: true }
         });
 
-        // Nothing was ever claimed, so nothing reached a device: a definite
-        // failure, and the capture becomes money owed back. Anything that was
-        // claimed at least once could have printed, and cannot be called a
-        // failure from here.
-        const neverHandedOver = !command || command.attempts === 0;
-        const settlement = neverHandedOver
+        // A claim can be only preparation. The accepted submission heartbeat is
+        // what moves the job to PRINTING; before that boundary a deadline is a
+        // definite failure, afterwards it is ambiguous.
+        const submissionMayHaveStarted = printJob.status === "PRINTING";
+        const settlement = !submissionMayHaveStarted
           ? settlePrintDeviceResult({
               state: "NOT_SUBMITTED",
               confidence: "CONFIRMED",

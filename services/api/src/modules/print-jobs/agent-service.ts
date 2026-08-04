@@ -76,29 +76,51 @@ export class AgentCommandService {
       input.kioskId,
       input.operationId,
       async (transaction, command) => {
-        const held = await this.holdLease(transaction, command, input.body.claimToken);
         const now = this.options.clock.now();
-        if (!held) return this.acknowledge(transaction, command.printJobId, false);
+        const leaseExpiresAt = await this.renewedLeaseExpiry(
+          transaction,
+          command,
+          input.body.claimToken,
+          now
+        );
+        if (!leaseExpiresAt) return this.acknowledge(transaction, command.printJobId, false);
 
-        await transaction.agentCommand.updateMany({
-          where: { id: command.id, claimToken: input.body.claimToken },
+        const renewed = await transaction.agentCommand.updateMany({
+          where: {
+            id: command.id,
+            status: "CLAIMED",
+            claimToken: input.body.claimToken,
+            leaseExpiresAt: { gt: now },
+            expiresAt: { gt: now }
+          },
           data: {
-            leaseExpiresAt: new Date(now.getTime() + this.options.leaseSeconds * 1_000),
+            leaseExpiresAt,
             updatedAt: now
           }
         });
+        if (renewed.count !== 1) {
+          return this.acknowledge(transaction, command.printJobId, false);
+        }
 
-        // The device has the job. Recording that before any result arrives is
-        // what makes an interrupted print visible instead of silent.
-        const started = await transaction.printJob.updateMany({
-          where: { id: command.printJobId, status: { in: ["QUEUED", "DISPATCHED"] } },
-          data: { status: "PRINTING", startedAt: now, updatedAt: now }
+        // PREPARING is only a lease heartbeat while the agent fetches artifacts.
+        // SUBMITTED/PRINTING cross the device handoff boundary and make a lost
+        // result ambiguous rather than refundable.
+        const crossesSubmissionBoundary = input.body.state !== "PREPARING";
+        const started = crossesSubmissionBoundary
+          ? await transaction.printJob.updateMany({
+              where: { id: command.printJobId, status: { in: ["QUEUED", "DISPATCHED"] } },
+              data: { status: "PRINTING", startedAt: now, updatedAt: now }
+            })
+          : { count: 0 };
+        const printJob = await transaction.printJob.findUniqueOrThrow({
+          where: { id: command.printJobId },
+          select: { status: true }
         });
         await recordPrintJobEvent(transaction, {
           id: this.options.random.uuid(now),
           printJobId: command.printJobId,
           type: input.body.state === "SUBMITTED" ? "SUBMITTED" : "PROGRESS",
-          status: started.count === 1 ? "PRINTING" : input.body.state,
+          status: started.count === 1 ? "PRINTING" : printJob.status,
           operationId: command.operationId,
           now
         });
@@ -124,7 +146,13 @@ export class AgentCommandService {
       input.kioskId,
       input.operationId,
       async (transaction, command) => {
-        const held = await this.holdLease(transaction, command, input.body.claimToken);
+        const held =
+          (await this.renewedLeaseExpiry(
+            transaction,
+            command,
+            input.body.claimToken,
+            this.options.clock.now()
+          )) !== null;
         // A lost lease means the control plane already settled this job without
         // the device. The report is acknowledged so the agent stops retrying,
         // but it changes nothing.
@@ -174,13 +202,19 @@ export class AgentCommandService {
             if (!candidate?.printJobId) return null;
 
             const claimToken = this.options.random.uuid(now);
+            const leaseExpiresAt = new Date(
+              Math.min(
+                now.getTime() + this.options.leaseSeconds * 1_000,
+                candidate.expiresAt.getTime()
+              )
+            );
             const leased = await transaction.agentCommand.updateMany({
               where: { id: candidate.id, status: "PENDING", attempts: candidate.attempts },
               data: {
                 status: "CLAIMED",
                 claimToken,
                 claimedAt: now,
-                leaseExpiresAt: new Date(now.getTime() + this.options.leaseSeconds * 1_000),
+                leaseExpiresAt,
                 attempts: candidate.attempts + 1,
                 updatedAt: now
               }
@@ -200,7 +234,7 @@ export class AgentCommandService {
 
             return toAgentCommand(candidate, {
               claimToken,
-              leaseExpiresAt: new Date(now.getTime() + this.options.leaseSeconds * 1_000),
+              leaseExpiresAt,
               // A second hand-out means an earlier attempt may already have
               // reached the device.
               redelivered: candidate.attempts > 0
@@ -229,6 +263,7 @@ export class AgentCommandService {
         status: string;
         leaseExpiresAt: Date | null;
         claimToken: string | null;
+        expiresAt: Date;
       }
     ) => Promise<T>
   ): Promise<T> {
@@ -251,7 +286,8 @@ export class AgentCommandService {
               operationId: command.operationId,
               status: command.status,
               leaseExpiresAt: command.leaseExpiresAt,
-              claimToken: command.claimToken
+              claimToken: command.claimToken,
+              expiresAt: command.expiresAt
             });
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
@@ -269,18 +305,26 @@ export class AgentCommandService {
     );
   }
 
-  private async holdLease(
+  private async renewedLeaseExpiry(
     transaction: Prisma.TransactionClient,
-    command: { id: string; status: string; claimToken: string | null; leaseExpiresAt: Date | null },
-    claimToken: string
-  ): Promise<boolean> {
+    command: { id: string },
+    claimToken: string,
+    now: Date
+  ): Promise<Date | null> {
     const current = await transaction.agentCommand.findUnique({
       where: { id: command.id },
-      select: { status: true, claimToken: true, leaseExpiresAt: true }
+      select: { status: true, claimToken: true, leaseExpiresAt: true, expiresAt: true }
     });
-    if (!current || current.status !== "CLAIMED" || !current.claimToken) return false;
-    if (current.claimToken !== claimToken) return false;
-    return (current.leaseExpiresAt?.getTime() ?? 0) > this.options.clock.now().getTime();
+    if (!current || current.status !== "CLAIMED" || current.claimToken !== claimToken) return null;
+    if (
+      (current.leaseExpiresAt?.getTime() ?? 0) <= now.getTime() ||
+      current.expiresAt.getTime() <= now.getTime()
+    ) {
+      return null;
+    }
+    return new Date(
+      Math.min(now.getTime() + this.options.leaseSeconds * 1_000, current.expiresAt.getTime())
+    );
   }
 
   private async acknowledge(

@@ -108,14 +108,14 @@ describe("MockPrinterAdapter", () => {
     expect(status.confidence).toBe("CONFIRMED");
   });
 
-  it("reports out of paper as an unconfirmed failure that produced nothing", async () => {
+  it("reports out of paper as a confirmed failure that produced nothing", async () => {
     const adapter = new MockPrinterAdapter({ outputDirectory });
 
     const status = await adapter.submit(buildSubmission("OUT_OF_PAPER"));
 
     expect(status).toMatchObject({
       state: "FAILED",
-      confidence: "UNCONFIRMED",
+      confidence: "CONFIRMED",
       failureCode: "OUT_OF_PAPER",
       sheetsProduced: 0
     });
@@ -220,6 +220,23 @@ describe("MockPrinterAdapter", () => {
       adapter.submit({
         ...submission,
         artifacts: [{ ...submission.artifacts[0]!, path: "relative/document.pdf" }]
+      })
+    ).rejects.toMatchObject({ code: "ARTIFACT_UNAVAILABLE" });
+    await expect(
+      adapter.submit({
+        ...submission,
+        artifacts: [{ ...submission.artifacts[0]!, sha256: "f".repeat(64) }]
+      })
+    ).rejects.toMatchObject({ code: "ARTIFACT_UNAVAILABLE" });
+    await expect(
+      adapter.submit({
+        ...submission,
+        artifacts: [
+          {
+            ...submission.artifacts[0]!,
+            documentId: "01900000-0000-7000-8000-0000000000ff"
+          }
+        ]
       })
     ).rejects.toMatchObject({ code: "ARTIFACT_UNAVAILABLE" });
   });

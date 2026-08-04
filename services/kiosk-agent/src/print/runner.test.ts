@@ -101,7 +101,11 @@ interface Recorded {
  * A control plane that hands out one command and records everything reported
  * back, plus the print-ready document the agent is allowed to read.
  */
-function buildTransport(commands: AgentPrintCommand[], documentOverride?: Buffer) {
+function buildTransport(
+  commands: AgentPrintCommand[],
+  documentOverride?: Buffer,
+  rejectProgressState?: string
+) {
   const recorded: Recorded[] = [];
   let claimed = false;
 
@@ -130,6 +134,14 @@ function buildTransport(commands: AgentPrintCommand[], documentOverride?: Buffer
       path: url.pathname,
       body: JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>
     });
+    if (url.pathname.endsWith("/progress") && recorded.at(-1)?.body.state === rejectProgressState) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ accepted: false, printJobStatus: "DISPATCHED" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      );
+    }
     return Promise.resolve(
       new Response(JSON.stringify({ accepted: true, printJobStatus: "PRINTING" }), {
         status: 200,
@@ -172,12 +184,54 @@ describe("PrintCommandRunner", () => {
       confidence: "CONFIRMED",
       sheetsProduced: 2
     });
-    // The device is told it is working on the job before it is given the job,
-    // so an interrupted print is visible rather than silent.
+    // Preparation renews the lease without pretending the device has the job;
+    // SUBMITTED is the handoff boundary.
     expect(transport.progress().map((entry) => entry.body.state)).toEqual([
-      "PRINTING",
+      "PREPARING",
       "SUBMITTED"
     ]);
+  });
+
+  it("never submits after the control plane rejects the submission boundary", async () => {
+    const transport = buildTransport([buildCommand()], undefined, "SUBMITTED");
+    let submissions = 0;
+    const adapter = stubAdapter(() => {
+      submissions += 1;
+      return completed();
+    });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch).runOnce();
+
+    expect(submissions).toBe(0);
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "NOT_SUBMITTED",
+      confidence: "CONFIRMED",
+      failureCode: "CANCELED_BEFORE_SUBMIT",
+      sheetsProduced: 0
+    });
+  });
+
+  it("classifies an unexpected artifact-fetch failure as definitely pre-submission", async () => {
+    const transport = buildTransport([buildCommand()]);
+    let submissions = 0;
+    const adapter = stubAdapter(() => {
+      submissions += 1;
+      return completed();
+    });
+    const fetchImpl = (input: string | URL, init?: RequestInit) =>
+      new URL(input).pathname.includes("/documents/")
+        ? Promise.reject(new TypeError("network unavailable"))
+        : transport.fetch(input, init);
+
+    await buildRunner(adapter, fetchImpl as typeof fetch).runOnce();
+
+    expect(submissions).toBe(0);
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "NOT_SUBMITTED",
+      confidence: "CONFIRMED",
+      failureCode: "ARTIFACT_UNAVAILABLE",
+      sheetsProduced: 0
+    });
   });
 
   it("never resubmits a redelivered operation the device already completed", async () => {

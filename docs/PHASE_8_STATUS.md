@@ -280,6 +280,27 @@ leaves the payment ledger intact.
 - The production dependency audit reported no known vulnerabilities at
   `moderate` or higher, and Compose validation passed.
 
+### Post-implementation audit — 2026-08-04
+
+- The agent now distinguishes artifact preparation from device submission,
+  stops immediately when a progress/lease acknowledgement is refused, and
+  classifies all failures before the adapter call as definite non-submission.
+- Cancellation, exhausted leases, and deadlines use the accepted submission
+  boundary rather than a command claim to decide between a refund obligation
+  and operator recovery. Contradictory device results fail validation, and the
+  settlement reducer remains defensive if it is called outside the API.
+- Lease deadlines, result consistency, print replay redaction, immutable job
+  provenance, and immutable command deadlines are enforced in PostgreSQL as
+  well as application code. The clean Phase 7 → Phase 8 upgrade verifier covers
+  the added constraints.
+- A paid or printing kiosk workflow survives a browser refresh using a minimal
+  session-only record. It deliberately excludes the QR bearer URL and customer
+  filenames and validates every restored identifier and snapshot.
+- Final validation passed: 464 unit/component/service tests, 92 integration
+  tests across 6 files, 17 Playwright scenarios, formatting, lint, type-check,
+  production builds, Compose validation, and a dependency audit with no known
+  vulnerabilities.
+
 #### Three decisions made during implementation
 
 1. **A failed print is not retried, and that is what makes the refund rule
@@ -295,12 +316,12 @@ leaves the payment ledger intact.
    redelivery therefore carries a flag, and the agent resolves it by querying
    the device — whose output directory survives an agent reinstall — before it
    is willing to submit anything.
-3. **An adapter failure is recognised by name as well as by class.** An adapter
+3. **An adapter failure is recognised by validated shape as well as by class.** An adapter
    loaded through a second module instance — a test harness importing the
    package source while the agent imports its build — would otherwise turn a
    refusal the device is certain about into an ambiguous result nobody can
-   settle. The check now accepts either, matching how this repository already
-   recognises payment provider and driver-adapter errors.
+   settle. The cross-module check requires the adapter error name, a known code,
+   and a boolean ambiguity marker before it accepts the error as trusted.
 
 ## Known boundaries before commercial distribution
 

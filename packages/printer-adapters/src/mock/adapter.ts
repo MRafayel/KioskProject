@@ -108,7 +108,7 @@ export class MockPrinterAdapter implements PrinterAdapter {
     if (behaviour === "OUT_OF_PAPER") {
       return status(submission.operationId, {
         state: "FAILED",
-        confidence: "UNCONFIRMED",
+        confidence: "CONFIRMED",
         failureCode: "OUT_OF_PAPER",
         sheetsProduced: 0
       });
@@ -303,8 +303,23 @@ function assertSubmittable(submission: PrintSubmission): void {
   ) {
     throw new PrinterAdapterError("MANIFEST_INVALID");
   }
+  const expectedByDocument = new Map(
+    manifest.documents.map((document) => [document.documentId, document] as const)
+  );
+  if (expectedByDocument.size !== manifest.documents.length) {
+    throw new PrinterAdapterError("MANIFEST_INVALID");
+  }
+  const seenDocuments = new Set<string>();
+  const seenPositions = new Set<number>();
   for (const artifact of submission.artifacts) {
+    const expected = expectedByDocument.get(artifact.documentId);
     if (
+      !expected ||
+      seenDocuments.has(artifact.documentId) ||
+      seenPositions.has(artifact.position) ||
+      expected.position !== artifact.position ||
+      expected.sha256 !== artifact.sha256 ||
+      expected.sizeBytes !== artifact.sizeBytes ||
       !isAbsolute(artifact.path) ||
       artifact.sizeBytes < 1 ||
       !/^[0-9a-f]{64}$/u.test(artifact.sha256) ||
@@ -314,6 +329,8 @@ function assertSubmittable(submission: PrintSubmission): void {
     ) {
       throw new PrinterAdapterError("ARTIFACT_UNAVAILABLE");
     }
+    seenDocuments.add(artifact.documentId);
+    seenPositions.add(artifact.position);
   }
 }
 
