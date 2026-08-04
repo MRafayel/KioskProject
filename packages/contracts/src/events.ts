@@ -205,6 +205,18 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
   eventBaseSchema.extend({
     type: z.literal("session.expired"),
     payload: statePayloadSchema
+  }),
+  // Retention's durable "the documents are gone" signal. It carries a time and
+  // nothing else: an operations consumer needs to know that a session was
+  // emptied, never what was in it.
+  eventBaseSchema.extend({
+    type: z.literal("cleanup.completed"),
+    payload: z
+      .object({
+        sessionId: sessionIdSchema,
+        filesDeletedAt: z.string().datetime()
+      })
+      .strict()
   })
 ]);
 

@@ -1,3 +1,5 @@
+import type { RetentionPolicy } from "@printing-kiosk/domain";
+
 import type { Prisma } from "./generated/prisma/client.js";
 import { revokeSessionAccess, scheduleSessionFilesForCleanup } from "./session-cleanup.js";
 
@@ -144,6 +146,8 @@ export interface ApplyPrintJobSettlementInput {
   requestId?: string | undefined;
   now: Date;
   newId: () => string;
+  /** Retention grace for the documents this outcome finishes with. */
+  retentionPolicy?: RetentionPolicy;
 }
 
 export interface PrintJobSettlementOutcome {
@@ -296,7 +300,10 @@ export async function applyPrintJobSettlement(
   // The session is over however it ended: nobody may upload to it again, and
   // its documents are scheduled for deletion.
   await revokeSessionAccess(transaction, session.id, input.now);
-  await scheduleSessionFilesForCleanup(transaction, session.id, input.now);
+  await scheduleSessionFilesForCleanup(transaction, session.id, input.now, {
+    terminalState: input.sessionState,
+    ...(input.retentionPolicy ? { policy: input.retentionPolicy } : {})
+  });
 
   return { applied: true, refundId, sessionState: input.sessionState, sessionVersion: nextVersion };
 }

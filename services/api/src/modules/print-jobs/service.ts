@@ -26,7 +26,8 @@ import {
 import {
   settlePrintDeviceResult,
   SessionDomainError,
-  transitionSession
+  transitionSession,
+  type RetentionPolicy
 } from "@printing-kiosk/domain";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
@@ -46,6 +47,7 @@ export interface PrintJobServiceOptions {
   printJobTimeoutSeconds: number;
   /** Development scenarios. False in production, checked again per request. */
   testOutcomesEnabled: boolean;
+  retentionPolicy: RetentionPolicy;
 }
 
 interface CreatePrintJobInput {
@@ -401,7 +403,8 @@ export class PrintJobService {
                 actorId: input.credentialId,
                 requestId: input.requestId,
                 now,
-                newId: () => this.options.random.uuid(now)
+                newId: () => this.options.random.uuid(now),
+                retentionPolicy: this.options.retentionPolicy
               });
             }
 

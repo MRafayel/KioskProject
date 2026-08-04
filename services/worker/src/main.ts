@@ -5,7 +5,9 @@ import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
 import { createDatabaseClient } from "@printing-kiosk/database";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { SessionCleanupRunner } from "./jobs/cleanup-session.js";
 import { PrintDispatcher } from "./jobs/dispatch-print.js";
+import { StorageReconciler } from "./jobs/reconcile-storage.js";
 import { PaymentReconciler } from "./jobs/reconcile-payments.js";
 import { OutboxPublisher } from "./jobs/publish-outbox.js";
 import { DocumentProcessingCoordinator } from "./jobs/process-document.js";
@@ -82,11 +84,33 @@ const printDispatcher = new PrintDispatcher({
   maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS
 });
 
+// Retention runs here rather than in the API: deletion is background work
+// with its own lease and its own retry budget, and the object-storage
+// credential that may delete every root belongs to one process, not to every
+// request-serving replica.
+const sessionCleanup = new SessionCleanupRunner({
+  database,
+  store: documentStore,
+  logger,
+  leaseMilliseconds: environment.RETENTION_LEASE_SECONDS * 1_000,
+  maximumAttempts: environment.RETENTION_MAX_ATTEMPTS,
+  intervalMilliseconds: environment.RETENTION_SWEEP_INTERVAL_SECONDS * 1_000
+});
+
+const storageReconciler = new StorageReconciler({
+  database,
+  store: documentStore,
+  logger,
+  orphanGraceMilliseconds: environment.RETENTION_ORPHAN_GRACE_SECONDS * 1_000
+});
+
 logger.info({ productScope: PRODUCT_SCOPE }, "worker started");
 publisher.start();
 documentProcessing.start();
 paymentReconciler.start();
 printDispatcher.start();
+sessionCleanup.start();
+storageReconciler.start();
 
 const shutdown = async (signal: string) => {
   logger.info({ signal }, "worker stopped");
@@ -95,7 +119,9 @@ const shutdown = async (signal: string) => {
     documentProcessing.close(),
     processorScratch.close(),
     paymentReconciler.close(),
-    printDispatcher.close()
+    printDispatcher.close(),
+    sessionCleanup.close(),
+    storageReconciler.close()
   ]);
   await database.$disconnect();
   process.exit(0);

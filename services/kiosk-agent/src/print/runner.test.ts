@@ -260,6 +260,7 @@ describe("PrintCommandRunner", () => {
       getCapabilities: () => adapter.getCapabilities(),
       getOperationStatus: (id) => adapter.getOperationStatus(id),
       cancel: (id) => adapter.cancel(id),
+      discardOutputsBefore: (cutoff) => adapter.discardOutputsBefore(cutoff),
       submit: (submission: PrintSubmission) => {
         submissions += 1;
         return adapter.submit(submission);
@@ -481,7 +482,8 @@ function stubAdapter(
           sheetsProduced: 0
         }
       ),
-    cancel: () => Promise.resolve(completed())
+    cancel: () => Promise.resolve(completed()),
+    discardOutputsBefore: () => Promise.resolve(0)
   };
 }
 

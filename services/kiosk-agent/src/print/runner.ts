@@ -91,7 +91,7 @@ export class PrintCommandRunner {
     if (this.running) return 0;
     this.running = true;
     try {
-      await this.sweepStaleSpool();
+      await this.sweepLocalArtifacts();
       const commands = await this.claim();
       for (const command of commands) {
         await this.execute(command);
@@ -103,18 +103,28 @@ export class PrintCommandRunner {
   }
 
   /**
-   * Clear spooled documents no live print can still be using.
+   * The kiosk's own retention watchdog: clear local copies of a customer's
+   * document that no live print can still be using.
    *
-   * A spooled document exists only between being fetched and being handed to
-   * the device, so nothing should outlive the pass that wrote it — but a kiosk
-   * that loses power mid-print leaves one behind with nothing left to delete
-   * it. This sweeps by age rather than wholesale: another agent instance may
-   * share this directory, and its in-flight work is always newer than the job
-   * timeout because a job is settled at its own deadline. It runs on the first
-   * pass and then at most once per timeout window, and a failure is logged
+   * There are two of them and they expire for different reasons. A spooled
+   * document exists only between being fetched and being handed to the device,
+   * so nothing should outlive the pass that wrote it — but a kiosk that loses
+   * power mid-print leaves one behind with nothing left to delete it. Device
+   * output has to outlive its print, because it is the evidence a redelivered
+   * operation is resolved against instead of being printed twice; past the
+   * job's own deadline no redelivery is possible and it is only a copy.
+   *
+   * Both sweep by age rather than wholesale: another agent instance may share
+   * these directories, and its in-flight work is always newer than the cutoff
+   * because a job is settled at its own deadline. This runs on the first pass
+   * and then at most once per job-timeout window, and every failure is logged
    * rather than thrown so it can never stop the kiosk from printing.
+   *
+   * It is deliberately local and unconditional. A kiosk that cannot reach the
+   * control plane still deletes what it is holding, which is exactly the case
+   * where a cloud-issued delete command would never arrive.
    */
-  private async sweepStaleSpool(): Promise<void> {
+  private async sweepLocalArtifacts(): Promise<void> {
     const now = Date.now();
     if (now < this.nextSweepAt) return;
     const timeoutMilliseconds = this.options.environment.PRINT_JOB_TIMEOUT_SECONDS * 1_000;
@@ -132,6 +142,22 @@ export class PrintCommandRunner {
       this.options.logger.warn(
         { errorName: error instanceof Error ? error.name : "UnknownError" },
         "stale print spool could not be cleared"
+      );
+    }
+
+    try {
+      const retentionMilliseconds =
+        this.options.environment.PRINTER_OUTPUT_RETENTION_SECONDS * 1_000;
+      const discarded = await this.options.adapter.discardOutputsBefore(
+        new Date(now - retentionMilliseconds)
+      );
+      if (discarded > 0) {
+        this.options.logger.warn({ discarded }, "discarded expired device output");
+      }
+    } catch (error) {
+      this.options.logger.warn(
+        { errorName: error instanceof Error ? error.name : "UnknownError" },
+        "expired device output could not be discarded"
       );
     }
   }

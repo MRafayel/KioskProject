@@ -1620,6 +1620,10 @@ function createFileJanitor(
     clock,
     random: new CryptoRandomSource(),
     uploadTimeoutSeconds: environment.UPLOAD_TIMEOUT_SECONDS,
+    retentionPolicy: {
+      settledGraceMilliseconds: environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
+      recoveryGraceMilliseconds: environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
+    },
     onError: (error, operation) => errors.push({ error, operation })
   });
 }

@@ -15,6 +15,7 @@ import type { MobileAccessService } from "../mobile-access/service.js";
 import type { Clock } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
 import type { KioskAuthenticationThrottle } from "../sessions/rate-limit.js";
+import { assertSessionDocumentsAvailable } from "./retention-guard.js";
 import type { FileService } from "./service.js";
 
 const sessionParamsSchema = z.object({ sessionId: z.string().uuid() });
@@ -153,6 +154,9 @@ export function registerFileRoutes(
           params.sessionId
         );
       }
+      // An authorized caller asking for documents that retention has removed is
+      // told they are gone rather than shown an empty list.
+      await assertSessionDocumentsAvailable(dependencies.database, params.sessionId);
 
       return reply
         .header("cache-control", "no-store")

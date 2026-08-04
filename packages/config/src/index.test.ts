@@ -229,6 +229,51 @@ describe("loadEnvironment", () => {
     ).toThrow();
   });
 
+  it("refuses device output pruned before its own job could be redelivered", () => {
+    // The mock printer's output is the evidence a redelivered operation is
+    // resolved against. Discarding it while the job can still come back would
+    // turn a duplicate command into a duplicate print.
+    expect(() =>
+      loadEnvironment({
+        PRINT_JOB_TIMEOUT_SECONDS: "300",
+        PRINTER_OUTPUT_RETENTION_SECONDS: "299"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        PRINT_JOB_TIMEOUT_SECONDS: "300",
+        PRINTER_OUTPUT_RETENTION_SECONDS: "300"
+      }).PRINTER_OUTPUT_RETENTION_SECONDS
+    ).toBe(300);
+  });
+
+  it("refuses an orphan sweep that could reach a live session's documents", () => {
+    // The reconciler deletes by age alone. Its cutoff has to be older than
+    // anything a session could still own, including an object written at the
+    // very end of the longest retention grace.
+    expect(() =>
+      loadEnvironment({
+        SESSION_ABSOLUTE_TTL_MINUTES: "30",
+        RETENTION_RECOVERY_GRACE_SECONDS: "900",
+        RETENTION_ORPHAN_GRACE_SECONDS: "2700"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        SESSION_ABSOLUTE_TTL_MINUTES: "30",
+        RETENTION_RECOVERY_GRACE_SECONDS: "900",
+        RETENTION_ORPHAN_GRACE_SECONDS: "2701"
+      }).RETENTION_ORPHAN_GRACE_SECONDS
+    ).toBe(2701);
+  });
+
+  it("deletes an abandoned session's documents without a grace by default", () => {
+    const environment = loadEnvironment({});
+    expect(environment.RETENTION_SETTLED_GRACE_SECONDS).toBe(300);
+    expect(environment.RETENTION_RECOVERY_GRACE_SECONDS).toBe(900);
+    expect(environment.RETENTION_MAX_ATTEMPTS).toBe(8);
+  });
+
   it("refuses the deterministic device scenarios in production", () => {
     // A route that dictates print outcomes is a way to fail a paid job on
     // request. A production configuration cannot express one that offers it.

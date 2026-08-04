@@ -1,6 +1,6 @@
 # Printing Kiosk software build plan
 
-Status: active implementation plan; Phases 0–8 implemented
+Status: active implementation plan; Phases 0–9 implemented
 
 Audience: solo developer building the first prototype, then a commercial pilot
 Primary target: Windows kiosk, with development on macOS and hardware simulated
@@ -633,6 +633,11 @@ retry after ambiguous submission, user filenames in paths, and an assumption
 of exactly-once queues.
 
 ### Phase 9 — expiration and idempotent cleanup
+
+**Implementation:** complete for the pilot/prototype boundary. See
+`docs/PHASE_9_STATUS.md` for the retention policy, the checkpointed cleanup
+workflow, what is deleted versus scrubbed versus kept, migrations, acceptance
+evidence, and commercial follow-up requirements.
 
 **Objective:** reliably remove all document artifacts and revoke access.
 

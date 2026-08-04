@@ -15,7 +15,12 @@ import {
   releaseSessionPayments,
   type PrismaClient
 } from "@printing-kiosk/database";
-import { isSessionExpired, SessionDomainError, transitionSession } from "@printing-kiosk/domain";
+import {
+  isSessionExpired,
+  SessionDomainError,
+  transitionSession,
+  type RetentionPolicy
+} from "@printing-kiosk/domain";
 
 import { scheduleSessionFilesForCleanup } from "../files/cleanup-policy.js";
 import type { Clock, RandomSource } from "./crypto.js";
@@ -61,6 +66,7 @@ interface SessionServiceOptions {
   idleTtlMinutes: number;
   hardTtlMinutes: number;
   idempotencyTtlHours: number;
+  retentionPolicy: RetentionPolicy;
 }
 
 interface CreateSessionInput {
@@ -139,7 +145,8 @@ export class SessionService {
                   now,
                   input.credentialId,
                   input.requestId,
-                  this.options.random
+                  this.options.random,
+                  this.options.retentionPolicy
                 );
               } else {
                 throw new ApiError(
@@ -413,7 +420,10 @@ export class SessionService {
                 where: { sessionId: session.id, status: "ACTIVE" },
                 data: { status: "REVOKED", revokedAt: now }
               }),
-              scheduleSessionFilesForCleanup(transaction, session.id, now)
+              scheduleSessionFilesForCleanup(transaction, session.id, now, {
+                terminalState: "CANCELED",
+                policy: this.options.retentionPolicy
+              })
             ]);
 
             const canceled = await transaction.printSession.findUniqueOrThrow({
@@ -707,7 +717,8 @@ async function expireSession(
   now: Date,
   credentialId: string,
   requestId: string,
-  random: RandomSource
+  random: RandomSource,
+  retentionPolicy: RetentionPolicy
 ): Promise<void> {
   const next = transitionSession(
     { state: session.state as SessionState, version: session.stateVersion },
@@ -752,7 +763,10 @@ async function expireSession(
       where: { sessionId: session.id, status: "ACTIVE" },
       data: { status: "EXPIRED", revokedAt: now }
     }),
-    scheduleSessionFilesForCleanup(transaction, session.id, now)
+    scheduleSessionFilesForCleanup(transaction, session.id, now, {
+      terminalState: "EXPIRED",
+      policy: retentionPolicy
+    })
   ]);
   await transaction.auditEvent.create({
     data: {

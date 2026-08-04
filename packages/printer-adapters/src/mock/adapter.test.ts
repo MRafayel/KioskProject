@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -197,6 +197,41 @@ describe("MockPrinterAdapter", () => {
     expect(late).toMatchObject({ state: "CANCELED", confidence: "UNCONFIRMED" });
   });
 
+  it("discards device output past its retention cutoff and keeps what a redelivery still needs", async () => {
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+    await adapter.submit(buildSubmission("SUCCESS"));
+    const recent = "01900000-0000-7000-8000-0000000000a2";
+    await mkdir(resolve(outputDirectory, recent), { recursive: true });
+
+    // The finished operation is older than any redelivery window; the other is
+    // the work a peer agent could still be resolving.
+    await backdate(resolve(outputDirectory, operationId), 3_600_000);
+
+    await expect(adapter.discardOutputsBefore(new Date(Date.now() - 900_000))).resolves.toBe(1);
+    expect((await readdir(outputDirectory)).sort()).toEqual([recent]);
+    // With its evidence gone the device honestly says it never saw the job,
+    // which is what lets a fresh operation be printed rather than assumed.
+    await expect(adapter.getOperationStatus(operationId)).resolves.toMatchObject({
+      state: "NOT_SUBMITTED"
+    });
+  });
+
+  it("leaves an entry that is not a device operation for a person", async () => {
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+    await mkdir(resolve(outputDirectory, "not-an-operation"), { recursive: true });
+    await backdate(resolve(outputDirectory, "not-an-operation"), 3_600_000);
+
+    await expect(adapter.discardOutputsBefore(new Date())).resolves.toBe(0);
+    expect(await readdir(outputDirectory)).toEqual(["not-an-operation"]);
+  });
+
+  it("answers zero when nothing has been printed on this machine", async () => {
+    const adapter = new MockPrinterAdapter({
+      outputDirectory: join(outputDirectory, "never-created")
+    });
+    await expect(adapter.discardOutputsBefore(new Date())).resolves.toBe(0);
+  });
+
   it("refuses an operation identifier that is not a plain identifier", async () => {
     const adapter = new MockPrinterAdapter({ outputDirectory });
 
@@ -269,3 +304,9 @@ describe("MockPrinterAdapter", () => {
     expect(capabilities.paperSizes).toEqual(["A4"]);
   });
 });
+
+/** Age a directory as an interrupted or long-finished print would leave it. */
+async function backdate(path: string, milliseconds: number): Promise<void> {
+  const when = new Date(Date.now() - milliseconds);
+  await utimes(path, when, when);
+}

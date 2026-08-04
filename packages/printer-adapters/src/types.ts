@@ -156,6 +156,20 @@ export interface PrinterAdapter {
    */
   getOperationStatus(operationId: string): Promise<PrintOperationStatus>;
   cancel(operationId: string): Promise<PrintOperationStatus>;
+  /**
+   * Discard whatever the device still holds for operations last touched before
+   * a cutoff, and answer how many were discarded.
+   *
+   * Output a device retains is a copy of the customer's document, and it must
+   * not outlive the job that produced it. It cannot be discarded at the end of
+   * a print either: it is the evidence `getOperationStatus` reads so that a
+   * redelivered operation is resolved rather than printed a second time. The
+   * cutoff is what separates the two — past the job's own deadline nothing can
+   * be redelivered, so nothing is still needed.
+   *
+   * A device with no retrievable storage answers `0`.
+   */
+  discardOutputsBefore(cutoff: Date): Promise<number>;
 }
 
 export type PrinterAdapterErrorCode =

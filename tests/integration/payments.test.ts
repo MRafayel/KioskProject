@@ -146,7 +146,11 @@ beforeAll(async () => {
     objectStore: apiObjectStore,
     clock: new SystemClock(),
     random: new CryptoRandomSource(),
-    uploadTimeoutSeconds: environment.UPLOAD_TIMEOUT_SECONDS
+    uploadTimeoutSeconds: environment.UPLOAD_TIMEOUT_SECONDS,
+    retentionPolicy: {
+      settledGraceMilliseconds: environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
+      recoveryGraceMilliseconds: environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
+    }
   });
   coordinator.start();
 }, 180_000);

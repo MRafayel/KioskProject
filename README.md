@@ -83,6 +83,7 @@ pnpm test
 pnpm test:e2e
 pnpm infra:up
 pnpm db:verify-phase8-upgrade
+pnpm db:verify-phase9-upgrade
 pnpm db:migrate
 pnpm db:seed
 pnpm dev

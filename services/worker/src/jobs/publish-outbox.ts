@@ -339,6 +339,8 @@ function toSafeSessionEvent(input: {
       state: payload.state,
       version: payload.version
     };
+  } else if (input.type === "cleanup.completed") {
+    safePayload = { sessionId, filesDeletedAt: payload.filesDeletedAt };
   } else {
     throw new Error("OUTBOX_EVENT_TYPE_UNSUPPORTED");
   }

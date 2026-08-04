@@ -134,6 +134,10 @@ const environmentSchema = z
     // makes the agent ask the device what it already did before submitting.
     PRINT_COMMAND_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
     PRINT_DISPATCH_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+    // How long the simulated printer's output survives. It is the evidence a
+    // redelivered operation is resolved against, so it must outlive the job it
+    // belongs to; after that it is only a copy of a customer's document.
+    PRINTER_OUTPUT_RETENTION_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
     // The deterministic device scenarios. Refused outright in production, so a
     // production build cannot be told to fail a print on request.
     PRINT_TEST_OUTCOMES_ENABLED: stringBooleanSchema.default(false),
@@ -148,7 +152,22 @@ const environmentSchema = z
     PAYMENT_WEBHOOK_TOLERANCE_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
     // The deterministic outcome control for the mock provider. It is refused
     // outright in production, so a production build cannot expose it.
-    PAYMENT_TEST_OUTCOMES_ENABLED: stringBooleanSchema.default(false)
+    PAYMENT_TEST_OUTCOMES_ENABLED: stringBooleanSchema.default(false),
+    // Retention. A session that ended without reaching a device deletes its
+    // documents immediately; only an outcome somebody may still ask about is
+    // given a grace, and it is measured in minutes.
+    RETENTION_SETTLED_GRACE_SECONDS: z.coerce.number().int().min(0).max(3_600).default(300),
+    RETENTION_RECOVERY_GRACE_SECONDS: z.coerce.number().int().min(0).max(3_600).default(900),
+    RETENTION_SWEEP_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
+    RETENTION_LEASE_SECONDS: z.coerce.number().int().min(30).max(900).default(120),
+    // A run that has failed this many times stops retrying and is dead-lettered
+    // for a person. It is never treated as finished: the documents are still
+    // there and only the storage lifecycle rule is still holding the line.
+    RETENTION_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(8),
+    // How old a stray object must be before the reconciler is willing to call
+    // it orphaned. It has to outlive the longest-lived live session, or the
+    // sweep could delete a document somebody is still uploading.
+    RETENTION_ORPHAN_GRACE_SECONDS: z.coerce.number().int().min(300).max(86_400).default(7_200)
   })
   .superRefine((environment, context) => {
     if (environment.SESSION_ABSOLUTE_TTL_MINUTES < environment.SESSION_IDLE_TTL_MINUTES) {
@@ -293,6 +312,37 @@ const environmentSchema = z
         code: "custom",
         path: ["PRINT_JOB_TIMEOUT_SECONDS"],
         message: "PRINT_JOB_TIMEOUT_SECONDS must not outlive the absolute session window"
+      });
+    }
+
+    // The mock printer's output is what a redelivered operation is resolved
+    // against instead of being printed a second time. Pruning it before the job
+    // it belongs to can no longer be redelivered would turn a duplicate command
+    // into a duplicate print.
+    if (environment.PRINTER_OUTPUT_RETENTION_SECONDS < environment.PRINT_JOB_TIMEOUT_SECONDS) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_OUTPUT_RETENTION_SECONDS"],
+        message: "PRINTER_OUTPUT_RETENTION_SECONDS must be at least PRINT_JOB_TIMEOUT_SECONDS"
+      });
+    }
+
+    // The reconciler deletes by prefix age alone, without a ledger row to
+    // confirm against. Its cutoff must therefore be older than any object a
+    // live session could still own, including one written at the very end of
+    // the longest retention grace.
+    const longestSessionLifetimeSeconds =
+      environment.SESSION_ABSOLUTE_TTL_MINUTES * 60 +
+      Math.max(
+        environment.RETENTION_SETTLED_GRACE_SECONDS,
+        environment.RETENTION_RECOVERY_GRACE_SECONDS
+      );
+    if (environment.RETENTION_ORPHAN_GRACE_SECONDS <= longestSessionLifetimeSeconds) {
+      context.addIssue({
+        code: "custom",
+        path: ["RETENTION_ORPHAN_GRACE_SECONDS"],
+        message:
+          "RETENTION_ORPHAN_GRACE_SECONDS must exceed the absolute session window plus the longest retention grace"
       });
     }
 

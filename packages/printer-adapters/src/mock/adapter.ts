@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { access, copyFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 
 import {
@@ -215,6 +215,40 @@ export class MockPrinterAdapter implements PrinterAdapter {
   /** Remove one operation's simulated output. Used by local cleanup only. */
   public async discardOutput(operationId: string): Promise<void> {
     await rm(this.operationDirectory(operationId), { recursive: true, force: true });
+  }
+
+  /**
+   * Remove the output of every operation untouched since a cutoff.
+   *
+   * This sweeps by age rather than wholesale, for the same reason the agent's
+   * spool does: one kiosk may be served by more than one agent instance sharing
+   * this directory, and clearing it outright would take a peer's evidence out
+   * from under a print it is still resolving. Nothing a live job owns can be
+   * older than the job's own deadline.
+   *
+   * An entry that is not a well-formed operation directory is left alone. This
+   * directory is private and only ever written here, so an unexpected name is
+   * something to leave for a person rather than delete on a guess.
+   */
+  public async discardOutputsBefore(cutoff: Date): Promise<number> {
+    let entries;
+    try {
+      entries = await readdir(this.outputDirectory, { withFileTypes: true });
+    } catch {
+      // Nothing has been printed on this machine yet.
+      return 0;
+    }
+
+    let discarded = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !OPERATION_ID_PATTERN.test(entry.name)) continue;
+      const path = this.childPath(this.outputDirectory, entry.name);
+      const stats = await stat(path).catch(() => null);
+      if (!stats || stats.mtimeMs >= cutoff.getTime()) continue;
+      await rm(path, { recursive: true, force: true });
+      discarded += 1;
+    }
+    return discarded;
   }
 
   private async recordSubmission(directory: string, submission: PrintSubmission): Promise<void> {

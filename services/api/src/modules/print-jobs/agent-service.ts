@@ -16,7 +16,7 @@ import {
   recordPrintJobEvent,
   type PrismaClient
 } from "@printing-kiosk/database";
-import { settlePrintDeviceResult } from "@printing-kiosk/domain";
+import { settlePrintDeviceResult, type RetentionPolicy } from "@printing-kiosk/domain";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
@@ -30,6 +30,7 @@ export interface AgentCommandServiceOptions {
   clock: Clock;
   random: RandomSource;
   leaseSeconds: number;
+  retentionPolicy: RetentionPolicy;
 }
 
 export interface LeasedCommand {
@@ -181,7 +182,8 @@ export class AgentCommandService {
           actorId: input.credentialId,
           requestId: input.requestId,
           now,
-          newId: () => this.options.random.uuid(now)
+          newId: () => this.options.random.uuid(now),
+          retentionPolicy: this.options.retentionPolicy
         });
 
         return this.acknowledge(transaction, command.printJobId, outcome.applied);

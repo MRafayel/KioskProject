@@ -6,6 +6,8 @@ import {
   type PrismaClient
 } from "@printing-kiosk/database";
 
+import type { RetentionPolicy } from "@printing-kiosk/domain";
+
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { scheduleSessionFilesForCleanup } from "./cleanup-policy.js";
 import type { ObjectStore } from "./object-store.js";
@@ -24,6 +26,7 @@ interface FileJanitorOptions {
   clock: Clock;
   random: RandomSource;
   uploadTimeoutSeconds: number;
+  retentionPolicy: RetentionPolicy;
   intervalMilliseconds?: number;
   onError?: (error: unknown, operation: string) => void;
 }
@@ -139,7 +142,10 @@ export class FileJanitor {
               where: { sessionId: session.id, status: "ACTIVE" },
               data: { status: "EXPIRED", revokedAt: now }
             }),
-            scheduleSessionFilesForCleanup(transaction, session.id, now),
+            scheduleSessionFilesForCleanup(transaction, session.id, now, {
+              terminalState: "EXPIRED",
+              policy: this.options.retentionPolicy
+            }),
             transaction.auditEvent.create({
               data: {
                 id: this.options.random.uuid(now),

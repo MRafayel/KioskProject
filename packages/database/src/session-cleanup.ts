@@ -1,3 +1,10 @@
+import {
+  cleanupDueAt,
+  DEFAULT_RETENTION_POLICY,
+  type RetentionPolicy,
+  type TerminalSessionState
+} from "@printing-kiosk/domain";
+
 import type { Prisma } from "./generated/prisma/client.js";
 
 /**
@@ -12,6 +19,12 @@ export function processingArtifactCleanupDueAt(now: Date): Date {
   return new Date(now.getTime() + PROCESSING_ARTIFACT_SETTLE_MILLISECONDS);
 }
 
+export interface SessionCleanupSchedule {
+  /** The terminal state that ended the session; it decides the grace period. */
+  terminalState: TerminalSessionState;
+  policy?: RetentionPolicy;
+}
+
 /**
  * Mark every document of a finished session for deletion.
  *
@@ -19,11 +32,17 @@ export function processingArtifactCleanupDueAt(now: Date): Date {
  * they must not disagree about what happens to the customer's documents. A
  * repeated terminal transition preserves an existing future barrier rather than
  * pulling it forward onto an artifact that may still be uploading.
+ *
+ * The session is scheduled for its own cleanup run in the same transaction as
+ * the transition that ended it. That schedule is the durable record retention
+ * works from: a process that dies immediately afterwards loses nothing, because
+ * nothing here depends on the ending process surviving to enqueue anything.
  */
 export async function scheduleSessionFilesForCleanup(
   transaction: Prisma.TransactionClient,
   sessionId: string,
-  now: Date
+  now: Date,
+  schedule?: SessionCleanupSchedule
 ): Promise<void> {
   const common = {
     status: "DELETE_PENDING",
@@ -47,6 +66,23 @@ export async function scheduleSessionFilesForCleanup(
   await transaction.uploadedFile.updateMany({
     where: { sessionId, status: "VALIDATING" },
     data: { ...common, cleanupDueAt: processingArtifactCleanupDueAt(now) }
+  });
+
+  if (!schedule) return;
+  // Only an unscheduled session is given a due time. A session that ended twice
+  // — a cancellation racing an expiry — keeps the first schedule rather than
+  // pushing an already-claimed run back into the future.
+  await transaction.printSession.updateMany({
+    where: { id: sessionId, cleanupStatus: "NOT_DUE" },
+    data: {
+      cleanupStatus: "PENDING",
+      cleanupDueAt: cleanupDueAt(
+        schedule.terminalState,
+        now,
+        schedule.policy ?? DEFAULT_RETENTION_POLICY
+      ),
+      updatedAt: now
+    }
   });
 }
 

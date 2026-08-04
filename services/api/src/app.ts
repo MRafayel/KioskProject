@@ -9,6 +9,7 @@ import { ZodError } from "zod";
 import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 import { createDatabaseClient, type PrismaClient } from "@printing-kiosk/database";
+import type { RetentionPolicy } from "@printing-kiosk/domain";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
 import { FileJanitor } from "./modules/files/janitor.js";
@@ -130,6 +131,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const random = options.random ?? new CryptoRandomSource();
   const objectStore = options.objectStore ?? createS3ObjectStore(options.environment);
   const sessionEvents = options.sessionEvents ?? new LocalSessionEventBus();
+  // One retention policy for every path that can end a session, so a
+  // cancellation, an expiry and a finished print cannot disagree about how long
+  // a customer's documents stay.
+  const retentionPolicy: RetentionPolicy = {
+    settledGraceMilliseconds: options.environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
+    recoveryGraceMilliseconds: options.environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
+  };
   const sessions = new SessionService({
     database,
     clock,
@@ -138,7 +146,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     publicUploadOrigin: options.environment.PUBLIC_UPLOAD_ORIGIN,
     idleTtlMinutes: options.environment.SESSION_IDLE_TTL_MINUTES,
     hardTtlMinutes: options.environment.SESSION_ABSOLUTE_TTL_MINUTES,
-    idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS
+    idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
+    retentionPolicy
   });
   const mobileAccess = new MobileAccessService({
     database,
@@ -214,13 +223,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
     idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
     printJobTimeoutSeconds: options.environment.PRINT_JOB_TIMEOUT_SECONDS,
-    testOutcomesEnabled: printTestOutcomesEnabled
+    testOutcomesEnabled: printTestOutcomesEnabled,
+    retentionPolicy
   });
   const agentCommands = new AgentCommandService({
     database,
     clock,
     random,
-    leaseSeconds: options.environment.PRINT_COMMAND_LEASE_SECONDS
+    leaseSeconds: options.environment.PRINT_COMMAND_LEASE_SECONDS,
+    retentionPolicy
   });
   const janitor = new FileJanitor({
     database,
@@ -228,6 +239,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     clock,
     random,
     uploadTimeoutSeconds: options.environment.UPLOAD_TIMEOUT_SECONDS,
+    retentionPolicy,
     onError: (error, operation) => {
       app.log.error(
         {

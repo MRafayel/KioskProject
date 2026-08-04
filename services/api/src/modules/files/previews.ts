@@ -10,6 +10,7 @@ import type { Clock } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
 import type { KioskAuthenticationThrottle } from "../sessions/rate-limit.js";
 import type { ObjectStore } from "./object-store.js";
+import { sessionFilesDeleted } from "./retention-guard.js";
 
 const fileParamsSchema = z.object({
   sessionId: z.string().uuid(),
@@ -267,7 +268,17 @@ async function findOwnedReadyFile(
       session: { kioskId }
     }
   });
-  if (!file?.pageCount || file.pageCount < 1) throw hiddenFile();
+  if (!file?.pageCount || file.pageCount < 1) {
+    // Only once there is nothing to serve is it worth asking why. An authorized
+    // kiosk asking for a preview retention has deleted is told it is gone; the
+    // ordinary miss stays a 404 and costs no extra query.
+    const session = await database.printSession.findFirst({
+      where: { id: sessionId, kioskId },
+      select: { filesDeletedAt: true }
+    });
+    if (session?.filesDeletedAt) throw sessionFilesDeleted();
+    throw hiddenFile();
+  }
   return file;
 }
 
