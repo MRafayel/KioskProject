@@ -159,12 +159,17 @@ export class AgentCommandService {
         if (!held) return this.acknowledge(transaction, command.printJobId, false);
 
         const now = this.options.clock.now();
+        const job = await transaction.printJob.findUniqueOrThrow({
+          where: { id: command.printJobId },
+          select: { physicalSheets: true }
+        });
+
         const settlement = settlePrintDeviceResult({
           state: input.body.state,
           confidence: input.body.confidence,
           failureCode: input.body.failureCode,
           warningCode: input.body.warningCode,
-          sheetsProduced: input.body.sheetsProduced
+          sheetsProduced: sheetsWithinJob(input.body.sheetsProduced, job.physicalSheets)
         });
 
         const outcome = await applyPrintJobSettlement(transaction, {
@@ -338,6 +343,22 @@ export class AgentCommandService {
     });
     return agentCommandAckSchema.parse({ accepted, printJobStatus: printJob.status });
   }
+}
+
+/**
+ * A device cannot have produced more sheets than the job it was given.
+ *
+ * A count above that is a device the control plane cannot read, not a bigger
+ * job, so it becomes "unknown" rather than a number. The settlement reducer
+ * then does what it already does with any unknown count: it refuses to call the
+ * result a success or a definite failure and sends it to operator recovery.
+ * Passing the value through instead would fail the stored-outcome constraint,
+ * turning a malfunctioning printer into a 500 and leaving the paid job to hang
+ * until its deadline.
+ */
+function sheetsWithinJob(reported: number | null, physicalSheets: number): number | null {
+  if (reported === null || reported <= physicalSheets) return reported;
+  return null;
 }
 
 function ledgerTypeFor(status: string) {

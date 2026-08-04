@@ -382,6 +382,56 @@ describe.sequential("Phase 8 virtual printing", () => {
     expect(await database.refund.count({ where: { sessionId: paid.sessionId } })).toBe(0);
   });
 
+  it("accepts a failure the device could not confirm produced nothing", async () => {
+    // A jam that stopped before the first sheet left the tray. Refusing this
+    // report used to leave the device unable to speak at all: the job sat in
+    // PRINTING until its lease expired and was then settled with a generic
+    // code instead of the reason the device gave.
+    const paid = await preparePaidSession("phase8-zero-sheet-jam");
+    const created = await startPrintJob(paid, "phase8-print-zero-sheet-jam");
+    const command = await leaseCommand(created.id);
+
+    const reported = await reportDeviceResult(command, {
+      state: "FAILED",
+      confidence: "UNCONFIRMED",
+      failureCode: "PAPER_JAM",
+      warningCode: null,
+      sheetsProduced: 0
+    });
+
+    expect(reported.statusCode, reported.body).toBe(200);
+    expect(reported.json()).toMatchObject({ accepted: true });
+    const settled = await readPrintJob(created.id);
+    expect(settled.status).toBe("RECOVERY_REQUIRED");
+    expect(settled.failureCode).toBe("PAPER_JAM");
+    expect(settled.sheetsProduced).toBe(0);
+    await expectSessionState(paid.sessionId, "RECOVERY_REQUIRED");
+    // Nobody knows whether paper emerged, so nobody may promise money back.
+    expect(await database.refund.count({ where: { sessionId: paid.sessionId } })).toBe(0);
+  });
+
+  it("treats a sheet count the job cannot support as no count at all", async () => {
+    const paid = await preparePaidSession("phase8-impossible-sheets");
+    const created = await startPrintJob(paid, "phase8-print-impossible-sheets");
+    const command = await leaseCommand(created.id);
+
+    const reported = await reportDeviceResult(command, {
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      failureCode: null,
+      warningCode: null,
+      sheetsProduced: created.physicalSheets + 1
+    });
+
+    // A malfunctioning device must not be able to turn a paid job into a
+    // stored-outcome constraint violation and leave it hanging until deadline.
+    expect(reported.statusCode, reported.body).toBe(200);
+    const settled = await readPrintJob(created.id);
+    expect(settled.status).toBe("RECOVERY_REQUIRED");
+    expect(settled.sheetsProduced).toBeNull();
+    expect(await database.refund.count({ where: { sessionId: paid.sessionId } })).toBe(0);
+  });
+
   it("never prints a redelivered operation the device already ran", async () => {
     const paid = await preparePaidSession("phase8-redelivery");
     const created = await startPrintJob(paid, "phase8-print-redelivery");
@@ -800,6 +850,35 @@ async function startPrintJob(paid: PaidSession, idempotencyKey: string, scenario
   });
   expect(response.statusCode, response.body).toBe(201);
   return createPrintJobResponseSchema.parse(response.json()).printJob;
+}
+
+/** Dispatch a job and take its command the way the kiosk agent would. */
+async function leaseCommand(printJobId: string) {
+  await dispatcher.dispatchOnce();
+  await drainDispatchQueue();
+  const claimed = await app.inject({
+    method: "POST",
+    url: "/v1/agent/commands/claim",
+    headers: { authorization },
+    payload: { max: 1 }
+  });
+  expect(claimed.statusCode, claimed.body).toBe(200);
+
+  const command = await database.agentCommand.findUniqueOrThrow({ where: { printJobId } });
+  return { operationId: command.operationId, claimToken: command.claimToken ?? "" };
+}
+
+/** Report a device result directly, so shapes the mock cannot produce are covered. */
+function reportDeviceResult(
+  command: { operationId: string; claimToken: string },
+  result: Record<string, unknown>
+) {
+  return app.inject({
+    method: "POST",
+    url: `/v1/agent/commands/${command.operationId}/result`,
+    headers: { authorization },
+    payload: { claimToken: command.claimToken, ...result }
+  });
 }
 
 async function readPrintJob(printJobId: string) {

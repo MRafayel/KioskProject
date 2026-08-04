@@ -87,14 +87,6 @@ describe("print job contracts", () => {
     expect(
       reportAgentCommandResultBodySchema.safeParse({
         ...base,
-        state: "FAILED",
-        confidence: "UNCONFIRMED",
-        sheetsProduced: 0
-      }).success
-    ).toBe(false);
-    expect(
-      reportAgentCommandResultBodySchema.safeParse({
-        ...base,
         state: "COMPLETED",
         confidence: "CONFIRMED",
         sheetsProduced: 0
@@ -109,5 +101,22 @@ describe("print job contracts", () => {
         sheetsProduced: 1
       }).success
     ).toBe(false);
+  });
+
+  it("accepts an unconfirmed failure that produced no sheets", () => {
+    // A jam that stopped before the first sheet left the tray. The device is
+    // honest about both halves: nothing came out, and it cannot prove that.
+    // Refusing this report would leave the job hanging until its lease expired
+    // and would replace an accurate PAPER_JAM with a generic timeout code.
+    const jammed = reportAgentCommandResultBodySchema.safeParse({
+      claimToken: id("6"),
+      state: "FAILED",
+      confidence: "UNCONFIRMED",
+      failureCode: "PAPER_JAM",
+      warningCode: null,
+      sheetsProduced: 0
+    });
+
+    expect(jammed.success).toBe(true);
   });
 });

@@ -182,4 +182,68 @@ describe("settlePrintDeviceResult", () => {
 
     expect(settlement.failureCode).toBe("PRINTER_OFFLINE");
   });
+
+  /**
+   * The transport contract narrows what a device may say, and it has been
+   * loosened before to let an honest device be heard. These hold over every
+   * result the reducer could ever be handed, including shapes the contract
+   * currently refuses, so relaxing that contract again cannot quietly create a
+   * refund nobody proved was owed or a row the database will not store.
+   */
+  it("never owes money back without the device confirming nothing came out", () => {
+    const states = [
+      "NOT_SUBMITTED",
+      "SUBMITTED",
+      "PRINTING",
+      "COMPLETED",
+      "FAILED",
+      "CANCELED",
+      "UNKNOWN"
+    ] as const;
+    const confidences = ["CONFIRMED", "UNCONFIRMED"] as const;
+    const sheetCounts = [null, 0, 1, 5];
+    const failureCodes = [null, "PAPER_JAM", "DEVICE_ERROR"];
+
+    for (const state of states) {
+      for (const confidence of confidences) {
+        for (const sheetsProduced of sheetCounts) {
+          for (const failureCode of failureCodes) {
+            const where = `${state}/${confidence}/${String(sheetsProduced)}/${String(failureCode)}`;
+            const settlement = settlePrintDeviceResult(
+              result({ state, confidence, failureCode, sheetsProduced })
+            );
+
+            if (settlement.refundObligation) {
+              expect(settlement.resultConfidence, where).toBe("CONFIRMED");
+              expect(settlement.sheetsProduced, where).toBe(0);
+              expect(["FAILED", "CANCELED"], where).toContain(settlement.status);
+            }
+
+            // The same shapes `print_jobs_outcome_consistency_check` allows, so
+            // a device can never turn a settlement into a constraint violation.
+            expect(storableOutcome(settlement), where).toBe(true);
+          }
+        }
+      }
+    }
+  });
 });
+
+function storableOutcome(settlement: ReturnType<typeof settlePrintDeviceResult>): boolean {
+  if (settlement.status === "COMPLETED") {
+    return (
+      settlement.resultConfidence === "CONFIRMED" &&
+      settlement.failureCode === null &&
+      settlement.sheetsProduced !== null &&
+      settlement.sheetsProduced > 0
+    );
+  }
+  if (settlement.status === "FAILED" || settlement.status === "CANCELED") {
+    return (
+      settlement.resultConfidence === "CONFIRMED" &&
+      settlement.failureCode !== null &&
+      settlement.sheetsProduced === 0
+    );
+  }
+  return settlement.resultConfidence === "UNCONFIRMED" && settlement.failureCode !== null;
+}

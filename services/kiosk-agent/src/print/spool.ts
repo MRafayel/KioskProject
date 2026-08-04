@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
 const OPERATION_ID_PATTERN =
@@ -74,6 +74,44 @@ export class PrintSpool {
    */
   public async discard(operationId: string): Promise<void> {
     await rm(this.operationDirectory(operationId), { recursive: true, force: true });
+  }
+
+  /**
+   * Remove spooled operations that no live print can still be using.
+   *
+   * A spooled artifact is only needed between fetching it and handing it to the
+   * device, so an agent killed mid-print — a kiosk losing power is the ordinary
+   * case — leaves a customer's document on disk with nothing left to delete it.
+   *
+   * The age test is what makes this safe to run while printing. A control plane
+   * that hands the same kiosk's work to more than one agent instance is a
+   * topology the claim model allows, and those instances may share this
+   * directory; deleting the directory wholesale would take a peer's document
+   * out from under it mid-print. Nothing a live job owns can be older than the
+   * job timeout, because the job is settled at its own deadline, so a directory
+   * past that cutoff belongs to nobody.
+   */
+  public async discardStale(cutoff: Date): Promise<number> {
+    let entries;
+    try {
+      entries = await readdir(this.directory, { withFileTypes: true });
+    } catch {
+      // Nothing has been spooled on this machine yet.
+      return 0;
+    }
+
+    let discarded = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const path = this.childPath(this.directory, entry.name);
+      const stats = await stat(path).catch(() => null);
+      // Writing a document into the directory refreshes its timestamp, so an
+      // operation still being prepared always reads as recent.
+      if (!stats || stats.mtimeMs >= cutoff.getTime()) continue;
+      await rm(path, { recursive: true, force: true });
+      discarded += 1;
+    }
+    return discarded;
   }
 
   private async fetchOne(target: string, request: DocumentRequest): Promise<SpooledDocument> {

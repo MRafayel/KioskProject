@@ -263,17 +263,14 @@ export const reportAgentCommandResultBodySchema = z
         message: "A confirmed cancellation must report zero sheets produced."
       });
     }
-    if (
-      result.state === "FAILED" &&
-      result.confidence !== "CONFIRMED" &&
-      result.sheetsProduced === 0
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["confidence"],
-        message: "A zero-sheet failure must be confirmed before it can be settled definitely."
-      });
-    }
+    // A failure that reports zero sheets without being able to confirm it is a
+    // legitimate device answer — a jam before the first sheet leaves the tray
+    // is exactly that — and it is accepted here on purpose. What must never
+    // happen is such a report being settled as a definite failure that owes
+    // money back; the settlement reducer and the stored-outcome constraint both
+    // require CONFIRMED for that, and route everything else to
+    // RECOVERY_REQUIRED. Refusing the report instead only left the device
+    // unable to speak and the job hanging until its lease expired.
     if (
       result.state === "COMPLETED" &&
       (result.failureCode !== null ||

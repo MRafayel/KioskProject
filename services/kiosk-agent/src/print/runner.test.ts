@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -379,6 +379,68 @@ describe("PrintCommandRunner", () => {
       rm(join(spoolDirectory, "operations", operationId), { recursive: true })
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("clears a spool an interrupted print left behind", async () => {
+    // A kiosk that lost power mid-print. Nothing is left to delete the document
+    // it had already fetched, so a later pass must.
+    const abandoned = join(spoolDirectory, "operations", "01900000-0000-7000-8000-0000000009f1");
+    await mkdir(abandoned, { recursive: true });
+    await writeFile(join(abandoned, "leaked.pdf"), documentBytes);
+    await age(abandoned);
+
+    const transport = buildTransport([buildCommand()]);
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch).runOnce();
+
+    await expect(readdir(abandoned)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(transport.results()[0]?.body).toMatchObject({ state: "COMPLETED" });
+  });
+
+  it("never sweeps a spool another agent instance is still printing from", async () => {
+    // The claim model lets a second agent instance serve the same kiosk, and
+    // both may share this directory. Sweeping by age is what keeps a peer's
+    // in-flight document safe: a live job cannot outlive the job timeout.
+    const peer = join(spoolDirectory, "operations", "01900000-0000-7000-8000-0000000009f2");
+    await mkdir(peer, { recursive: true });
+    await writeFile(join(peer, "in-flight.pdf"), documentBytes);
+
+    const transport = buildTransport([buildCommand()]);
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch).runOnce();
+
+    expect(await readdir(peer)).toEqual(["in-flight.pdf"]);
+  });
+
+  it("discards a spooled document even when the operation never reaches the device", async () => {
+    // A redelivery the device has already answered returns before submitting.
+    // The document fetched by the attempt that died must still not survive.
+    const stranded = join(spoolDirectory, "operations", operationId);
+    const transport = buildTransport([buildCommand({ redelivered: true })]);
+    const adapter = stubAdapter(completed, () => ({
+      operationId,
+      state: "COMPLETED",
+      confidence: "UNCONFIRMED",
+      failureCode: null,
+      warningCode: null,
+      sheetsProduced: null
+    }));
+    const runner = buildRunner(adapter, transport.fetch as typeof fetch);
+    await runner.runOnce();
+
+    // Re-create the leftover the way a crashed attempt would, then prove the
+    // next pass over the same operation clears it rather than stepping past it.
+    // It is deliberately left fresh: the age sweep must not be what saves this,
+    // because a redelivery can arrive long before the job timeout.
+    await mkdir(stranded, { recursive: true });
+    await writeFile(join(stranded, "leaked.pdf"), documentBytes);
+    const second = buildTransport([buildCommand({ redelivered: true })]);
+    await buildRunner(adapter, second.fetch as typeof fetch).runOnce();
+
+    await expect(readdir(stranded)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(second.results()[0]?.body).toMatchObject({ state: "COMPLETED" });
+  });
 });
 
 function completed(): PrintOperationStatus {
@@ -423,8 +485,13 @@ function stubAdapter(
   };
 }
 
+/** Backdate a spool directory past any job timeout, as a crash would leave it. */
+async function age(directory: string): Promise<void> {
+  const longAgo = new Date(Date.now() - 86_400_000);
+  await utimes(directory, longAgo, longAgo);
+}
+
 async function writeArtifact(directory: string): Promise<string> {
-  const { writeFile, mkdir } = await import("node:fs/promises");
   const target = join(directory, "seed");
   await mkdir(target, { recursive: true });
   const path = join(target, "document.pdf");

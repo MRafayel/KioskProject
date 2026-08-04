@@ -58,6 +58,7 @@ export class PrintCommandRunner {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = true;
   private running = false;
+  private nextSweepAt = 0;
 
   public constructor(private readonly options: PrintCommandRunnerOptions) {
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -90,6 +91,7 @@ export class PrintCommandRunner {
     if (this.running) return 0;
     this.running = true;
     try {
+      await this.sweepStaleSpool();
       const commands = await this.claim();
       for (const command of commands) {
         await this.execute(command);
@@ -100,6 +102,40 @@ export class PrintCommandRunner {
     }
   }
 
+  /**
+   * Clear spooled documents no live print can still be using.
+   *
+   * A spooled document exists only between being fetched and being handed to
+   * the device, so nothing should outlive the pass that wrote it — but a kiosk
+   * that loses power mid-print leaves one behind with nothing left to delete
+   * it. This sweeps by age rather than wholesale: another agent instance may
+   * share this directory, and its in-flight work is always newer than the job
+   * timeout because a job is settled at its own deadline. It runs on the first
+   * pass and then at most once per timeout window, and a failure is logged
+   * rather than thrown so it can never stop the kiosk from printing.
+   */
+  private async sweepStaleSpool(): Promise<void> {
+    const now = Date.now();
+    if (now < this.nextSweepAt) return;
+    const timeoutMilliseconds = this.options.environment.PRINT_JOB_TIMEOUT_SECONDS * 1_000;
+    this.nextSweepAt = now + timeoutMilliseconds;
+
+    try {
+      const discarded = await this.spool.discardStale(new Date(now - timeoutMilliseconds));
+      if (discarded > 0) {
+        this.options.logger.warn(
+          { discarded },
+          "cleared print spool an interrupted print left behind"
+        );
+      }
+    } catch (error) {
+      this.options.logger.warn(
+        { errorName: error instanceof Error ? error.name : "UnknownError" },
+        "stale print spool could not be cleared"
+      );
+    }
+  }
+
   private async claim(): Promise<AgentPrintCommand[]> {
     const response = await this.request("/v1/agent/commands/claim", { max: 1 });
     if (!response.ok) return [];
@@ -107,6 +143,19 @@ export class PrintCommandRunner {
   }
 
   private async execute(command: AgentPrintCommand): Promise<void> {
+    try {
+      await this.runOperation(command);
+    } finally {
+      // A backstop for every path that returns before the device is reached —
+      // a redelivery the device already answered, a refused manifest, a throw.
+      // The submission path discards as soon as the adapter is done rather than
+      // waiting for this, so a customer's document is never held across the
+      // report round-trip.
+      await this.spool.discard(command.operationId).catch(() => undefined);
+    }
+  }
+
+  private async runOperation(command: AgentPrintCommand): Promise<void> {
     await this.ledger.record(command.operationId, "CLAIMED");
 
     // The manifest travelled over the network. Re-deriving its hash locally is

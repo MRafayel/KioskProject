@@ -301,6 +301,97 @@ leaves the payment ledger intact.
   production builds, Compose validation, and a dependency audit with no known
   vulnerabilities.
 
+### Second audit pass — 2026-08-04
+
+Three changes, each fixing something the first pass left reachable.
+
+1. **A device may now report a failure it cannot confirm produced nothing.**
+   The result contract refused `FAILED` + `UNCONFIRMED` + zero sheets. That is
+   an honest and ordinary device answer — a jam that stopped before the first
+   sheet left the tray — and the shipped mock produces exactly it for any
+   single-sheet job. The report was rejected with `400`, so the device could not
+   speak at all: the job sat in `PRINTING` until its lease expired, was
+   redelivered, and was finally settled as `RECOVERY_REQUIRED` with a generic
+   `SUBMISSION_UNCONFIRMED` instead of the `PAPER_JAM` the device had reported,
+   roughly two minutes later with the customer still waiting. The rule was also
+   redundant: the settlement reducer already routes any non-`CONFIRMED` failure
+   to `RECOVERY_REQUIRED`, and `print_jobs_outcome_consistency_check` already
+   requires `CONFIRMED` before a `FAILED` row can be stored. Nothing that owes
+   money back changed; only the device's ability to be heard did.
+2. **A sheet count the job cannot support is treated as no count.** The device
+   result was written straight through to `print_jobs.sheets_produced`, which is
+   constrained to at most the job's `physical_sheets`. A malfunctioning or
+   compromised adapter reporting a larger number produced a constraint violation
+   rather than a settlement — a `500`, and a paid job left open until its
+   deadline. An impossible count now becomes `null`, and the reducer does what
+   it already does with an unknown count: it refuses to call the result either a
+   success or a definite failure and sends it to operator recovery.
+3. **A spooled document no longer outlives the process that fetched it.** The
+   agent discarded its local copy only on the paths that reached the adapter. A
+   redelivery the device had already answered returned earlier and left the
+   previous attempt's copy behind, and a kiosk that lost power mid-print left
+   one with nothing remaining to delete it. `execute` now discards on every exit
+   path, and the runner additionally sweeps operation directories older than
+   `PRINT_JOB_TIMEOUT_SECONDS` — on its first pass and then once per timeout
+   window. The submission path still discards the instant the adapter is done,
+   so no document is held across the report round-trip.
+
+   The sweep is deliberately by age rather than wholesale. The claim model lets
+   the same kiosk be served by more than one agent instance — `claimOne` says so
+   — and those instances may share a spool directory, so clearing it at start-up
+   would take a peer's document out from under it mid-print. Nothing a live job
+   owns can be older than the job timeout, because the job is settled at its own
+   deadline, so the cutoff separates abandoned work from work in progress
+   without needing to coordinate between processes.
+
+Also added:
+
+- Golden-vector tests pinning both manifest canonicalizers — the control
+  plane's in `print-jobs/service.ts` and the agent's
+  `canonicalPrintManifestJson` — to one digest. They are independent
+  implementations of a hash both sides must agree on; a change to either alone
+  would look correct locally and would refuse every print as a tampered
+  manifest while refunding every capture.
+- An exhaustive settlement invariant over every state, confidence, sheet count
+  and failure code the reducer could be handed, including shapes the transport
+  contract refuses: money is owed back only when the device confirmed that zero
+  sheets came out, and every settlement the reducer can produce is a row
+  `print_jobs_outcome_consistency_check` will store. The result contract has now
+  been loosened once to let an honest device be heard, so the property that
+  actually protects the money is asserted where it lives rather than being
+  inferred from whichever shapes the contract happens to allow.
+
+Re-validated after these changes: 475 unit/component/service tests, 94
+integration tests across 6 files against live PostgreSQL, Redis, MinIO, ClamAV
+and the document processor, 17 Playwright scenarios, formatting, lint,
+type-check, production builds, Compose validation, `db:verify-phase8-upgrade`
+against a temporary Phase 0–7 database, and a production dependency audit with
+no known vulnerabilities.
+
+#### Reviewed and deliberately left alone
+
+- **The device and touchscreen scopes are separate in code but not in
+  deployment.** Routes check `print-jobs:agent` separately from the customer
+  print scopes, but the development seed grants all of them to one credential
+  and both the browser-forwarding facade and the print runner authenticate with
+  the same `DEV_KIOSK_API_KEY`. The separation that actually holds today is that
+  the loopback facade does not expose the agent routes at all. Splitting this
+  into two credentials with two keys is the right production shape and is a
+  deployment change, not a code fix.
+- `PrintDispatcherOptions.leaseMilliseconds` is passed and never read; lease
+  arithmetic lives in the API. Harmless, and it documents intent.
+- `CLAIMED` and `LEASE_EXPIRED` ledger entries record the status `DISPATCHED`
+  even when the job has already reached `PRINTING`. The ledger's `status` column
+  is narrative rather than authoritative — `print_jobs.status` is the record —
+  but it is inaccurate for a redelivered operation.
+- `POST /v1/print-jobs/:id/cancel` is exposed on the loopback facade and no
+  screen calls it. It is covered by integration tests and is correct; it is
+  simply unused surface until a product decision gives the customer a stop
+  button.
+- The mock printer's output directory is never pruned. It is the evidence
+  `getOperationStatus` reads to keep a redelivery from printing twice, so it
+  must outlive the print; Phase 9 retention owns it, as already recorded below.
+
 #### Three decisions made during implementation
 
 1. **A failed print is not retried, and that is what makes the refund rule
