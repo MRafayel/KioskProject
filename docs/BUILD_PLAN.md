@@ -807,10 +807,11 @@ Print:   QUEUED -> SUBMITTING -> ACCEPTED -> PRINTING -> SUCCEEDED
 | PRINTING | RECOVERY_REQUIRED | physical result uncertain |
 | Active pre-payment state | CANCELED | guarded customer/kiosk cancellation |
 | Active pre-payment state | EXPIRED | database expiry worker wins |
-| FAILED | PRINTING | audited operator retry only when no output is certain |
 
-COMPLETED, CANCELED, and EXPIRED are terminal. A paid session never silently
-expires. A late capture enters refund/recovery handling.
+COMPLETED, FAILED, RECOVERY_REQUIRED, CANCELED, and EXPIRED are terminal. A
+paid session never silently expires. A late capture enters refund/recovery
+handling. Any operator-authorized reprint is a separate future workflow rather
+than reopening settled refund evidence.
 
 ### 8.4 Enforcing correctness
 

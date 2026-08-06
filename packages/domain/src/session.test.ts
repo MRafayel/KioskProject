@@ -17,6 +17,22 @@ describe("session state machine", () => {
     expect(canTransitionSession("COMPLETED", "PRINTING")).toBe(false);
   });
 
+  it("keeps every settled session state terminal", () => {
+    const terminalStates: SessionState[] = [
+      "COMPLETED",
+      "FAILED",
+      "RECOVERY_REQUIRED",
+      "EXPIRED",
+      "CANCELED"
+    ];
+
+    for (const state of terminalStates) {
+      for (const target of SESSION_STATES) {
+        expect(canTransitionSession(state, target)).toBe(false);
+      }
+    }
+  });
+
   it("rejects stale versions before evaluating the transition", () => {
     expect(() =>
       transitionSession({ state: "WAITING_FOR_UPLOAD", version: 4 }, "CANCELED", 3)

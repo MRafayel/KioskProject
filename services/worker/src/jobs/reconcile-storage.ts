@@ -78,9 +78,11 @@ export class StorageReconciler {
       const aborted = await this.options.store.abortMultipartUploads(SESSION_OBJECT_ROOTS, cutoff);
 
       const stale: string[] = [];
+      const acknowledgeListings: Array<() => void> = [];
       for (const root of SESSION_OBJECT_ROOTS) {
-        const objects = await this.options.store.listObjectsOlderThan(root, cutoff, this.pageSize);
-        stale.push(...objects.map((object) => object.key));
+        const listing = await this.options.store.listObjectsOlderThan(root, cutoff, this.pageSize);
+        stale.push(...listing.objects.map((object) => object.key));
+        acknowledgeListings.push(listing.acknowledge);
       }
       if (aborted > 0) {
         this.options.logger.warn(
@@ -88,12 +90,22 @@ export class StorageReconciler {
           "abandoned multipart uploads aborted by storage reconciliation"
         );
       }
-      if (stale.length === 0) return 0;
+      if (stale.length === 0) {
+        for (const acknowledge of acknowledgeListings) acknowledge();
+        return 0;
+      }
 
       const orphans = await this.selectOrphans(stale);
-      if (orphans.length === 0) return 0;
+      if (orphans.length === 0) {
+        for (const acknowledge of acknowledgeListings) acknowledge();
+        return 0;
+      }
 
       const deleted = await this.options.store.deleteObjects(orphans);
+      // Cursor movement is the commit for discovery. If classification or
+      // deletion throws, no acknowledgment occurs and the same pages are
+      // offered again on the next pass.
+      for (const acknowledge of acknowledgeListings) acknowledge();
       // Only a count and a cutoff reach the log. An object key names a session
       // and a document, and neither belongs in an operational log line.
       this.options.logger.warn(

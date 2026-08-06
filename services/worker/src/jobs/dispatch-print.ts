@@ -14,7 +14,7 @@ import {
   recordPrintJobEvent,
   type PrismaClient
 } from "@printing-kiosk/database";
-import { settlePrintDeviceResult } from "@printing-kiosk/domain";
+import { settlePrintDeviceResult, type RetentionPolicy } from "@printing-kiosk/domain";
 
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const MAX_DISPATCH_BATCH = 25;
@@ -35,6 +35,8 @@ export interface PrintDispatcherOptions {
   /** How many times a lease may be handed back before the job is unresolvable. */
   maxCommandAttempts: number;
   maxDispatchAttempts: number;
+  /** Retention grace applied when reconciliation, rather than the agent, settles a print. */
+  retentionPolicy: RetentionPolicy;
   pollIntervalMilliseconds?: number;
   now?: () => Date;
   newId?: () => string;
@@ -336,7 +338,8 @@ export class PrintDispatcher {
           actorType: "SYSTEM",
           actorId: "print-dispatcher",
           now,
-          newId: () => this.newId()
+          newId: () => this.newId(),
+          retentionPolicy: this.options.retentionPolicy
         });
         if (outcome.applied && submissionMayHaveStarted) {
           this.options.logger.warn(
@@ -391,7 +394,8 @@ export class PrintDispatcher {
           actorType: "SYSTEM",
           actorId: "print-dispatcher",
           now,
-          newId: () => this.newId()
+          newId: () => this.newId(),
+          retentionPolicy: this.options.retentionPolicy
         });
         if (outcome.applied) {
           this.options.logger.info(

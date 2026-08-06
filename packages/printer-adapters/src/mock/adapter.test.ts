@@ -232,6 +232,16 @@ describe("MockPrinterAdapter", () => {
     await expect(adapter.discardOutputsBefore(new Date())).resolves.toBe(0);
   });
 
+  it("surfaces output-directory failures so retention can alert", async () => {
+    const notDirectory = resolve(outputDirectory, "not-a-directory");
+    await writeFile(notDirectory, "device output path is invalid", "utf8");
+    const adapter = new MockPrinterAdapter({ outputDirectory: notDirectory });
+
+    await expect(adapter.discardOutputsBefore(new Date())).rejects.toMatchObject({
+      code: "ENOTDIR"
+    });
+  });
+
   it("refuses an operation identifier that is not a plain identifier", async () => {
     const adapter = new MockPrinterAdapter({ outputDirectory });
 

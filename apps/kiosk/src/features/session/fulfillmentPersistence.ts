@@ -8,6 +8,7 @@ import {
 import {
   initialPrototypeState,
   type PrototypeFile,
+  type PrintFailureDisposition,
   type PrototypeOutcome,
   type PrototypeState
 } from "./model.js";
@@ -35,6 +36,7 @@ interface StoredFulfillment {
   files: PrototypeFile[];
   payment: PaymentSnapshot;
   printJob: PrintJobSnapshot | null;
+  printFailureDisposition: PrintFailureDisposition | null;
   outcome: PrototypeOutcome;
 }
 
@@ -43,9 +45,10 @@ interface StoredFulfillment {
  *
  * The QR URL is intentionally absent because it contains the upload bearer
  * token, and filenames are replaced with null. The stored payment and print
- * snapshots contain only the same closed, non-card fields already rendered by
- * the kiosk. PostgreSQL remains authoritative: restored identifiers are used
- * only to read or idempotently resume the owning kiosk's workflow.
+ * snapshots and recovery disposition contain only the same closed, non-card
+ * fields already used by the kiosk. PostgreSQL remains authoritative: restored
+ * identifiers are used only to read or idempotently resume the owning kiosk's
+ * workflow.
  */
 export function persistFulfillmentState(state: PrototypeState): void {
   if (typeof window === "undefined") return;
@@ -69,6 +72,7 @@ export function persistFulfillmentState(state: PrototypeState): void {
       .map((file) => ({ ...file, name: null })),
     payment,
     printJob: state.print.job,
+    printFailureDisposition: state.print.failureDisposition,
     outcome: state.outcome
   };
   window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
@@ -89,13 +93,23 @@ export function restoreFulfillmentState(): PrototypeState | null {
       session: { ...stored.session, uploadUrl: "" },
       files: stored.files,
       payment: { payment: stored.payment, attempt: 1, errorCode: null },
-      print: { job: stored.printJob, errorCode: null },
+      print: {
+        job: stored.printJob,
+        errorCode: null,
+        failureDisposition: stored.printFailureDisposition
+      },
       outcome: stored.outcome
     };
   } catch {
     window.sessionStorage.removeItem(STORAGE_KEY);
     return null;
   }
+}
+
+/** Remove a paid-workflow snapshot synchronously when its terminal screen ends. */
+export function clearFulfillmentState(): void {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(STORAGE_KEY);
 }
 
 function parseStoredFulfillment(value: unknown): StoredFulfillment | null {
@@ -118,6 +132,7 @@ function parseStoredFulfillment(value: unknown): StoredFulfillment | null {
   const payment = paymentSnapshotSchema.safeParse(value.payment);
   const printJob =
     value.printJob === null ? null : printJobSnapshotSchema.safeParse(value.printJob);
+  const printFailureDisposition = parsePrintFailureDisposition(value.printFailureDisposition);
   const files = value.files.map(parseStoredFile);
   if (
     !payment.success ||
@@ -142,8 +157,13 @@ function parseStoredFulfillment(value: unknown): StoredFulfillment | null {
     files: files as PrototypeFile[],
     payment: payment.data,
     printJob: printJob?.data ?? null,
+    printFailureDisposition,
     outcome: value.outcome as PrototypeOutcome
   };
+}
+
+function parsePrintFailureDisposition(value: unknown): PrintFailureDisposition | null {
+  return value === "RETRYABLE" || value === "OPERATOR_REQUIRED" ? value : null;
 }
 
 function parseStoredFile(value: unknown): PrototypeFile | null {

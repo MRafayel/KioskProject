@@ -9,6 +9,7 @@ const sessionId = "01900000-0000-7000-8000-000000000d01";
 const runId = "01900000-0000-7000-8000-000000000d02";
 const fileId = "01900000-0000-7000-8000-000000000d03";
 const printJobId = "01900000-0000-7000-8000-000000000d04";
+const settingsId = "01900000-0000-7000-8000-000000000d05";
 const now = new Date("2030-01-01T00:10:00.000Z");
 
 const silentLogger: CleanupLogger = {
@@ -25,6 +26,7 @@ interface StubOptions {
   claimable?: boolean;
   cleanupRunUpdateCount?: number;
   sessionAlreadyCleaned?: boolean;
+  outOfScopeArtifact?: boolean;
 }
 
 function stubDatabase(options: StubOptions = {}) {
@@ -39,6 +41,7 @@ function stubDatabase(options: StubOptions = {}) {
   const grantDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
   const commandDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
   const printJobUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+  const settingsUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
   const pageDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
   const derivativeDeleteMany = vi.fn().mockResolvedValue({ count: 2 });
 
@@ -59,9 +62,14 @@ function stubDatabase(options: StubOptions = {}) {
       findFirst: vi
         .fn()
         .mockResolvedValue(options.barrierAt ? { cleanupDueAt: options.barrierAt } : null),
-      findMany: vi
-        .fn()
-        .mockResolvedValue([{ id: fileId, quarantineObjectKey: `quarantine/v1/${sessionId}/f/k` }]),
+      findMany: vi.fn().mockResolvedValue([
+        {
+          id: fileId,
+          quarantineObjectKey: options.outOfScopeArtifact
+            ? "quarantine/v1/01900000-0000-7000-8000-000000000999/f/k"
+            : `quarantine/v1/${sessionId}/f/k`
+        }
+      ]),
       updateMany: fileUpdateMany
     },
     fileDerivative: {
@@ -84,6 +92,24 @@ function stubDatabase(options: StubOptions = {}) {
           { id: printJobId, jobManifest: { documents: [{ documentId: fileId, sha256: "a" }] } }
         ]),
       updateMany: printJobUpdateMany
+    },
+    printSettingRevision: {
+      findMany: vi.fn().mockResolvedValue([
+        {
+          id: settingsId,
+          selections: [
+            {
+              fileId,
+              position: 0,
+              pageCount: 1,
+              contentSha256: "b".repeat(64),
+              pageRanges: [[1, 1]],
+              selectedPages: 1
+            }
+          ]
+        }
+      ]),
+      updateMany: settingsUpdateMany
     },
     $executeRaw: vi.fn().mockResolvedValue(0),
     $queryRaw: vi.fn().mockImplementation((strings: TemplateStringsArray) => {
@@ -118,6 +144,7 @@ function stubDatabase(options: StubOptions = {}) {
     grantDeleteMany,
     commandDeleteMany,
     printJobUpdateMany,
+    settingsUpdateMany,
     pageDeleteMany,
     derivativeDeleteMany
   };
@@ -130,7 +157,9 @@ function stubStore(overrides: Partial<StoreMocks> = {}): StoreMocks {
     deleteObjects: vi.fn<RetentionStore["deleteObjects"]>().mockResolvedValue(2),
     purgePrefix: vi.fn<RetentionStore["purgePrefix"]>().mockResolvedValue(0),
     abortMultipartUploads: vi.fn<RetentionStore["abortMultipartUploads"]>().mockResolvedValue(0),
-    listObjectsOlderThan: vi.fn<RetentionStore["listObjectsOlderThan"]>().mockResolvedValue([]),
+    listObjectsOlderThan: vi
+      .fn<RetentionStore["listObjectsOlderThan"]>()
+      .mockResolvedValue({ objects: [], acknowledge: vi.fn() }),
     ...overrides
   };
 }
@@ -235,6 +264,18 @@ describe("SessionCleanupRunner", () => {
       jobManifest: { redacted: true, documentCount: 1 },
       manifestRedactedAt: now
     });
+    const settingsRedaction = database.settingsUpdateMany.mock.calls[0]?.[0] as {
+      data: { selections: Array<Record<string, unknown>>; selectionsRedactedAt: Date };
+    };
+    expect(settingsRedaction.data.selectionsRedactedAt).toEqual(now);
+    expect(settingsRedaction.data.selections[0]).toMatchObject({
+      fileId,
+      position: 0,
+      pageCount: 1,
+      pageRanges: [[1, 1]],
+      selectedPages: 1
+    });
+    expect(settingsRedaction.data.selections[0]).not.toHaveProperty("contentSha256");
     expect(database.commandDeleteMany).toHaveBeenCalled();
     expect(database.grantDeleteMany).toHaveBeenCalled();
   });
@@ -252,7 +293,15 @@ describe("SessionCleanupRunner", () => {
       data: Record<string, unknown>;
     };
     expect(deferral.data).toMatchObject({ status: "PENDING", availableAt: barrierAt });
-    expect(database.sessionUpdate).not.toHaveBeenCalled();
+    expect(database.sessionUpdate).toHaveBeenCalledWith({
+      where: { id: sessionId },
+      data: { cleanupStatus: "PENDING", updatedAt: now }
+    });
+    expect(
+      database.sessionUpdate.mock.calls.some(
+        ([call]) => "filesDeletedAt" in (call as { data: Record<string, unknown> }).data
+      )
+    ).toBe(false);
   });
 
   it("resumes from the checkpoint it reached rather than starting over", async () => {
@@ -307,8 +356,31 @@ describe("SessionCleanupRunner", () => {
     expect(release.data.attempts).toBe(1);
     expect(release.data.lastErrorCode).toBe("OBJECT_PREFIX_PURGE_EXHAUSTED");
     expect(release.data.availableAt.getTime()).toBeGreaterThan(now.getTime());
-    expect(database.sessionUpdate).not.toHaveBeenCalled();
+    expect(database.sessionUpdate).toHaveBeenCalledWith({
+      where: { id: sessionId },
+      data: { cleanupStatus: "PENDING", updatedAt: now }
+    });
+    expect(
+      database.sessionUpdate.mock.calls.some(
+        ([call]) => "filesDeletedAt" in (call as { data: Record<string, unknown> }).data
+      )
+    ).toBe(false);
     expect(warnings).toContain("session cleanup attempt failed");
+  });
+
+  it("does not let a stale lease owner change the session mirror while deferring", async () => {
+    const barrierAt = new Date(now.getTime() + 35_000);
+    const database = stubDatabase({ barrierAt });
+    stubTransactionClient(database);
+    // The first checkpoint lands, then the lease belongs to somebody else
+    // before this owner tries to hand the run back.
+    database.cleanupRunUpdateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+
+    await createRunner(database.client, stubStore()).runOnce();
+
+    expect(database.sessionUpdate).not.toHaveBeenCalled();
   });
 
   it("dead-letters loudly once the attempt budget is spent", async () => {
@@ -360,14 +432,33 @@ describe("SessionCleanupRunner", () => {
     expect(serialized).toContain("UNKNOWN_ERROR");
   });
 
+  it("refuses a ledger key that belongs to another session", async () => {
+    const database = stubDatabase({ outOfScopeArtifact: true });
+    stubTransactionClient(database);
+    const store = stubStore();
+
+    await createRunner(database.client, store).runOnce();
+
+    expect(store.deleteObjects).not.toHaveBeenCalled();
+    const release = database.cleanupRunUpdateMany.mock.calls.at(-1)?.[0] as {
+      data: { lastErrorCode: string; status: string };
+    };
+    expect(release.data).toMatchObject({
+      lastErrorCode: "CLEANUP_OBJECT_KEY_OUT_OF_SCOPE",
+      status: "PENDING"
+    });
+  });
+
   it("stops when it loses its lease rather than writing a second tombstone", async () => {
     const database = stubDatabase({ cleanupRunUpdateCount: 0 });
     stubTransactionClient(database);
+    const info = vi.fn<CleanupLogger["info"]>();
 
-    await createRunner(database.client, stubStore()).runOnce();
+    await createRunner(database.client, stubStore(), { ...silentLogger, info }).runOnce();
 
     expect(database.sessionUpdate).not.toHaveBeenCalled();
     expect(database.outboxCreate).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
   });
 
   it("does nothing when no run is due", async () => {

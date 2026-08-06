@@ -139,8 +139,9 @@ model CleanupRun {
   @@map("cleanup_runs")
 }
 
-/// Append-only. A quote, a payment, and a print job all refer to one exact
-/// revision, so a row here is never updated after it is written.
+/// Immutable pricing snapshot. A quote, payment and print job refer to one
+/// exact revision; the sole later amendment is the database-guarded removal of
+/// per-document content digests after the session becomes terminal.
 model PrintSettingRevision {
   id                 String       @id @db.Uuid
   sessionId          String       @map("session_id") @db.Uuid
@@ -153,6 +154,9 @@ model PrintSettingRevision {
   collate            Boolean
   colorMode          String       @map("color_mode") @db.VarChar(16)
   selections         Json
+  /// Set once by retention when raw per-document content digests are removed
+  /// from selections. All priced paper/range aggregates remain immutable.
+  selectionsRedactedAt DateTime?  @map("selections_redacted_at")
   selectedPages      Int          @map("selected_pages")
   printedSides       Int          @map("printed_sides")
   physicalSheets     Int          @map("physical_sheets")

@@ -215,6 +215,79 @@ describe("Phase 9 retention", () => {
     ).toBe(0);
   });
 
+  it("removes document fingerprints from retained print settings", async () => {
+    const app = await buildTestApp();
+    const fixture = await seedSessionWithDocuments(app);
+    const revisionId = randomUUID();
+    const digest = createHash("sha256").update("retention-fixture").digest("hex");
+    await database.printSettingRevision.create({
+      data: {
+        id: revisionId,
+        sessionId: fixture.sessionId,
+        revision: 1,
+        copies: 2,
+        duplex: "LONG_EDGE",
+        paperSize: "A4",
+        orientation: "PORTRAIT",
+        scaling: "FIT",
+        collate: true,
+        colorMode: "MONOCHROME",
+        selections: [
+          {
+            fileId: fixture.fileId,
+            position: 0,
+            pageCount: 1,
+            processingRevision: 1,
+            contentSha256: digest,
+            pageRanges: [[1, 1]],
+            pageRangeText: "1",
+            selectedPages: 1
+          }
+        ],
+        selectedPages: 1,
+        printedSides: 2,
+        physicalSheets: 2,
+        capabilityVersion: 1,
+        manifestHash: "f".repeat(64),
+        createdByActorType: "KIOSK",
+        createdByActorId: credentialId
+      }
+    });
+    await database.printSession.update({
+      where: { id: fixture.sessionId },
+      data: { currentSettingsRevision: 1 }
+    });
+
+    await cancelSession(app, fixture.sessionId, fixture.version);
+    await createRunner().runOnce();
+
+    const revision = await database.printSettingRevision.findUniqueOrThrow({
+      where: { id: revisionId }
+    });
+    expect(revision.selectionsRedactedAt).not.toBeNull();
+    expect(revision).toMatchObject({ copies: 2, selectedPages: 1, printedSides: 2 });
+    const serialized = JSON.stringify(revision.selections);
+    expect(serialized).not.toContain("contentSha256");
+    expect(serialized).not.toContain(digest);
+    expect(serialized).toContain(fixture.fileId);
+
+    // Redaction removes an internal fingerprint, not the customer-visible
+    // record of the ranges and counts that were configured.
+    const readable = await app.inject({
+      method: "GET",
+      url: `/v1/sessions/${fixture.sessionId}/settings`,
+      headers: { authorization }
+    });
+    expect(readable.statusCode, readable.body).toBe(200);
+    expect(readable.json()).toMatchObject({
+      settings: {
+        revision: 1,
+        copies: 2,
+        files: [{ fileId: fixture.fileId, pageRanges: [[1, 1]] }]
+      }
+    });
+  });
+
   it("keeps the audit trail and the money the session generated", async () => {
     const app = await buildTestApp();
     const fixture = await seedSessionWithDocuments(app);
@@ -326,7 +399,7 @@ describe("Phase 9 retention", () => {
       deleteObjects: () => Promise.reject(new Error("OBJECT_BATCH_DELETE_FAILED")),
       purgePrefix: () => Promise.reject(new Error("OBJECT_BATCH_DELETE_FAILED")),
       abortMultipartUploads: () => Promise.resolve(0),
-      listObjectsOlderThan: () => Promise.resolve([])
+      listObjectsOlderThan: () => Promise.resolve({ objects: [], acknowledge: () => undefined })
     };
     const logger: CleanupLogger = {
       info: () => undefined,

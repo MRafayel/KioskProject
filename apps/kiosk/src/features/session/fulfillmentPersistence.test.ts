@@ -74,7 +74,8 @@ function fulfillmentState(): PrototypeState {
         deadlineAt: "2030-01-01T00:05:00.000Z",
         completedAt: null
       },
-      errorCode: null
+      errorCode: null,
+      failureDisposition: null
     }
   };
 }
@@ -107,6 +108,24 @@ describe("fulfillment refresh persistence", () => {
 
     expect(restoreFulfillmentState()).toBeNull();
     expect(window.sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it("retains operator-required print recovery across a refresh", () => {
+    const state = fulfillmentState();
+    state.print = {
+      job: null,
+      errorCode: "PRINT_START_REJECTED",
+      failureDisposition: "OPERATOR_REQUIRED"
+    };
+    persistFulfillmentState(state);
+
+    const restored = restoreFulfillmentState();
+    expect(restored?.payment.payment?.id).toBe(paymentId);
+    expect(restored?.print).toEqual({
+      job: null,
+      errorCode: null,
+      failureDisposition: "OPERATOR_REQUIRED"
+    });
   });
 
   it("removes the recovery record once the workflow is reset", () => {

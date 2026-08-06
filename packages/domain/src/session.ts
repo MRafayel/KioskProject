@@ -42,7 +42,7 @@ const allowedTransitions: Readonly<Record<SessionState, readonly SessionState[]>
   PAID: ["PRINTING"],
   PRINTING: ["COMPLETED", "FAILED", "RECOVERY_REQUIRED"],
   COMPLETED: [],
-  FAILED: ["PRINTING"],
+  FAILED: [],
   RECOVERY_REQUIRED: [],
   EXPIRED: [],
   CANCELED: []

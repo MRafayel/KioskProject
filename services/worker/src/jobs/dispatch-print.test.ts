@@ -12,6 +12,10 @@ const operationId = "01900000-0000-7000-8000-000000000cc5";
 const claimToken = "01900000-0000-7000-8000-000000000cc6";
 const now = new Date("2030-01-01T00:05:00.000Z");
 const past = new Date("2030-01-01T00:00:00.000Z");
+const retentionPolicy = {
+  settledGraceMilliseconds: 17_000,
+  recoveryGraceMilliseconds: 43_000
+};
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
@@ -138,6 +142,7 @@ function buildDispatcher(
     leaseMilliseconds: 120_000,
     maxCommandAttempts: 2,
     maxDispatchAttempts: 5,
+    retentionPolicy,
     now: () => now,
     newId: () => `01900000-0000-7000-8000-${String(counter++).padStart(12, "0")}`,
     ...overrides
@@ -251,6 +256,7 @@ describe("PrintDispatcher", () => {
     ).toBe(true);
     expect(stub.refundUpsert).not.toHaveBeenCalled();
     expect(wrote(stub.outboxCreate, { type: "print.recovery_required" })).toBe(true);
+    expectCleanupScheduled(stub.sessionUpdateMany, retentionPolicy.recoveryGraceMilliseconds);
     await dispatcher.close().catch(() => undefined);
   });
 
@@ -286,6 +292,7 @@ describe("PrintDispatcher", () => {
     const refund = stub.refundUpsert.mock.calls[0]?.[0] as
       { create: Record<string, unknown> } | undefined;
     expect(refund?.create).toMatchObject({ reason: "PRINT_FAILED", amountMinor: 18_000 });
+    expectCleanupScheduled(stub.sessionUpdateMany, retentionPolicy.settledGraceMilliseconds);
     await dispatcher.close().catch(() => undefined);
   });
 
@@ -318,3 +325,14 @@ describe("PrintDispatcher", () => {
     await dispatcher.close().catch(() => undefined);
   });
 });
+
+function expectCleanupScheduled(
+  updateMany: { mock: { calls: unknown[][] } },
+  graceMilliseconds: number
+): void {
+  const cleanup = writes(updateMany).find((data) => data.cleanupStatus === "PENDING");
+  expect(cleanup).toBeDefined();
+  expect((cleanup?.cleanupDueAt as Date | undefined)?.getTime()).toBe(
+    now.getTime() + graceMilliseconds
+  );
+}

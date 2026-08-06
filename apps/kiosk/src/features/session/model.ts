@@ -120,7 +120,10 @@ export interface PaymentState {
 export interface PrintState {
   job: PrintJobSnapshot | null;
   errorCode: string | null;
+  failureDisposition: PrintFailureDisposition | null;
 }
+
+export type PrintFailureDisposition = "RETRYABLE" | "OPERATOR_REQUIRED";
 
 export interface PrototypeState {
   session: PrototypeSession | null;
@@ -150,7 +153,11 @@ export type PrototypeAction =
   | { type: "PAYMENT_FAILED"; errorCode: string }
   | { type: "PAYMENT_CLEARED" }
   | { type: "PRINT_OBSERVED"; printJob: PrintJobSnapshot }
-  | { type: "PRINT_FAILED"; errorCode: string }
+  | {
+      type: "PRINT_FAILED";
+      errorCode: string;
+      failureDisposition: PrintFailureDisposition;
+    }
   | { type: "OUTCOME_CHANGED"; outcome: PrototypeOutcome }
   | { type: "RESET" };
 
@@ -172,7 +179,11 @@ export const idlePricingState: PricingState = {
 
 export const idlePaymentState: PaymentState = { payment: null, attempt: 1, errorCode: null };
 
-export const idlePrintState: PrintState = { job: null, errorCode: null };
+export const idlePrintState: PrintState = {
+  job: null,
+  errorCode: null,
+  failureDisposition: null
+};
 
 export const initialPrototypeState: PrototypeState = {
   session: null,
@@ -272,9 +283,19 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
     case "PAYMENT_CLEARED":
       return { ...state, payment: nextPaymentAttempt(state.payment) };
     case "PRINT_OBSERVED":
-      return { ...state, print: { job: action.printJob, errorCode: null } };
+      return {
+        ...state,
+        print: { job: action.printJob, errorCode: null, failureDisposition: null }
+      };
     case "PRINT_FAILED":
-      return { ...state, print: { ...state.print, errorCode: action.errorCode } };
+      return {
+        ...state,
+        print: {
+          ...state.print,
+          errorCode: action.errorCode,
+          failureDisposition: action.failureDisposition
+        }
+      };
     case "OUTCOME_CHANGED":
       return { ...state, outcome: action.outcome };
     case "RESET":

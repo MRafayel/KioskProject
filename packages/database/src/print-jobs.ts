@@ -147,7 +147,7 @@ export interface ApplyPrintJobSettlementInput {
   now: Date;
   newId: () => string;
   /** Retention grace for the documents this outcome finishes with. */
-  retentionPolicy?: RetentionPolicy;
+  retentionPolicy: RetentionPolicy;
 }
 
 export interface PrintJobSettlementOutcome {
@@ -302,7 +302,7 @@ export async function applyPrintJobSettlement(
   await revokeSessionAccess(transaction, session.id, input.now);
   await scheduleSessionFilesForCleanup(transaction, session.id, input.now, {
     terminalState: input.sessionState,
-    ...(input.retentionPolicy ? { policy: input.retentionPolicy } : {})
+    policy: input.retentionPolicy
   });
 
   return { applied: true, refundId, sessionState: input.sessionState, sessionVersion: nextVersion };

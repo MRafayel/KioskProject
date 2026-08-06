@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import type { PaymentSnapshot, PrintJobSnapshot } from "@printing-kiosk/contracts";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
+import { clearFulfillmentState } from "../features/session/fulfillmentPersistence.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
   calculatePrintSummary,
@@ -24,11 +25,12 @@ import {
   isPrintJobSettled,
   isPrintJobSuccessful,
   isPrintRecoveryRequired,
+  isRetryablePrintFailure,
   PrintRequestError,
   readKioskPrintJob,
   startKioskPrintJob
 } from "../features/session/printService.js";
-import { closeKioskSession } from "../features/session/sessionService.js";
+import { clearStoredSessionKeys } from "../features/session/sessionService.js";
 
 const PAYMENT_POLL_INTERVAL_MS = 1_500;
 const PRINT_POLL_INTERVAL_MS = 1_500;
@@ -156,6 +158,15 @@ export function PrintingScreen() {
   const captured = state.payment.payment;
   const paymentId = captured && isPaymentSuccessful(captured) ? captured.id : null;
   const requestedScenario = simulatedPrintOutcomeFor[state.outcome];
+  const observedPrintJob = state.print.job;
+  const observedPrintJobId =
+    observedPrintJob?.sessionId === sessionId && observedPrintJob.paymentId === paymentId
+      ? observedPrintJob.id
+      : null;
+  const observedPrintJobSettled = observedPrintJob ? isPrintJobSettled(observedPrintJob) : false;
+  const observedPrintJobSuccessful = observedPrintJob
+    ? isPrintJobSuccessful(observedPrintJob)
+    : false;
 
   useEffect(() => {
     if (!sessionId || !paymentId) return;
@@ -187,17 +198,19 @@ export function PrintingScreen() {
             if (!observe(printJob)) poll(printJobId);
           } catch (error) {
             if (!active) return;
+            const retryable = isRetryablePrintFailure(error);
             readFailures += 1;
-            // A job nobody can read is not a job that failed. The screen keeps
-            // asking, and gives up only after several refusals so a customer is
-            // never left watching a spinner forever.
-            if (readFailures < PRINT_READ_FAILURE_LIMIT) {
+            // An ambiguous outage says nothing about the job, so retry it a
+            // bounded number of times. A deterministic client refusal cannot
+            // improve by polling and is escalated to an operator immediately.
+            if (retryable && readFailures < PRINT_READ_FAILURE_LIMIT) {
               poll(printJobId);
               return;
             }
             dispatch({
               type: "PRINT_FAILED",
-              errorCode: error instanceof PrintRequestError ? error.code : "PRINT_READ_FAILED"
+              errorCode: error instanceof PrintRequestError ? error.code : "PRINT_READ_FAILED",
+              failureDisposition: retryable ? "RETRYABLE" : "OPERATOR_REQUIRED"
             });
             leave("/failure/printer");
           }
@@ -205,26 +218,48 @@ export function PrintingScreen() {
       }, PRINT_POLL_INTERVAL_MS);
     };
 
-    void (async () => {
-      try {
-        const started = await startKioskPrintJob(sessionId, paymentId, requestedScenario);
-        if (observe(started)) return;
-        poll(started.id);
-      } catch (error) {
-        if (!active) return;
-        dispatch({
-          type: "PRINT_FAILED",
-          errorCode: error instanceof PrintRequestError ? error.code : "PRINT_START_FAILED"
-        });
-        leave("/failure/printer");
+    // A read outage can leave a known job in local state. Resume observing that
+    // job instead of asking to start it again. If the start response itself was
+    // lost there is no job identifier yet, so replay the POST with the stable
+    // idempotency key retained by startKioskPrintJob.
+    if (observedPrintJobId) {
+      if (observedPrintJobSettled) {
+        leave(observedPrintJobSuccessful ? "/complete" : "/failure/printer");
+      } else {
+        poll(observedPrintJobId);
       }
-    })();
+    } else {
+      void (async () => {
+        try {
+          const started = await startKioskPrintJob(sessionId, paymentId, requestedScenario);
+          if (observe(started)) return;
+          poll(started.id);
+        } catch (error) {
+          if (!active) return;
+          dispatch({
+            type: "PRINT_FAILED",
+            errorCode: error instanceof PrintRequestError ? error.code : "PRINT_START_FAILED",
+            failureDisposition: isRetryablePrintFailure(error) ? "RETRYABLE" : "OPERATOR_REQUIRED"
+          });
+          leave("/failure/printer");
+        }
+      })();
+    }
 
     return () => {
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [dispatch, navigate, paymentId, requestedScenario, sessionId]);
+  }, [
+    dispatch,
+    navigate,
+    observedPrintJobId,
+    observedPrintJobSettled,
+    observedPrintJobSuccessful,
+    paymentId,
+    requestedScenario,
+    sessionId
+  ]);
 
   if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
   // Printing is only ever watched, never invented: without a capture the
@@ -260,6 +295,17 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
   // because whether paper emerged is an operator's decision.
   const printRecovery =
     !paymentFailure && state.print.job !== null && isPrintRecoveryRequired(state.print.job);
+  const settledPrintFailure =
+    !paymentFailure &&
+    state.print.job !== null &&
+    isPrintJobSettled(state.print.job) &&
+    !isPrintJobSuccessful(state.print.job);
+  // A POST or GET transport failure says nothing about what the printer did.
+  // Keep the paid session and replay keys until the control plane reports a
+  // terminal failure or recovery outcome.
+  const printStatusUnavailable = !paymentFailure && !settledPrintFailure;
+  const printOperatorRequired =
+    printStatusUnavailable && state.print.failureDisposition === "OPERATOR_REQUIRED";
 
   if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
 
@@ -276,9 +322,13 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
             : compensatedCapture
               ? messages.status.paymentCompensatedTitle
               : messages.status.paymentDeclinedTitle
-          : printRecovery
-            ? messages.status.printerRecoveryTitle
-            : messages.status.printerErrorTitle}
+          : printStatusUnavailable
+            ? printOperatorRequired
+              ? messages.status.printerOperatorRequiredTitle
+              : messages.status.printerStatusUnavailableTitle
+            : printRecovery
+              ? messages.status.printerRecoveryTitle
+              : messages.status.printerErrorTitle}
       </h1>
       <p>
         {paymentFailure
@@ -287,9 +337,13 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
             : compensatedCapture
               ? messages.status.paymentCompensatedDescription
               : messages.status.paymentDeclinedDescription
-          : printRecovery
-            ? messages.status.printerRecoveryDescription
-            : messages.status.printerErrorDescription}
+          : printStatusUnavailable
+            ? printOperatorRequired
+              ? messages.status.printerOperatorRequiredDescription
+              : messages.status.printerStatusUnavailableDescription
+            : printRecovery
+              ? messages.status.printerRecoveryDescription
+              : messages.status.printerErrorDescription}
       </p>
       <div className="failure-detail" role="status">
         <strong>
@@ -299,55 +353,77 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
               : compensatedCapture
                 ? messages.status.paymentCompensatedCode
                 : messages.status.paymentDeclinedCode
-            : printRecovery
-              ? messages.status.printerRecoveryCode
-              : messages.status.printerErrorCode}
+            : printStatusUnavailable
+              ? printOperatorRequired
+                ? messages.status.printerOperatorRequiredCode
+                : messages.status.printerStatusUnavailableCode
+              : printRecovery
+                ? messages.status.printerRecoveryCode
+                : messages.status.printerErrorCode}
         </strong>
         <span>
           {paymentFailure
             ? messages.status.failureDetail
-            : printRecovery
-              ? messages.status.printerRecoveryDetail
-              : messages.status.printerRefundNotice}
+            : printStatusUnavailable
+              ? printOperatorRequired
+                ? messages.status.printerOperatorRequiredDetail
+                : messages.status.printerStatusUnavailableDetail
+              : printRecovery
+                ? messages.status.printerRecoveryDetail
+                : messages.status.printerRefundNotice}
         </span>
       </div>
-      <div className="button-row button-row--center">
-        {paymentFailure && !pendingPayment ? (
+      {printOperatorRequired ? null : (
+        <div className="button-row button-row--center">
+          {paymentFailure && !pendingPayment ? (
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={() => void navigate("/checkout")}
+            >
+              {messages.status.reviewSettings}
+            </button>
+          ) : null}
           <button
-            className="button button--secondary"
+            className="button button--primary"
             type="button"
-            onClick={() => void navigate("/checkout")}
-          >
-            {messages.status.reviewSettings}
-          </button>
-        ) : null}
-        <button
-          className="button button--primary"
-          type="button"
-          onClick={() => {
-            if (!paymentFailure) {
-              // A settled print job is final: the session is already closed and
-              // its documents are already scheduled for deletion. There is
-              // nothing to retry here, only a screen to hand to the next
-              // customer.
-              dispatch({ type: "RESET" });
-              resetLocale();
-              void navigate("/", { replace: true });
-              return;
-            }
+            onClick={() => {
+              if (!paymentFailure) {
+                if (printStatusUnavailable) {
+                  // No terminal result was observed, so keep both the fulfillment
+                  // snapshot and replay keys and resume the same paid workflow.
+                  void navigate("/printing");
+                  return;
+                }
+                // A settled print job is final: the session is already closed and
+                // its documents are already scheduled for deletion. There is
+                // nothing to retry here, only a screen to hand to the next
+                // customer.
+                clearStoredSessionKeys(state.session?.id);
+                clearFulfillmentState();
+                dispatch({ type: "RESET" });
+                resetLocale();
+                void navigate("/", { replace: true });
+                return;
+              }
 
-            dispatch({ type: "OUTCOME_CHANGED", outcome: "SUCCESS" });
-            // A declined payment is settled and final. Retrying means asking
-            // the control plane for a new one. A transient confirm/read failure
-            // keeps its pending payment identifier and resumes watching it,
-            // so the retry cannot collide with PAYMENT_IN_PROGRESS.
-            if (!pendingPayment) dispatch({ type: "PAYMENT_CLEARED" });
-            void navigate(pendingPayment ? "/payment" : "/checkout");
-          }}
-        >
-          {paymentFailure ? messages.status.retryPayment : messages.status.finish}
-        </button>
-      </div>
+              dispatch({ type: "OUTCOME_CHANGED", outcome: "SUCCESS" });
+              // A declined payment is settled and final. Retrying means asking
+              // the control plane for a new one. A transient confirm/read failure
+              // keeps its pending payment identifier and resumes watching it,
+              // so the retry cannot collide with PAYMENT_IN_PROGRESS.
+              if (!pendingPayment) dispatch({ type: "PAYMENT_CLEARED" });
+              void navigate(pendingPayment ? "/payment" : "/checkout");
+            }}
+          >
+            {paymentFailure
+              ? messages.status.retryPayment
+              : printStatusUnavailable
+                ? messages.status.retryPrinting
+                : messages.status.finish}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -356,7 +432,6 @@ export function CompleteScreen() {
   const { messages, numberLocale, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
-  const [cleanupStatus, setCleanupStatus] = useState<"idle" | "closing" | "failed">("idle");
 
   const file = state.files[0];
   if (!isReadyFile(file)) return <KioskRedirect to="/" />;
@@ -372,18 +447,9 @@ export function CompleteScreen() {
   const captured = state.payment.payment;
   const paid = captured ? (isPaymentSuccessful(captured) ? captured : null) : quote;
 
-  const finish = async () => {
-    const session = state.session;
-    if (!session || cleanupStatus === "closing") return;
-
-    setCleanupStatus("closing");
-    try {
-      await closeKioskSession(session);
-    } catch {
-      setCleanupStatus("failed");
-      return;
-    }
-
+  const finish = () => {
+    clearStoredSessionKeys(state.session?.id);
+    clearFulfillmentState();
     dispatch({ type: "RESET" });
     resetLocale();
     void navigate("/", { replace: true });
@@ -424,23 +490,8 @@ export function CompleteScreen() {
           <dd>{messages.status.deletionScheduled}</dd>
         </div>
       </dl>
-      {cleanupStatus === "failed" ? (
-        <div className="cleanup-recovery" role="alert">
-          <strong>{messages.common.cleanupPendingTitle}</strong>
-          <span>{messages.common.cleanupPendingDescription}</span>
-        </div>
-      ) : null}
-      <button
-        className="button button--primary"
-        type="button"
-        onClick={() => void finish()}
-        disabled={cleanupStatus === "closing"}
-      >
-        {cleanupStatus === "failed"
-          ? messages.common.retryCleanup
-          : cleanupStatus === "closing"
-            ? messages.common.cleanupInProgress
-            : messages.status.finish}
+      <button className="button button--primary" type="button" onClick={finish}>
+        {messages.status.finish}
       </button>
     </div>
   );

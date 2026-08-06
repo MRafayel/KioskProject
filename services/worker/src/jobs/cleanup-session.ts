@@ -202,42 +202,53 @@ export class SessionCleanupRunner {
     const leaseToken = this.newId();
     const leaseExpiresAt = new Date(now.getTime() + this.options.leaseMilliseconds);
 
-    const claimed = await this.options.database.$queryRaw<
-      Array<{ id: string; session_id: string; checkpoint: string; attempts: number }>
-    >`
-      UPDATE "cleanup_runs" AS "r"
-        SET "status" = 'IN_PROGRESS',
-            "lease_token" = ${leaseToken}::uuid,
-            "lease_expires_at" = ${leaseExpiresAt},
-            "started_at" = COALESCE("r"."started_at", ${now}),
-            "updated_at" = ${now}
-        WHERE "r"."id" = (
-          SELECT "c"."id" FROM "cleanup_runs" AS "c"
-            WHERE "c"."status" IN ('PENDING', 'IN_PROGRESS')
-              AND "c"."available_at" <= ${now}
-              AND ("c"."lease_expires_at" IS NULL OR "c"."lease_expires_at" <= ${now})
-            ORDER BY "c"."available_at" ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        )
-        RETURNING "r"."id", "r"."session_id", "r"."checkpoint", "r"."attempts"
-    `;
+    return this.options.database.$transaction(async (transaction) => {
+      const claimed = await transaction.$queryRaw<
+        Array<{ id: string; session_id: string; checkpoint: string; attempts: number }>
+      >`
+        UPDATE "cleanup_runs" AS "r"
+          SET "status" = 'IN_PROGRESS',
+              "lease_token" = ${leaseToken}::uuid,
+              "lease_expires_at" = ${leaseExpiresAt},
+              "started_at" = COALESCE("r"."started_at", ${now}),
+              "updated_at" = ${now}
+          WHERE "r"."id" = (
+            SELECT "c"."id" FROM "cleanup_runs" AS "c"
+              WHERE "c"."status" IN ('PENDING', 'IN_PROGRESS')
+                AND "c"."available_at" <= ${now}
+                AND ("c"."lease_expires_at" IS NULL OR "c"."lease_expires_at" <= ${now})
+              ORDER BY "c"."available_at" ASC
+              FOR UPDATE SKIP LOCKED
+              LIMIT 1
+          )
+          RETURNING "r"."id", "r"."session_id", "r"."checkpoint", "r"."attempts"
+      `;
 
-    const row = claimed[0];
-    if (!row) return null;
+      const row = claimed[0];
+      if (!row) return null;
 
-    await this.options.database.printSession.updateMany({
-      where: { id: row.session_id, cleanupStatus: "PENDING" },
-      data: { cleanupStatus: "IN_PROGRESS", updatedAt: now }
+      // The run and its operator-facing mirror are one state transition. A
+      // process crash must not leave one saying PENDING while the other says
+      // IN_PROGRESS. Including DEAD_LETTER repairs rows left inconsistent by
+      // an older worker before this transition became atomic.
+      const mirrored = await transaction.printSession.updateMany({
+        where: {
+          id: row.session_id,
+          cleanupStatus: { in: ["PENDING", "IN_PROGRESS", "DEAD_LETTER"] },
+          filesDeletedAt: null
+        },
+        data: { cleanupStatus: "IN_PROGRESS", updatedAt: now }
+      });
+      if (mirrored.count !== 1) throw new Error("CLEANUP_SESSION_STATUS_INVALID");
+
+      return {
+        id: row.id,
+        sessionId: row.session_id,
+        checkpoint: row.checkpoint as CleanupCheckpoint,
+        attempts: row.attempts,
+        leaseToken
+      };
     });
-
-    return {
-      id: row.id,
-      sessionId: row.session_id,
-      checkpoint: row.checkpoint as CleanupCheckpoint,
-      attempts: row.attempts,
-      leaseToken
-    };
   }
 
   private async execute(run: ClaimedRun): Promise<void> {
@@ -327,6 +338,13 @@ export class SessionCleanupRunner {
       ...files.flatMap((file) => (file.quarantineObjectKey ? [file.quarantineObjectKey] : [])),
       ...derivatives.map((derivative) => derivative.objectKey)
     ];
+    const allowedPrefixes = sessionObjectPrefixes(run.sessionId);
+    if (keys.some((key) => !allowedPrefixes.some((prefix) => key.startsWith(prefix)))) {
+      // Ledger keys are data, not authority. A corrupted or manually edited
+      // row must never let one session's cleanup delete another customer's
+      // object merely because both keys live under a valid storage root.
+      throw new Error("CLEANUP_OBJECT_KEY_OUT_OF_SCOPE");
+    }
     const deleted = await this.options.store.deleteObjects(keys);
 
     const fileIds = files.map((file) => file.id);
@@ -440,9 +458,40 @@ export class SessionCleanupRunner {
         where: { sessionId: run.sessionId, status: { in: ["COMPLETED", "FAILED", "EXPIRED"] } }
       });
 
+      await this.redactPrintSettingSelections(transaction, run.sessionId, now);
       await this.redactPrintManifests(transaction, run.sessionId, now);
     });
     return { advanced: true };
+  }
+
+  /**
+   * Remove raw source-document fingerprints from the immutable settings trail.
+   * The revision still records the ordered page ranges and every priced
+   * aggregate; only `contentSha256`, which can confirm possession of a
+   * particular document later, is removed under a database-guarded one-time
+   * amendment.
+   */
+  private async redactPrintSettingSelections(
+    transaction: Prisma.TransactionClient,
+    sessionId: string,
+    now: Date
+  ): Promise<void> {
+    const revisions = await transaction.printSettingRevision.findMany({
+      where: { sessionId, selectionsRedactedAt: null },
+      select: { id: true, selections: true }
+    });
+    for (const revision of revisions) {
+      const selections = Array.isArray(revision.selections) ? revision.selections : [];
+      const redacted = selections.map((selection) =>
+        selection && typeof selection === "object" && !Array.isArray(selection)
+          ? Object.fromEntries(Object.entries(selection).filter(([key]) => key !== "contentSha256"))
+          : selection
+      ) as Prisma.InputJsonValue;
+      await transaction.printSettingRevision.updateMany({
+        where: { id: revision.id, selectionsRedactedAt: null },
+        data: { selections: redacted, selectionsRedactedAt: now }
+      });
+    }
   }
 
   /**
@@ -484,17 +533,17 @@ export class SessionCleanupRunner {
    */
   private async finish(run: ClaimedRun): Promise<void> {
     const now = this.now();
-    await this.options.database.$transaction(async (transaction) => {
+    const completed = await this.options.database.$transaction(async (transaction) => {
       const rows = await transaction.$queryRaw<Array<{ id: string }>>`
         SELECT "id" FROM "print_sessions" WHERE "id" = ${run.sessionId}::uuid FOR UPDATE
       `;
-      if (rows.length === 0) return;
+      if (rows.length === 0) return false;
 
       const session = await transaction.printSession.findUnique({
         where: { id: run.sessionId },
         select: { id: true, kioskId: true, eventSequence: true, filesDeletedAt: true }
       });
-      if (!session) return;
+      if (!session) return false;
 
       const closed = await transaction.cleanupRun.updateMany({
         where: { id: run.id, leaseToken: run.leaseToken },
@@ -510,9 +559,9 @@ export class SessionCleanupRunner {
       });
       // The lease was lost to another worker, which is now finishing the same
       // run. Writing the tombstone twice is what the trigger refuses, so stop.
-      if (closed.count !== 1) return;
+      if (closed.count !== 1) return false;
 
-      if (session.filesDeletedAt) return;
+      if (session.filesDeletedAt) return false;
 
       const nextSequence = session.eventSequence + 1;
       await transaction.printSession.update({
@@ -547,8 +596,11 @@ export class SessionCleanupRunner {
           payload: { sessionId: session.id, filesDeletedAt: now.toISOString() }
         }
       });
+      return true;
     });
 
+    // A stale lease owner did no work and must not emit a false success line.
+    if (!completed) return;
     this.options.logger.info(
       { cleanupRunId: run.id, sessionId: run.sessionId, attempts: run.attempts },
       "session documents deleted"
@@ -568,19 +620,24 @@ export class SessionCleanupRunner {
   /** Hand the run back to wait for something outside its control. */
   private async deferRun(run: ClaimedRun, retryAt: Date): Promise<void> {
     const now = this.now();
-    await this.options.database.cleanupRun.updateMany({
-      where: { id: run.id, leaseToken: run.leaseToken },
-      data: {
-        status: "PENDING",
-        availableAt: retryAt > now ? retryAt : now,
-        leaseToken: null,
-        leaseExpiresAt: null,
-        updatedAt: now
-      }
-    });
-    await this.options.database.printSession.updateMany({
-      where: { id: run.sessionId, cleanupStatus: "IN_PROGRESS" },
-      data: { cleanupStatus: "PENDING", updatedAt: now }
+    await this.options.database.$transaction(async (transaction) => {
+      const released = await transaction.cleanupRun.updateMany({
+        where: { id: run.id, leaseToken: run.leaseToken },
+        data: {
+          status: "PENDING",
+          availableAt: retryAt > now ? retryAt : now,
+          leaseToken: null,
+          leaseExpiresAt: null,
+          updatedAt: now
+        }
+      });
+      // A stale owner must not overwrite the session mirror while the current
+      // owner is still working. Zero rows means the lease has moved on.
+      if (released.count !== 1) return;
+      await transaction.printSession.update({
+        where: { id: run.sessionId },
+        data: { cleanupStatus: "PENDING", updatedAt: now }
+      });
     });
   }
 
@@ -596,23 +653,31 @@ export class SessionCleanupRunner {
     const deadLettered = isCleanupDeadLettered(attempts, this.options.maximumAttempts);
 
     try {
-      await this.options.database.cleanupRun.updateMany({
-        where: { id: run.id, leaseToken: run.leaseToken },
-        data: {
-          status: deadLettered ? "DEAD_LETTER" : "PENDING",
-          attempts,
-          lastErrorCode: errorCode,
-          availableAt: deadLettered ? now : nextCleanupAttemptAt(now, attempts, this.jitter()),
-          leaseToken: null,
-          leaseExpiresAt: null,
-          ...(deadLettered ? { deadLetteredAt: now } : {}),
-          updatedAt: now
-        }
+      const released = await this.options.database.$transaction(async (transaction) => {
+        const updated = await transaction.cleanupRun.updateMany({
+          where: { id: run.id, leaseToken: run.leaseToken },
+          data: {
+            status: deadLettered ? "DEAD_LETTER" : "PENDING",
+            attempts,
+            lastErrorCode: errorCode,
+            availableAt: deadLettered ? now : nextCleanupAttemptAt(now, attempts, this.jitter()),
+            leaseToken: null,
+            leaseExpiresAt: null,
+            ...(deadLettered ? { deadLetteredAt: now } : {}),
+            updatedAt: now
+          }
+        });
+        if (updated.count !== 1) return false;
+        await transaction.printSession.update({
+          where: { id: run.sessionId },
+          data: {
+            cleanupStatus: deadLettered ? "DEAD_LETTER" : "PENDING",
+            updatedAt: now
+          }
+        });
+        return true;
       });
-      await this.options.database.printSession.updateMany({
-        where: { id: run.sessionId, cleanupStatus: "IN_PROGRESS" },
-        data: { cleanupStatus: deadLettered ? "DEAD_LETTER" : "PENDING", updatedAt: now }
-      });
+      if (!released) return;
     } catch (releaseError) {
       // The lease will expire on its own and the run will be claimed again.
       this.options.logger.error(
@@ -707,8 +772,7 @@ function safeErrorCode(error: unknown): string {
   // Only a message that is already a closed code is allowed through. A storage
   // client's prose can name the key it failed on, and a key names a document.
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{2,79}$/u.test(error.message)) return error.message;
-  if (error instanceof Error && error.name && error.name !== "Error") {
-    return error.name.slice(0, 80);
-  }
+  if (error instanceof Error && error.name === "AbortError") return "OPERATION_ABORTED";
+  if (error instanceof Error && error.name === "TimeoutError") return "OPERATION_TIMEOUT";
   return "UNKNOWN_ERROR";
 }

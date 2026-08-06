@@ -234,16 +234,24 @@ export class MockPrinterAdapter implements PrinterAdapter {
     let entries;
     try {
       entries = await readdir(this.outputDirectory, { withFileTypes: true });
-    } catch {
-      // Nothing has been printed on this machine yet.
-      return 0;
+    } catch (error) {
+      if (isMissingPath(error)) {
+        // Nothing has been printed on this machine yet.
+        return 0;
+      }
+      // Permission and I/O failures must reach the runner so retention emits a
+      // warning instead of silently claiming there was nothing to remove.
+      throw error;
     }
 
     let discarded = 0;
     for (const entry of entries) {
       if (!entry.isDirectory() || !OPERATION_ID_PATTERN.test(entry.name)) continue;
       const path = this.childPath(this.outputDirectory, entry.name);
-      const stats = await stat(path).catch(() => null);
+      const stats = await stat(path).catch((error: unknown) => {
+        if (isMissingPath(error)) return null;
+        throw error;
+      });
       if (!stats || stats.mtimeMs >= cutoff.getTime()) continue;
       await rm(path, { recursive: true, force: true });
       discarded += 1;
@@ -312,6 +320,10 @@ export class MockPrinterAdapter implements PrinterAdapter {
     }
     return candidate;
   }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && Reflect.get(error, "code") === "ENOENT");
 }
 
 /**

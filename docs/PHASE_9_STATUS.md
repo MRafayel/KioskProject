@@ -1,6 +1,7 @@
 # Phase 9 status
 
 - Date: 2026-08-04
+- Last audited: 2026-08-06
 - Status: complete for the pilot/prototype acceptance boundary
 - Scope: a finished session's documents removed by a durable, resumable
   workflow; every copy accounted for, including the ones no database row names;
@@ -37,8 +38,9 @@ are done.
    no object listing shows and no row names.
 7. The relational record keeps its shape and loses its content: upload grant
    digests are deleted, the parser's opinion of each file is scrubbed, settled
-   agent commands go, and a print job's per-document digests are replaced by a
-   count. What was paid for, what the device reported, and the audit trail stay.
+   agent commands go, per-document digests are removed from retained settings,
+   and a print job's document manifest is replaced by a count. What was paid
+   for, what the device reported, and the audit trail stay.
 8. `files_deleted_at` is a claim the database checks. A trigger re-reads the
    artifact ledger and refuses the update while any document, derivative or
    page row remains, so a run that skipped a step cannot record that it did not.
@@ -124,12 +126,15 @@ Scrubbed to a tombstone:
   MIME types, the extension and the processing error code are removed.
 - `print_jobs.job_manifest` becomes `{"redacted": true, "documentCount": n}`.
   The manifest hash, the counts, the confidence and the failure code stay.
+- `print_setting_revisions.selections` keeps file order, page ranges and priced
+  aggregates, but loses each selection's `contentSha256` fingerprint.
 
 Kept:
 
 - `payments`, `payment_attempts`, `payment_webhook_inbox`, `refunds`,
   `price_quotes`, `pricing_rule_sets` — the accounting record;
-- `print_setting_revisions` — what was priced and paid for;
+- the non-identifying fields of `print_setting_revisions` — what was priced and
+  paid for;
 - `audit_events` and `session_events` — the trail, which never contained a
   filename, a key or a digest in the first place;
 - the `print_sessions` row itself, as a redacted tombstone.
@@ -150,6 +155,10 @@ Kept:
 - `print_jobs.manifest_redacted_at` — Phase 8's immutable-snapshot trigger now
   permits exactly one manifest change: on a settled job, into the redaction
   marker, recorded by this column, and never again.
+- `print_setting_revisions.selections_redacted_at` — the otherwise append-only
+  settings snapshot permits exactly one retention amendment: removal of the
+  raw document digest and nothing else. Insert-time guards prevent either
+  redaction marker from being forged ahead of cleanup.
 
 Every change is additive. A session written before this migration simply has no
 run; one that had already ended is adopted as overdue, which is what it is.
@@ -264,9 +273,10 @@ marker, and that the payment ledger survives all of it.
 3. **Retention runs in the worker, not the API.** Deletion is background work
    with its own lease and its own retry budget, and the credential that may
    delete every storage root belongs to one process rather than to every
-   request-serving replica. The API's existing file janitor is unchanged: it
-   still owns the per-file lifecycle that customer deletions and processing
-   failures drive, and retention is authoritative over whatever it leaves.
+   request-serving replica. The API's existing file janitor still owns the
+   per-file lifecycle that customer deletions and processing failures drive,
+   but both workflows now honor the same per-file retention deadline so the
+   janitor cannot cut through a session's receipt or recovery grace.
 4. **The agent's watchdog is local, not commanded.** The plan sketches a signed
    delete command from the control plane. For the mock device the local
    age-based sweep is both sufficient and strictly safer: the cutoff is derived
@@ -291,8 +301,64 @@ marker, and that the payment ledger survives all of it.
 - `mobile_clients` rows keep their peppered cookie and nonce digests. They are
   digests of server-issued random values rather than customer data, and the
   columns are unique and non-null, so they are revoked rather than scrubbed.
-- The storage reconciler pages a bounded number of objects per root per pass.
-  A backlog larger than that drains over several passes rather than in one.
+- The storage reconciler scans a bounded number of pages per root and retains
+  an in-memory continuation cursor between passes. It advances the cursor only
+  after classification and deletion succeed, so a failed pass retries the same
+  range. A backlog drains over several passes. A process restart loses that
+  cursor and begins at the root; a durable cursor is recommended before
+  operating at large bucket scale.
+- Cleanup leases are compared on every database checkpoint, so an expired
+  owner cannot finalize a newer owner's run, but long object-store operations
+  do not renew the lease. They can therefore duplicate idempotent deletion work
+  under sustained storage latency. Lease renewal is recommended before raising
+  the prototype's object-count limits.
+- Per-session cleanup explicitly removes non-current object versions and delete
+  markers. Orphan discovery starts from the current-object listing, so a
+  production bucket that enables versioning also needs non-current-version and
+  expired-delete-marker lifecycle rules as an independent backstop.
+- The retained settings/print manifest hashes are commercial evidence, but a
+  party that already knows a candidate document and the canonicalization rules
+  may still use hashes for correlation. Whether that evidence is legally
+  necessary, and for how long, requires the Phase 11/12 privacy and accounting
+  decision rather than an automatic schema change here.
+- The settings-digest upgrade uses a set-based update over terminal revisions.
+  It is atomic and fail-closed, but a production table much larger than the
+  pilot fixture needs deployment-window and lock-duration monitoring.
 - Retention has no admin-triggered path. There is deliberately no public
   scheduler endpoint; an authenticated manual cleanup belongs with the Phase 11
   admin surface.
+
+## Post-implementation audit — 2026-08-06
+
+The focused Phase 9 audit found and corrected defects that the original happy
+path did not expose:
+
+- settled and recovery file rows now inherit the session's configured grace;
+  the API janitor can no longer delete them on its next 15-second pass;
+- an upload reservation carries a cleanup barrier, refreshed immediately
+  before object I/O, so cancellation or expiry cannot sweep the prefix and then
+  have an already-authorized PUT recreate the document behind it;
+- cleanup-run claims, deferrals and failures update their session mirror in the
+  same transaction, and a stale lease cannot report a false success;
+- known ledger keys are checked against the owning session prefix before any
+  delete is issued;
+- the storage reconciler rotates through later listing pages without an
+  unbounded full-bucket scan, shares one timeout across the bounded scan, and
+  does not acknowledge a page until its downstream work succeeds;
+- manifest/settings redaction is guarded on insert and update, historical
+  terminal rows are backfilled, and terminal print outcome evidence is final;
+  database compatibility triggers also preserve these rules while older
+  workers or API replicas are still draining during a rolling deployment;
+- configured retention policy now reaches dispatcher-driven timeout and lease
+  exhaustion settlements;
+- a transient print API outage stays recoverable on the kiosk with the stable
+  print idempotency key; only an observed terminal job can claim refund or
+  scheduled deletion and hand the screen to the next customer; deterministic
+  4xx refusals retain the paid session and stop on an operator-only screen
+  instead of entering a futile retry loop;
+- completion no longer depends on a redundant network cancellation, and all
+  three kiosk locales describe deletion as scheduled rather than already done;
+- local spool/output sweeps ignore only `ENOENT`; permission, path and I/O
+  failures now reach retention warning logs;
+- the shared state machine treats `FAILED` as terminal, and CI again runs both
+  Phase 8 and Phase 9 real upgrade verifiers.

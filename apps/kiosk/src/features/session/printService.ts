@@ -22,6 +22,24 @@ export class PrintRequestError extends Error {
 }
 
 /**
+ * Whether retrying can plausibly recover without operator intervention.
+ *
+ * Network failures do not reveal whether the request reached the control
+ * plane. HTTP 408, 425, 429 and 5xx explicitly describe temporary service
+ * conditions. Other 4xx responses are deterministic refusals: replaying the
+ * same paid request and credentials cannot repair them.
+ */
+export function isRetryablePrintFailure(error: unknown): boolean {
+  if (!(error instanceof PrintRequestError)) return true;
+  return (
+    error.status === 408 ||
+    error.status === 425 ||
+    error.status === 429 ||
+    (error.status >= 500 && error.status <= 599)
+  );
+}
+
+/**
  * Ask the control plane to print what a capture already paid for.
  *
  * The request names the payment and nothing else. This screen cannot describe

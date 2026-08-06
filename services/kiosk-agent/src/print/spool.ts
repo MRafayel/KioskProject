@@ -95,16 +95,24 @@ export class PrintSpool {
     let entries;
     try {
       entries = await readdir(this.directory, { withFileTypes: true });
-    } catch {
-      // Nothing has been spooled on this machine yet.
-      return 0;
+    } catch (error) {
+      if (isMissingPath(error)) {
+        // Nothing has been spooled on this machine yet.
+        return 0;
+      }
+      // The runner deliberately logs sweep failures. Do not turn a permission
+      // or disk error into a false successful cleanup with bytes remaining.
+      throw error;
     }
 
     let discarded = 0;
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const path = this.childPath(this.directory, entry.name);
-      const stats = await stat(path).catch(() => null);
+      const stats = await stat(path).catch((error: unknown) => {
+        if (isMissingPath(error)) return null;
+        throw error;
+      });
       // Writing a document into the directory refreshes its timestamp, so an
       // operation still being prepared always reads as recent.
       if (!stats || stats.mtimeMs >= cutoff.getTime()) continue;
@@ -173,6 +181,10 @@ export class PrintSpool {
     }
     return candidate;
   }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && Reflect.get(error, "code") === "ENOENT");
 }
 
 async function readBounded(

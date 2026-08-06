@@ -108,6 +108,12 @@ jobs:
       - name: Verify upgrade from a Phase 6 database fixture
         run: pnpm db:verify-phase7-upgrade
 
+      - name: Verify upgrade from a Phase 7 database fixture
+        run: pnpm db:verify-phase8-upgrade
+
+      - name: Verify upgrade from a Phase 8 database fixture
+        run: pnpm db:verify-phase9-upgrade
+
       - name: Apply all migrations to a fresh database
         run: pnpm db:migrate
 

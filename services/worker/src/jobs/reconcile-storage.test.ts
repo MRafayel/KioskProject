@@ -27,6 +27,7 @@ function createReconciler(
   const database = {
     printSession: { findMany }
   } as unknown as PrismaClient;
+  const acknowledgements: Array<ReturnType<typeof vi.fn>> = [];
 
   const store: { [K in keyof RetentionStore]: Mock<RetentionStore[K]> } = {
     deleteObjects: vi
@@ -36,7 +37,11 @@ function createReconciler(
     abortMultipartUploads: vi.fn<RetentionStore["abortMultipartUploads"]>().mockResolvedValue(0),
     listObjectsOlderThan: vi
       .fn<RetentionStore["listObjectsOlderThan"]>()
-      .mockImplementation((prefix) => Promise.resolve(objects[prefix] ?? []))
+      .mockImplementation((prefix) => {
+        const acknowledge = vi.fn();
+        acknowledgements.push(acknowledge);
+        return Promise.resolve({ objects: objects[prefix] ?? [], acknowledge });
+      })
   };
 
   const reconciler = new StorageReconciler({
@@ -46,7 +51,7 @@ function createReconciler(
     orphanGraceMilliseconds: 7_200_000,
     now: () => now
   });
-  return { reconciler, store, findMany };
+  return { reconciler, store, findMany, acknowledgements };
 }
 
 describe("StorageReconciler", () => {
@@ -146,5 +151,19 @@ describe("StorageReconciler", () => {
     const serialized = JSON.stringify(entries);
     expect(serialized).not.toContain(cleanedSessionId);
     expect(serialized).toContain('"objectsDeleted":1');
+  });
+
+  it("does not advance listings when downstream deletion fails", async () => {
+    const { reconciler, store, acknowledgements } = createReconciler(
+      {
+        "quarantine/v1/": [{ key: `quarantine/v1/${vanishedSessionId}/f/token`, lastModified: old }]
+      },
+      []
+    );
+    store.deleteObjects.mockRejectedValueOnce(new Error("OBJECT_BATCH_DELETE_FAILED"));
+
+    await expect(reconciler.runOnce()).rejects.toThrow("OBJECT_BATCH_DELETE_FAILED");
+    expect(acknowledgements).toHaveLength(3);
+    expect(acknowledgements.every((acknowledge) => acknowledge.mock.calls.length === 0)).toBe(true);
   });
 });

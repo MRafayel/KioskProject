@@ -15,8 +15,33 @@ import type { Prisma } from "./generated/prisma/client.js";
  */
 export const PROCESSING_ARTIFACT_SETTLE_MILLISECONDS = 35_000;
 
+/**
+ * Upload requests may run for at most five minutes (the configuration schema's
+ * upper bound), and the API janitor gives a stopped request another thirty
+ * seconds to observe its abort signal. This fallback only applies to an
+ * UPLOADING row created by an older process that did not persist its own exact
+ * deadline; new reservations store the configured deadline immediately.
+ */
+export const MAX_UPLOAD_ARTIFACT_SETTLE_MILLISECONDS = 330_000;
+export const UPLOAD_ARTIFACT_SETTLE_PADDING_MILLISECONDS = 30_000;
+
 export function processingArtifactCleanupDueAt(now: Date): Date {
   return new Date(now.getTime() + PROCESSING_ARTIFACT_SETTLE_MILLISECONDS);
+}
+
+/** The earliest safe deletion time for bytes an active upload may still write. */
+export function uploadArtifactCleanupDueAt(now: Date, uploadTimeoutMilliseconds: number): Date {
+  const milliseconds = now.getTime();
+  if (
+    !Number.isFinite(milliseconds) ||
+    !Number.isSafeInteger(uploadTimeoutMilliseconds) ||
+    uploadTimeoutMilliseconds < 1
+  ) {
+    throw new Error("UPLOAD_CLEANUP_BARRIER_INVALID");
+  }
+  return new Date(
+    milliseconds + uploadTimeoutMilliseconds + UPLOAD_ARTIFACT_SETTLE_PADDING_MILLISECONDS
+  );
 }
 
 export interface SessionCleanupSchedule {
@@ -44,6 +69,9 @@ export async function scheduleSessionFilesForCleanup(
   now: Date,
   schedule?: SessionCleanupSchedule
 ): Promise<void> {
+  const scheduledDueAt = schedule
+    ? cleanupDueAt(schedule.terminalState, now, schedule.policy ?? DEFAULT_RETENTION_POLICY)
+    : now;
   const common = {
     status: "DELETE_PENDING",
     processingGeneration: { increment: 1 },
@@ -55,17 +83,40 @@ export async function scheduleSessionFilesForCleanup(
     updatedAt: now
   } as const;
 
+  // A PUT is intentionally outside the reservation transaction. Keep the row
+  // discoverable until that already-authorized request must have finished or
+  // aborted, otherwise a cleanup sweep can run first and the PUT can recreate
+  // an object behind it. Current writers persist their exact barrier when they
+  // reserve; this conservative fallback protects rows created by an older
+  // process during a rolling deployment.
+  await transaction.uploadedFile.updateMany({
+    where: { sessionId, status: "UPLOADING", cleanupDueAt: null },
+    data: {
+      cleanupDueAt: new Date(now.getTime() + MAX_UPLOAD_ARTIFACT_SETTLE_MILLISECONDS),
+      cleanupErrorCode: null,
+      updatedAt: now
+    }
+  });
+
   await transaction.uploadedFile.updateMany({
     where: { sessionId, status: { in: ["DELETE_PENDING", "DELETING"] } },
     data: common
   });
   await transaction.uploadedFile.updateMany({
     where: { sessionId, status: { in: ["QUARANTINED", "READY"] } },
-    data: { ...common, cleanupDueAt: now }
+    // The API's per-file janitor and the Phase 9 runner share this field. Using
+    // the session due time prevents the older janitor from bypassing settled or
+    // recovery grace by deleting the same bytes on its next pass.
+    data: { ...common, cleanupDueAt: scheduledDueAt }
   });
   await transaction.uploadedFile.updateMany({
     where: { sessionId, status: "VALIDATING" },
-    data: { ...common, cleanupDueAt: processingArtifactCleanupDueAt(now) }
+    data: {
+      ...common,
+      cleanupDueAt: new Date(
+        Math.max(scheduledDueAt.getTime(), processingArtifactCleanupDueAt(now).getTime())
+      )
+    }
   });
 
   if (!schedule) return;
@@ -76,11 +127,7 @@ export async function scheduleSessionFilesForCleanup(
     where: { id: sessionId, cleanupStatus: "NOT_DUE" },
     data: {
       cleanupStatus: "PENDING",
-      cleanupDueAt: cleanupDueAt(
-        schedule.terminalState,
-        now,
-        schedule.policy ?? DEFAULT_RETENTION_POLICY
-      ),
+      cleanupDueAt: scheduledDueAt,
       updatedAt: now
     }
   });

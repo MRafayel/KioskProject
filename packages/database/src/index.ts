@@ -30,8 +30,11 @@ export type {
   PrintJobSettlementOutcome
 } from "./print-jobs.js";
 export {
+  MAX_UPLOAD_ARTIFACT_SETTLE_MILLISECONDS,
   processingArtifactCleanupDueAt,
   revokeSessionAccess,
   scheduleSessionFilesForCleanup,
-  PROCESSING_ARTIFACT_SETTLE_MILLISECONDS
+  uploadArtifactCleanupDueAt,
+  PROCESSING_ARTIFACT_SETTLE_MILLISECONDS,
+  UPLOAD_ARTIFACT_SETTLE_PADDING_MILLISECONDS
 } from "./session-cleanup.js";

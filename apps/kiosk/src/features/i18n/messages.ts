@@ -175,6 +175,14 @@ export interface MessageCatalog {
     paymentCompensatedDescription: string;
     paymentCompensatedCode: string;
     paymentDeclinedTitle: string;
+    printerStatusUnavailableTitle: string;
+    printerStatusUnavailableDescription: string;
+    printerStatusUnavailableCode: string;
+    printerStatusUnavailableDetail: string;
+    printerOperatorRequiredTitle: string;
+    printerOperatorRequiredDescription: string;
+    printerOperatorRequiredCode: string;
+    printerOperatorRequiredDetail: string;
     printerErrorTitle: string;
     paymentDeclinedDescription: string;
     printerErrorDescription: string;
@@ -188,6 +196,7 @@ export interface MessageCatalog {
     failureDetail: string;
     reviewSettings: string;
     retryPayment: string;
+    retryPrinting: string;
     completeEyebrow: string;
     completeTitle: string;
     collectSheets: (count: number) => string;
@@ -416,11 +425,22 @@ const english: MessageCatalog = {
       "This payment cannot be used for printing and has been recorded for compensation. Ask an operator for help if a real charge appears.",
     paymentCompensatedCode: "COMPENSATION REQUIRED",
     paymentDeclinedTitle: "Payment was declined",
+    printerStatusUnavailableTitle: "Print status is temporarily unavailable",
+    printerStatusUnavailableDescription:
+      "The print job may still be in progress. Retry the same paid request without paying again.",
+    printerStatusUnavailableCode: "PRINT STATUS UNKNOWN",
+    printerStatusUnavailableDetail:
+      "Your payment remains attached to this session · No new payment will be started.",
+    printerOperatorRequiredTitle: "Printing needs operator assistance",
+    printerOperatorRequiredDescription:
+      "The system could not accept this print request or status check. Keep this paid session on screen and ask an operator for help.",
+    printerOperatorRequiredCode: "PRINT REQUEST BLOCKED",
+    printerOperatorRequiredDetail: "Do not pay again · An operator must verify the paid session.",
     printerErrorTitle: "The printer needs attention",
     paymentDeclinedDescription:
       "Nothing was charged. You can retry the demo payment or return to your settings.",
     printerErrorDescription:
-      "Nothing was printed. Your payment has been recorded for a refund and your documents have been deleted.",
+      "Nothing was printed. Your payment has been recorded for a refund, and your documents are scheduled for secure deletion.",
     paymentDeclinedCode: "PAYMENT DECLINED",
     printerErrorCode: "NOTHING PRINTED",
     printerRefundNotice: "Refund recorded · Ask an operator if it does not appear.",
@@ -432,6 +452,7 @@ const english: MessageCatalog = {
     failureDetail: "Prototype failure · Your file is still available in this session.",
     reviewSettings: "Review settings",
     retryPayment: "Retry payment",
+    retryPrinting: "Retry printing",
     completeEyebrow: "Print complete",
     completeTitle: "Your documents are ready",
     collectSheets: (count) =>
@@ -439,8 +460,8 @@ const english: MessageCatalog = {
     printed: "Printed",
     paid: "Paid",
     files: "Files",
-    deletionScheduled: "Deletion scheduled",
-    finish: "Finish and delete files"
+    deletionScheduled: "Secure deletion scheduled",
+    finish: "Finish"
   },
   idle: {
     countdown: (seconds) => `${seconds} seconds remaining`,
@@ -649,11 +670,23 @@ const russian: MessageCatalog = {
       "Этот платёж нельзя использовать для печати; он зарегистрирован для возврата. Если появилось реальное списание, обратитесь к оператору.",
     paymentCompensatedCode: "ТРЕБУЕТСЯ ВОЗВРАТ",
     paymentDeclinedTitle: "Платёж отклонён",
+    printerStatusUnavailableTitle: "Статус печати временно недоступен",
+    printerStatusUnavailableDescription:
+      "Задание печати всё ещё может выполняться. Повторите этот же оплаченный запрос, не оплачивая его снова.",
+    printerStatusUnavailableCode: "СТАТУС ПЕЧАТИ НЕИЗВЕСТЕН",
+    printerStatusUnavailableDetail:
+      "Платёж остаётся привязан к сеансу · Новый платёж не будет создан.",
+    printerOperatorRequiredTitle: "Для печати нужна помощь оператора",
+    printerOperatorRequiredDescription:
+      "Система не приняла запрос на печать или проверку его статуса. Оставьте этот оплаченный сеанс на экране и обратитесь к оператору.",
+    printerOperatorRequiredCode: "ЗАПРОС ПЕЧАТИ ЗАБЛОКИРОВАН",
+    printerOperatorRequiredDetail:
+      "Не оплачивайте повторно · Оператор должен проверить оплаченный сеанс.",
     printerErrorTitle: "Печать не выполнена",
     paymentDeclinedDescription:
       "Деньги не списаны. Повторите тестовую оплату или вернитесь к настройкам.",
     printerErrorDescription:
-      "Ничего не напечатано. Возврат средств зафиксирован, а документы удалены.",
+      "Ничего не напечатано. Возврат средств зафиксирован, а документы поставлены в очередь на безопасное удаление.",
     paymentDeclinedCode: "ПЛАТЁЖ ОТКЛОНЁН",
     printerErrorCode: "НИЧЕГО НЕ НАПЕЧАТАНО",
     printerRefundNotice: "Возврат зафиксирован · Обратитесь к оператору, если он не поступит.",
@@ -665,6 +698,7 @@ const russian: MessageCatalog = {
     failureDetail: "Тестовая ошибка · Файл по-прежнему доступен в этом сеансе.",
     reviewSettings: "Проверить настройки",
     retryPayment: "Повторить оплату",
+    retryPrinting: "Повторить печать",
     completeEyebrow: "Печать завершена",
     completeTitle: "Документы готовы",
     collectSheets: (count) =>
@@ -672,8 +706,8 @@ const russian: MessageCatalog = {
     printed: "Напечатано",
     paid: "Оплачено",
     files: "Файлы",
-    deletionScheduled: "Будут удалены",
-    finish: "Завершить и удалить файлы"
+    deletionScheduled: "Безопасное удаление запланировано",
+    finish: "Завершить"
   },
   idle: {
     countdown: (seconds) =>
@@ -880,9 +914,20 @@ const armenian: MessageCatalog = {
       "Այս վճարումը չի կարող օգտագործվել տպման համար և գրանցվել է վերադարձի համար։ Իրական գանձում տեսնելու դեպքում դիմեք սպասարկողին։",
     paymentCompensatedCode: "ԳՈՒՄԱՐԸ ՊԵՏՔ Է ՎԵՐԱԴԱՐՁՎԻ",
     paymentDeclinedTitle: "Վճարումը մերժվել է",
+    printerStatusUnavailableTitle: "Տպման կարգավիճակը ժամանակավորապես հասանելի չէ",
+    printerStatusUnavailableDescription:
+      "Տպման աշխատանքը կարող է դեռ ընթացքի մեջ լինել։ Կրկին ուղարկեք նույն վճարված հարցումը՝ առանց նորից վճարելու։",
+    printerStatusUnavailableCode: "ՏՊՄԱՆ ԿԱՐԳԱՎԻՃԱԿՆ ԱՆՀԱՅՏ Է",
+    printerStatusUnavailableDetail: "Վճարումը մնում է կապված այս սեանսին · Նոր վճարում չի սկսվի։",
+    printerOperatorRequiredTitle: "Տպումը շարունակելու համար սպասարկողի օգնությունն է պետք",
+    printerOperatorRequiredDescription:
+      "Համակարգը չի ընդունել տպման հարցումը կամ դրա կարգավիճակի ստուգումը։ Պահեք այս վճարված սեանսը էկրանին և դիմեք սպասարկողին։",
+    printerOperatorRequiredCode: "ՏՊՄԱՆ ՀԱՐՑՈՒՄԸ ՉԻ ԸՆԴՈՒՆՎԵԼ",
+    printerOperatorRequiredDetail: "Կրկին մի վճարեք · Սպասարկողը պետք է ստուգի վճարված սեանսը։",
     printerErrorTitle: "Տպումը չի կատարվել",
     paymentDeclinedDescription: "Գումար չի գանձվել։ Փորձեք կրկին կամ վերադարձեք կարգավորումներին։",
-    printerErrorDescription: "Ոչինչ չի տպվել։ Գումարի վերադարձը գրանցված է, փաստաթղթերը՝ ջնջված։",
+    printerErrorDescription:
+      "Ոչինչ չի տպվել։ Գումարի վերադարձը գրանցված է, իսկ փաստաթղթերի անվտանգ հեռացումը նախատեսված է։",
     paymentDeclinedCode: "ՎՃԱՐՈՒՄԸ ՄԵՐԺՎԵԼ Է",
     printerErrorCode: "ՈՉԻՆՉ ՉԻ ՏՊՎԵԼ",
     printerRefundNotice: "Վերադարձը գրանցված է · Դիմեք օպերատորին, եթե այն չհասնի։",
@@ -894,6 +939,7 @@ const armenian: MessageCatalog = {
     failureDetail: "Փորձնական սխալ · Ձեր ֆայլը դեռ հասանելի է։",
     reviewSettings: "Վերադառնալ կարգավորումներին",
     retryPayment: "Կրկնել վճարումը",
+    retryPrinting: "Կրկնել տպումը",
     completeEyebrow: "Տպումն ավարտված է",
     completeTitle: "Փաստաթուղթը պատրաստ է",
     collectSheets: (count) =>
@@ -903,8 +949,8 @@ const armenian: MessageCatalog = {
     printed: "Տպված փաստաթուղթ",
     paid: "Վճարված է",
     files: "Ֆայլեր",
-    deletionScheduled: "Կհեռացվեն ավարտելիս",
-    finish: "Ավարտել և հեռացնել ֆայլերը"
+    deletionScheduled: "Անվտանգ հեռացումը նախատեսված է",
+    finish: "Ավարտել"
   },
   idle: {
     countdown: (seconds) => `Մնացել է ${seconds} վայրկյան`,

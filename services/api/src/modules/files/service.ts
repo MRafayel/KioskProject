@@ -20,7 +20,7 @@ import type { MobileIdentity } from "../mobile-access/service.js";
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { digestIdempotencyKey, hashRequest } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
-import { processingArtifactCleanupDueAt } from "./cleanup-policy.js";
+import { processingArtifactCleanupDueAt, uploadArtifactCleanupDueAt } from "./cleanup-policy.js";
 import type { ObjectStore } from "./object-store.js";
 import { UploadInspectionTransform, UploadSizeLimitError } from "./upload-inspection.js";
 
@@ -125,8 +125,6 @@ export class FileService {
       return reservation.replay;
     }
 
-    const inspection = new UploadInspectionTransform({ maxBytes: this.options.maxFileBytes });
-    input.stream.pipe(inspection);
     const uploadStartedAt = this.options.clock.now();
     const uploadDeadline = Math.min(
       uploadStartedAt.getTime() + this.options.uploadTimeoutSeconds * 1_000,
@@ -140,6 +138,7 @@ export class FileService {
     const uploadSignal = input.signal
       ? AbortSignal.any([input.signal, timeoutSignal])
       : timeoutSignal;
+    const inspection = new UploadInspectionTransform({ maxBytes: this.options.maxFileBytes });
     const abortStreams = () => {
       const error = asError(uploadSignal.reason, "The upload was interrupted.");
       input.stream.destroy(error);
@@ -150,6 +149,30 @@ export class FileService {
     uploadSignal.addEventListener("abort", abortStreams, { once: true });
 
     try {
+      // `now` in the reservation is captured before it waits for the session
+      // lock. Refresh the barrier at the real start of object I/O so a long
+      // lock wait cannot consume the safety window and let terminal cleanup
+      // sweep this key while the PUT is still authorized to materialize it.
+      const armed = await this.options.database.uploadedFile.updateMany({
+        where: {
+          id: reservation.file.id,
+          sessionId: reservation.file.sessionId,
+          status: "UPLOADING",
+          quarantineObjectKey: reservation.file.objectKey
+        },
+        data: {
+          cleanupDueAt: uploadArtifactCleanupDueAt(
+            uploadStartedAt,
+            this.options.uploadTimeoutSeconds * 1_000
+          ),
+          updatedAt: uploadStartedAt
+        }
+      });
+      if (armed.count !== 1) {
+        throw new ApiError(409, "FILE_UPLOAD_STATE_CHANGED", "The upload state changed.");
+      }
+
+      input.stream.pipe(inspection);
       await this.options.objectStore.putObject({
         key: reservation.file.objectKey,
         body: inspection,
@@ -692,6 +715,13 @@ export class FileService {
                 declaredMime: input.declaredMime.slice(0, 100),
                 reservedBytes: input.declaredBytes,
                 quarantineObjectKey: objectKey,
+                // A terminal transition may race this PUT while it is outside
+                // the transaction. Retention must not sweep the prefix until
+                // the request is guaranteed to have finished or aborted.
+                cleanupDueAt: uploadArtifactCleanupDueAt(
+                  now,
+                  this.options.uploadTimeoutSeconds * 1_000
+                ),
                 createdAt: now,
                 updatedAt: now
               }
@@ -780,6 +810,9 @@ export class FileService {
                 sizeBytes: input.sizeBytes,
                 reservedBytes: input.sizeBytes,
                 contentSha256: input.sha256,
+                // The upload can no longer materialize behind a cleanup sweep.
+                // Any later terminal transition writes its own policy deadline.
+                cleanupDueAt: null,
                 quarantinedAt: now,
                 updatedAt: now
               }

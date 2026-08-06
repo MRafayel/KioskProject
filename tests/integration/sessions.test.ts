@@ -18,7 +18,10 @@ import {
   mobileContextResponseSchema,
   uploadFileResponseSchema
 } from "../../packages/contracts/src/uploads.js";
-import { createDatabaseClient } from "../../packages/database/src/index.js";
+import {
+  createDatabaseClient,
+  UPLOAD_ARTIFACT_SETTLE_PADDING_MILLISECONDS
+} from "../../packages/database/src/index.js";
 import { buildApp } from "../../services/api/src/app.js";
 import { FileJanitor } from "../../services/api/src/modules/files/janitor.js";
 import {
@@ -1470,11 +1473,81 @@ describe.sequential("authoritative print sessions", () => {
   });
 });
 
-async function createTestApp(clock?: MutableClock) {
+it("does not sweep an in-flight upload when cancellation races object storage", async () => {
+  const clock = new MutableClock(new Date("2030-01-01T00:00:00.000Z"));
+  const controlledObjectStore = new ControlledObjectStore();
+  const pausedPut = controlledObjectStore.pausePuts();
+  const app = await createTestApp(clock, controlledObjectStore);
+  const created = createSessionResponseSchema.parse(
+    (await createSession(app, "phase9-cancel-upload-race")).json()
+  );
+  const exchange = await exchangeMobile(
+    app,
+    created.session.publicId,
+    requireUploadToken(created.upload.qrUrl),
+    "01900000-0000-7000-8000-000000000068"
+  );
+  const upload = uploadMultipart(app, {
+    sessionId: created.session.id,
+    cookieHeader: exchange.cookieHeader,
+    csrfToken: exchange.context.csrfToken,
+    clientFileId: "01900000-0000-7000-8000-000000000069",
+    idempotencyKey: "phase9-cancel-upload-race-file",
+    filename: "race.pdf",
+    mime: "application/pdf",
+    contents: Buffer.from("%PDF-1.4\n%%EOF\n", "utf8")
+  });
+
+  await pausedPut.entered;
+  const inFlight = await database.uploadedFile.findFirstOrThrow({
+    where: { sessionId: created.session.id }
+  });
+  expect(inFlight).toMatchObject({ status: "UPLOADING" });
+  expect(inFlight.cleanupDueAt).toEqual(
+    new Date(
+      clock.current.getTime() +
+        environment.UPLOAD_TIMEOUT_SECONDS * 1_000 +
+        UPLOAD_ARTIFACT_SETTLE_PADDING_MILLISECONDS
+    )
+  );
+
+  const session = await database.printSession.findUniqueOrThrow({
+    where: { id: created.session.id }
+  });
+  const canceled = await cancelSession(
+    app,
+    created.session.id,
+    session.stateVersion,
+    "phase9-cancel-upload-race-cancel"
+  );
+  expect(canceled.statusCode, canceled.body).toBe(200);
+
+  const errors: Array<{ error: unknown; operation: string }> = [];
+  await createFileJanitor(clock, controlledObjectStore, errors).runOnce();
+  expect(errors).toEqual([]);
+  expect(
+    await database.uploadedFile.findUniqueOrThrow({ where: { id: inFlight.id } })
+  ).toMatchObject({ status: "UPLOADING", cleanupDueAt: inFlight.cleanupDueAt });
+
+  pausedPut.release();
+  const rejectedUpload = await upload;
+  expect(rejectedUpload.statusCode, rejectedUpload.body).toBe(409);
+  expect(
+    await database.uploadedFile.findUniqueOrThrow({ where: { id: inFlight.id } })
+  ).toMatchObject({
+    status: "REJECTED",
+    quarantineObjectKey: null,
+    cleanupDueAt: null
+  });
+  expect(controlledObjectStore.hasObject(inFlight.quarantineObjectKey ?? "")).toBe(false);
+});
+
+async function createTestApp(clock?: MutableClock, controlledObjectStore?: ObjectStore) {
   const app = await buildApp({
     environment,
     database,
-    ...(clock ? { clock } : {})
+    ...(clock ? { clock } : {}),
+    ...(controlledObjectStore ? { objectStore: controlledObjectStore } : {})
   });
   openApps.push(app);
   return app;
@@ -1677,12 +1750,17 @@ function createFileJanitor(
 class ControlledObjectStore implements ObjectStore {
   private readonly objects = new Set<string>();
   private remainingDeleteFailures = 0;
+  private putBarrier: Promise<void> | undefined;
+  private releasePutBarrier: (() => void) | undefined;
+  private putEntered: (() => void) | undefined;
   private deleteBarrier: Promise<void> | undefined;
   private releaseDeleteBarrier: (() => void) | undefined;
 
   public async putObject(
     input: Parameters<ObjectStore["putObject"]>[0]
   ): Promise<Awaited<ReturnType<ObjectStore["putObject"]>>> {
+    this.putEntered?.();
+    await this.putBarrier;
     for await (const _chunk of input.body) {
       input.signal?.throwIfAborted();
     }
@@ -1714,6 +1792,26 @@ class ControlledObjectStore implements ObjectStore {
 
   public failNextDeletes(count: number): void {
     this.remainingDeleteFailures = count;
+  }
+
+  public pausePuts(): { entered: Promise<void>; release: () => void } {
+    if (this.putBarrier) throw new Error("PUT_BARRIER_ALREADY_ACTIVE");
+    const entered = new Promise<void>((resolve) => {
+      this.putEntered = resolve;
+    });
+    this.putBarrier = new Promise<void>((resolve) => {
+      this.releasePutBarrier = resolve;
+    });
+
+    return {
+      entered,
+      release: () => {
+        this.releasePutBarrier?.();
+        this.releasePutBarrier = undefined;
+        this.putBarrier = undefined;
+        this.putEntered = undefined;
+      }
+    };
   }
 
   public pauseDeletes(): () => void {

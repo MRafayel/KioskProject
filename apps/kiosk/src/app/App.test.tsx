@@ -220,6 +220,11 @@ let simulatedOutcomes: string[];
 let paymentSnapshot: PaymentSnapshot;
 let confirmFailuresRemaining: number;
 let printJobRequests: Array<{ body: string; idempotencyKey: string }>;
+let printStartFailuresRemaining: number;
+let printStartErrorStatus: number | null;
+let printReadFailuresRemaining: number;
+let printReadErrorStatus: number | null;
+let printReadRequests: number;
 let printJobSnapshot: PrintJobSnapshot;
 let settledPrintJob: PrintJobSnapshot;
 
@@ -237,6 +242,11 @@ beforeEach(() => {
   paymentSnapshot = { ...paymentFixture };
   confirmFailuresRemaining = 0;
   printJobRequests = [];
+  printStartFailuresRemaining = 0;
+  printStartErrorStatus = null;
+  printReadFailuresRemaining = 0;
+  printReadErrorStatus = null;
+  printReadRequests = 0;
   printJobSnapshot = { ...printJobFixture };
   settledPrintJob = {
     ...printJobFixture,
@@ -387,6 +397,23 @@ beforeEach(() => {
                   sheetsProduced: null
                 }
               : settledPrintJob;
+        if (printStartFailuresRemaining > 0) {
+          printStartFailuresRemaining -= 1;
+          return Promise.reject(new TypeError("simulated lost print start response"));
+        }
+        if (printStartErrorStatus !== null) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                error: { code: "PRINT_START_REJECTED", message: "Print start rejected" }
+              }),
+              {
+                status: printStartErrorStatus,
+                headers: { "content-type": "application/json" }
+              }
+            )
+          );
+        }
         return Promise.resolve(
           new Response(JSON.stringify({ printJob: printJobSnapshot }), {
             status: 201,
@@ -396,6 +423,24 @@ beforeEach(() => {
       }
 
       if (url.includes("/v1/print-jobs/") && (init?.method ?? "GET") === "GET") {
+        printReadRequests += 1;
+        if (printReadFailuresRemaining > 0) {
+          printReadFailuresRemaining -= 1;
+          return Promise.reject(new TypeError("simulated print status interruption"));
+        }
+        if (printReadErrorStatus !== null) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                error: { code: "PRINT_JOB_NOT_READABLE", message: "Print job not readable" }
+              }),
+              {
+                status: printReadErrorStatus,
+                headers: { "content-type": "application/json" }
+              }
+            )
+          );
+        }
         printJobSnapshot = settledPrintJob;
         return Promise.resolve(
           new Response(JSON.stringify({ printJob: printJobSnapshot }), {
@@ -864,11 +909,16 @@ describe("kiosk prototype journey", () => {
     });
     expect(screen.getByRole("heading", { name: "The printer needs attention" })).toBeVisible();
     expect(screen.getByText("NOTHING PRINTED")).toBeVisible();
+    expect(
+      screen.getByText(
+        "Nothing was printed. Your payment has been recorded for a refund, and your documents are scheduled for secure deletion."
+      )
+    ).toBeVisible();
 
     // A settled print job is final. There is nothing to retry, only a screen
     // to hand back to the next customer.
     expect(screen.queryByRole("button", { name: "Retry printing" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Finish and delete files" }));
+    fireEvent.click(screen.getByRole("button", { name: "Finish" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
@@ -921,6 +971,218 @@ describe("kiosk prototype journey", () => {
     expect(screen.getByText("Collect all 3 sheets from the output area below.")).toBeVisible();
   });
 
+  it("replays a lost print start response without discarding the paid session", async () => {
+    vi.useFakeTimers();
+    printStartFailuresRemaining = 1;
+    renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Print status is temporarily unavailable" })
+    ).toBeVisible();
+    expect(screen.getByText("PRINT STATUS UNKNOWN")).toBeVisible();
+    expect(screen.queryByText(/refund recorded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/secure deletion/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Finish" })).not.toBeInTheDocument();
+    expect(printJobRequests).toHaveLength(1);
+
+    const originalIdempotencyKey = printJobRequests[0]?.idempotencyKey;
+    const printKeySlot = Array.from({ length: window.sessionStorage.length }, (_, index) =>
+      window.sessionStorage.key(index)
+    ).find((key) => key?.startsWith(`printing-kiosk.pending-print.${testSession.id}.`));
+    const fulfillmentBeforeRetry = window.sessionStorage.getItem(
+      "printing-kiosk.fulfillment-state.v1"
+    );
+    expect(originalIdempotencyKey).toMatch(/^kiosk-/);
+    expect(printKeySlot).toBeTruthy();
+    expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);
+    expect(fulfillmentBeforeRetry).toContain(paymentFixture.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry printing" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    expect(printJobRequests).toHaveLength(2);
+    expect(printJobRequests.map(({ idempotencyKey }) => idempotencyKey)).toEqual([
+      originalIdempotencyKey,
+      originalIdempotencyKey
+    ]);
+    expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);
+    expect(window.sessionStorage.getItem("printing-kiosk.fulfillment-state.v1")).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+  });
+
+  it("resumes the observed print job after repeated status-read outages", async () => {
+    vi.useFakeTimers();
+    printReadFailuresRemaining = 5;
+    renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+    }
+
+    expect(
+      screen.getByRole("heading", { name: "Print status is temporarily unavailable" })
+    ).toBeVisible();
+    expect(printJobRequests).toHaveLength(1);
+    expect(printReadRequests).toBe(5);
+    const originalIdempotencyKey = printJobRequests[0]?.idempotencyKey;
+    const printKeySlot = Array.from({ length: window.sessionStorage.length }, (_, index) =>
+      window.sessionStorage.key(index)
+    ).find((key) => key?.startsWith(`printing-kiosk.pending-print.${testSession.id}.`));
+    expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);
+    expect(window.sessionStorage.getItem("printing-kiosk.fulfillment-state.v1")).toContain(
+      printJobFixture.id
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry printing" }));
+    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    // The kiosk already knows the job ID, so a retry resumes GET polling and
+    // does not replay even the idempotent start request.
+    expect(printJobRequests).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(printReadRequests).toBe(6);
+    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+    expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);
+  });
+
+  it("holds a deterministically rejected print start for an operator", async () => {
+    vi.useFakeTimers();
+    printStartErrorStatus = 409;
+    const rendered = renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: paidPrintingState()
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Printing needs operator assistance" })
+    ).toBeVisible();
+    expect(screen.getByText("PRINT REQUEST BLOCKED")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry printing" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Finish" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/refund recorded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/secure deletion/i)).not.toBeInTheDocument();
+    expect(printJobRequests).toHaveLength(1);
+
+    const printKeySlot = Array.from({ length: window.sessionStorage.length }, (_, index) =>
+      window.sessionStorage.key(index)
+    ).find((key) => key?.startsWith(`printing-kiosk.pending-print.${testSession.id}.`));
+    expect(printKeySlot).toBeTruthy();
+    expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(
+      printJobRequests[0]?.idempotencyKey
+    );
+    expect(window.sessionStorage.getItem("printing-kiosk.fulfillment-state.v1")).toContain(
+      '"printFailureDisposition":"OPERATOR_REQUIRED"'
+    );
+
+    rendered.unmount();
+    renderKiosk({ initialEntries: ["/failure/printer"] });
+    expect(
+      screen.getByRole("heading", {
+        name: "Տպումը շարունակելու համար սպասարկողի օգնությունն է պետք"
+      })
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Կրկնել տպումը" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ավարտել" })).not.toBeInTheDocument();
+  });
+
+  it("holds a deterministically rejected print status read for an operator", async () => {
+    vi.useFakeTimers();
+    printReadErrorStatus = 404;
+    renderKiosk({ initialEntries: ["/printing"], initialState: paidPrintingState() });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Printing needs operator assistance" })
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry printing" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Finish" })).not.toBeInTheDocument();
+    // A deterministic 404 cannot improve on the fifth identical poll.
+    expect(printReadRequests).toBe(1);
+    expect(printJobRequests).toHaveLength(1);
+    expect(window.sessionStorage.getItem("printing-kiosk.fulfillment-state.v1")).toContain(
+      printJobFixture.id
+    );
+    expect(window.sessionStorage.getItem("printing-kiosk.fulfillment-state.v1")).toContain(
+      '"printFailureDisposition":"OPERATOR_REQUIRED"'
+    );
+  });
+
   it("asks for an operator when the device could not confirm the print", async () => {
     vi.useFakeTimers();
     renderKiosk({
@@ -959,6 +1221,42 @@ describe("kiosk prototype journey", () => {
       screen.getByRole("heading", { name: "The printer could not confirm your job" })
     ).toBeVisible();
     expect(screen.getByText("RESULT UNCONFIRMED")).toBeVisible();
+  });
+
+  it("treats a control-plane-canceled print as settled instead of retrying it", () => {
+    renderKiosk({
+      initialEntries: ["/failure/printer"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        },
+        print: {
+          job: {
+            ...printJobFixture,
+            status: "CANCELED",
+            resultConfidence: "CONFIRMED",
+            failureCode: "CANCELED_BEFORE_SUBMIT"
+          },
+          errorCode: null,
+          failureDisposition: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.getByRole("heading", { name: "The printer needs attention" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Finish" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry printing" })).not.toBeInTheDocument();
   });
 
   it("shows the recovery screen when the control plane declines the payment", async () => {
@@ -1291,6 +1589,7 @@ describe("kiosk prototype journey", () => {
     expect(
       window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${testSession.id}`)
     ).toBeNull();
+    expect(window.sessionStorage.getItem("printing-kiosk.fulfillment-state.v1")).toBeNull();
   });
 
   it("ends a stale active session when expiration is replayed before the stream opens", async () => {
@@ -1499,8 +1798,12 @@ describe("kiosk prototype journey", () => {
     expect(cancelIdempotencyKeys).toEqual([retainedKey, retainedKey]);
   });
 
-  it("keeps the completion screen available until file cleanup is confirmed", async () => {
-    cancelFailuresRemaining = 1;
+  it("finishes a completed session locally without making cleanup a network gate", async () => {
+    window.sessionStorage.setItem("printing-kiosk.pending-create", "private-create-key");
+    window.sessionStorage.setItem(
+      `printing-kiosk.pending-cancel.${testSession.id}`,
+      "private-cancel-key"
+    );
     const user = userEvent.setup();
     renderKiosk({
       initialEntries: ["/complete"],
@@ -1511,18 +1814,18 @@ describe("kiosk prototype journey", () => {
       }
     });
     await user.click(screen.getByRole("button", { name: "English" }));
-    await user.click(screen.getByRole("button", { name: "Finish and delete files" }));
+    expect(screen.getByText("Secure deletion scheduled")).toBeVisible();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
 
-    expect(await screen.findByText("File cleanup still needs confirmation")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
-    const retainedKey = window.sessionStorage.getItem(
-      `printing-kiosk.pending-cancel.${testSession.id}`
-    );
-    expect(retainedKey).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Finish" }));
 
-    await user.click(screen.getByRole("button", { name: "Retry secure cleanup" }));
     expect(await screen.findByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
-    expect(cancelIdempotencyKeys).toEqual([retainedKey, retainedKey]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).toBeNull();
+    expect(
+      window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${testSession.id}`)
+    ).toBeNull();
   });
 
   it("shows only the two alternative languages and resets to Armenian for the next customer", async () => {
@@ -1579,6 +1882,30 @@ function renderKiosk({
       </QueryClientProvider>
     </LanguageProvider>
   );
+}
+
+function paidPrintingState(): PrototypeState {
+  return {
+    ...initialPrototypeState,
+    session: testSession,
+    files: [readyFixture],
+    pricing: {
+      status: "READY",
+      settings: settingsFixture,
+      quote: quoteFixture,
+      errorCode: null
+    },
+    payment: {
+      payment: {
+        ...paymentFixture,
+        status: "CAPTURED",
+        appliedToSession: true,
+        capturedAt: "2030-01-01T00:01:00.000Z"
+      },
+      attempt: 1,
+      errorCode: null
+    }
+  };
 }
 
 function requestUrl(input: string | URL | Request): string {

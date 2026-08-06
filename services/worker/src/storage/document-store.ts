@@ -20,6 +20,8 @@ const MULTIPART_PART_SIZE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000;
 const MAX_VERSION_DELETE_PASSES = 3;
 const MAX_VERSION_DELETE_BATCH_SIZE = 1_000;
+/** Keep orphan discovery bounded while rotating through a large root. */
+const MAX_ORPHAN_LIST_PAGES_PER_PASS = 10;
 const QUARANTINE_PREFIX = "quarantine/v1/";
 const DERIVATIVE_PREFIXES = ["normalized/v1/", "previews/v1/"] as const;
 /** Every root retention may delete from. Processing writes stay narrower. */
@@ -66,6 +68,16 @@ export interface StoredObjectSummary {
 }
 
 /**
+ * One bounded orphan-discovery result. The cursor advances only after the
+ * reconciler has successfully classified and, where necessary, deleted every
+ * returned object. Dropping the acknowledgment retries the same range.
+ */
+export interface StoredObjectListing {
+  objects: StoredObjectSummary[];
+  acknowledge: () => void;
+}
+
+/**
  * The deletion surface retention needs, kept separate from the processing
  * surface so a cleanup runner can be tested against a fake and so the wider
  * delete scope is visible in one place.
@@ -85,18 +97,20 @@ export interface RetentionStore {
     startedBefore?: Date,
     signal?: AbortSignal
   ): Promise<number>;
-  /** Objects under a prefix last written before a cutoff, oldest first. */
+  /** Up to `limit` objects under a prefix last written before a cutoff. */
   listObjectsOlderThan(
     prefix: string,
     cutoff: Date,
     limit: number,
     signal?: AbortSignal
-  ): Promise<StoredObjectSummary[]>;
+  ): Promise<StoredObjectListing>;
 }
 
 export class S3DocumentStore implements DocumentStore {
   private readonly client: S3Client;
   private readonly operationTimeoutMilliseconds: number;
+  /** Opaque S3 cursors let successive reconciliation passes resume the scan. */
+  private readonly orphanListingCursors = new Map<string, string>();
 
   public constructor(
     private readonly options: DocumentStoreOptions,
@@ -373,13 +387,77 @@ export class S3DocumentStore implements DocumentStore {
     cutoff: Date,
     limit: number,
     signal?: AbortSignal
-  ): Promise<StoredObjectSummary[]> {
+  ): Promise<StoredObjectListing> {
     assertPrefix(prefix);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_VERSION_DELETE_BATCH_SIZE) {
       throw codedError("OBJECT_LIST_LIMIT_INVALID");
     }
-    const page = await this.listPrefixPage(prefix, limit, signal);
-    return page.filter((object) => object.lastModified.getTime() < cutoff.getTime());
+
+    // S3 orders this listing by key, not by LastModified. Filtering only the
+    // first page can therefore leave an old object behind a stable page of
+    // newer/live keys forever. Rotate an opaque continuation cursor across
+    // calls, but cap the pages one reconciliation may spend here: discovery
+    // must make progress without turning a large live bucket into an unbounded
+    // worker pass. `limit` remains the deletion budget.
+    const stale: StoredObjectSummary[] = [];
+    const seenCursors = new Set<string>();
+    const operationSignal = this.withDeadline(signal);
+    let continuationToken = this.orphanListingCursors.get(prefix);
+    if (continuationToken) seenCursors.add(continuationToken);
+    let acknowledgedCursor: string | undefined;
+
+    const result = (): StoredObjectListing => ({
+      objects: stale,
+      acknowledge: () => {
+        if (acknowledgedCursor) this.orphanListingCursors.set(prefix, acknowledgedCursor);
+        else this.orphanListingCursors.delete(prefix);
+      }
+    });
+
+    try {
+      for (let page = 0; page < MAX_ORPHAN_LIST_PAGES_PER_PASS; page += 1) {
+        operationSignal.throwIfAborted();
+        const response = await this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.options.bucket,
+            Prefix: prefix,
+            // A page cannot overflow the caller's deletion budget. Without
+            // this, slicing the last page while advancing past all of it would
+            // hide the discarded stale keys until a complete bucket wrap.
+            MaxKeys: Math.max(1, limit - stale.length),
+            ...(continuationToken ? { ContinuationToken: continuationToken } : {})
+          }),
+          { abortSignal: operationSignal }
+        );
+
+        for (const entry of response.Contents ?? []) {
+          if (!entry.Key || !entry.Key.startsWith(prefix)) continue;
+          const object = { key: entry.Key, lastModified: entry.LastModified ?? new Date(0) };
+          if (object.lastModified.getTime() < cutoff.getTime()) stale.push(object);
+        }
+
+        if (!response.IsTruncated) {
+          acknowledgedCursor = undefined;
+          return result();
+        }
+        const nextCursor = response.NextContinuationToken;
+        if (!nextCursor || seenCursors.has(nextCursor)) {
+          throw codedError("OBJECT_LIST_PAGINATION_INVALID");
+        }
+        seenCursors.add(nextCursor);
+        acknowledgedCursor = nextCursor;
+        continuationToken = nextCursor;
+        if (stale.length >= limit) return result();
+      }
+
+      return result();
+    } catch (error) {
+      // An opaque token may become invalid after the bucket changes. Reset it
+      // so the next scheduled pass can recover from the root rather than
+      // repeating the same bad cursor forever.
+      this.orphanListingCursors.delete(prefix);
+      throw error;
+    }
   }
 
   /**

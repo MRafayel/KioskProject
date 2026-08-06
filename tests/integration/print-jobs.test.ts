@@ -68,6 +68,10 @@ const baseEnvironment = {
 };
 const environment = loadEnvironment(baseEnvironment);
 assertSafeIntegrationEnvironment(environment);
+const retentionPolicy = {
+  settledGraceMilliseconds: environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
+  recoveryGraceMilliseconds: environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
+};
 const database = createDatabaseClient(environment.DATABASE_URL);
 const serviceDatabase = database as unknown as DocumentProcessingCoordinatorOptions["database"];
 const apiObjectStore = createS3ObjectStore(environment);
@@ -154,7 +158,8 @@ beforeAll(async () => {
     logger: silentLogger,
     leaseMilliseconds: environment.PRINT_COMMAND_LEASE_SECONDS * 1_000,
     maxCommandAttempts: environment.PRINT_COMMAND_MAX_ATTEMPTS,
-    maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS
+    maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS,
+    retentionPolicy
   });
   coordinator.start();
 }, 180_000);
@@ -627,6 +632,7 @@ describe.sequential("Phase 8 virtual printing", () => {
       leaseMilliseconds: environment.PRINT_COMMAND_LEASE_SECONDS * 1_000,
       maxCommandAttempts: environment.PRINT_COMMAND_MAX_ATTEMPTS,
       maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS,
+      retentionPolicy,
       now: () => new Date(Date.now() + environment.PRINT_JOB_TIMEOUT_SECONDS * 1_000 + 1_000)
     });
     try {
@@ -663,6 +669,7 @@ describe.sequential("Phase 8 virtual printing", () => {
       leaseMilliseconds: environment.PRINT_COMMAND_LEASE_SECONDS * 1_000,
       maxCommandAttempts: environment.PRINT_COMMAND_MAX_ATTEMPTS,
       maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS,
+      retentionPolicy,
       now: () => new Date(Date.now() + environment.PRINT_JOB_TIMEOUT_SECONDS * 1_000 + 1_000)
     });
     try {

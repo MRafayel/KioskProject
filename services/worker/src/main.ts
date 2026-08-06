@@ -81,7 +81,11 @@ const printDispatcher = new PrintDispatcher({
   logger,
   leaseMilliseconds: environment.PRINT_COMMAND_LEASE_SECONDS * 1_000,
   maxCommandAttempts: environment.PRINT_COMMAND_MAX_ATTEMPTS,
-  maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS
+  maxDispatchAttempts: environment.PRINT_DISPATCH_MAX_ATTEMPTS,
+  retentionPolicy: {
+    settledGraceMilliseconds: environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
+    recoveryGraceMilliseconds: environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
+  }
 });
 
 // Retention runs here rather than in the API: deletion is background work
