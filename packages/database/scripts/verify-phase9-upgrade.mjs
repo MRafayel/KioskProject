@@ -14,8 +14,12 @@ const migrationsDirectory = join(packageDirectory, "prisma", "migrations");
 const phase9FirstMigration = "20260804030000_phase9_retention";
 const fixture = {
   kioskId: "kiosk_phase9_upgrade_fixture",
+  terminalKioskId: "kiosk_terminal_capacity_fixture",
   liveSessionId: "01900000-0000-7000-8000-000000000b01",
   doneSessionId: "01900000-0000-7000-8000-000000000b11",
+  failedSessionId: "01900000-0000-7000-8000-000000000b21",
+  recoverySessionId: "01900000-0000-7000-8000-000000000b22",
+  replacementSessionId: "01900000-0000-7000-8000-000000000b23",
   clientId: "01900000-0000-7000-8000-000000000b02",
   fileId: "01900000-0000-7000-8000-000000000b03",
   clientFileId: "01900000-0000-7000-8000-000000000b04",
@@ -53,6 +57,7 @@ try {
   await insertPhase8Fixture(temporaryUrl);
   runPrisma(["migrate", "deploy"], temporaryUrl);
   await verifyExistingWorkSurvives(temporaryUrl);
+  await verifyTerminalSessionCapacity(temporaryUrl);
   await verifyRetentionInvariants(temporaryUrl);
   await verifyManifestRedaction(temporaryUrl);
   process.stdout.write(
@@ -60,7 +65,8 @@ try {
       "untouched, a finished session is scheduled for cleanup, a run is leased and its " +
       "progress only moves forwards, a session cannot claim its documents are gone while it " +
       "still holds them, a cleaned session accepts no further document, a print manifest can " +
-      "be redacted exactly once and only into the marker, and the payment ledger survives.\n"
+      "be redacted exactly once and only into the marker, failed sessions release their kiosk, " +
+      "and the payment ledger survives.\n"
   );
 } finally {
   await closeQuietly(admin);
@@ -326,6 +332,58 @@ async function verifyExistingWorkSurvives(targetUrl) {
 
     const runs = await client.query(`SELECT COUNT(*)::int AS "count" FROM "cleanup_runs"`);
     if (runs.rows[0]?.count !== 0) throw new Error("PHASE9_UPGRADE_INVENTED_CLEANUP_RUNS");
+  } finally {
+    await closeQuietly(client);
+  }
+}
+
+/** Terminal failures release the kiosk, but two live sessions remain forbidden. */
+async function verifyTerminalSessionCapacity(targetUrl) {
+  const client = new pg.Client({ connectionString: targetUrl.href });
+  try {
+    await client.connect();
+    await client.query(
+      `INSERT INTO "kiosks" ("id", "public_code", "name", "capabilities")
+       VALUES ($1, 'TERMINAL-CAPACITY', 'Terminal capacity migration fixture', '{}'::jsonb)`,
+      [fixture.terminalKioskId]
+    );
+
+    for (const [sessionId, publicId, state] of [
+      [fixture.failedSessionId, "ps_phase9_failed_terminal", "FAILED"],
+      [fixture.recoverySessionId, "ps_phase9_recovery_terminal", "RECOVERY_REQUIRED"]
+    ]) {
+      await client.query(
+        `INSERT INTO "print_sessions"
+          ("id", "public_id", "kiosk_id", "locale", "state", "terminal_reason",
+           "idle_expires_at", "hard_expires_at", "cleanup_status", "cleanup_due_at")
+         VALUES ($1::uuid, $2, $3, 'hy', $4, 'UPGRADE_FIXTURE',
+           CURRENT_TIMESTAMP + INTERVAL '10 minutes',
+           CURRENT_TIMESTAMP + INTERVAL '30 minutes', 'PENDING', CURRENT_TIMESTAMP)`,
+        [sessionId, publicId, fixture.terminalKioskId, state]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO "print_sessions"
+        ("id", "public_id", "kiosk_id", "locale", "state",
+         "idle_expires_at", "hard_expires_at")
+       VALUES ($1::uuid, 'ps_phase9_active_replacement', $2, 'hy', 'WAITING_FOR_UPLOAD',
+         CURRENT_TIMESTAMP + INTERVAL '10 minutes',
+         CURRENT_TIMESTAMP + INTERVAL '30 minutes')`,
+      [fixture.replacementSessionId, fixture.terminalKioskId]
+    );
+
+    await expectRejected(
+      client,
+      `INSERT INTO "print_sessions"
+        ("id", "public_id", "kiosk_id", "locale", "state",
+         "idle_expires_at", "hard_expires_at")
+       VALUES ($1::uuid, 'ps_phase9_competing_active', $2, 'hy', 'CREATED',
+         CURRENT_TIMESTAMP + INTERVAL '10 minutes',
+         CURRENT_TIMESTAMP + INTERVAL '30 minutes')`,
+      [randomUUID(), fixture.terminalKioskId],
+      "PHASE9_SECOND_ACTIVE_SESSION_ACCEPTED"
+    );
   } finally {
     await closeQuietly(client);
   }

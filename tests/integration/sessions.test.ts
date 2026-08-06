@@ -229,6 +229,52 @@ describe.sequential("authoritative print sessions", () => {
     expect(replacement.statusCode).toBe(201);
   });
 
+  it.each(["FAILED", "RECOVERY_REQUIRED"] as const)(
+    "permits a new session after a %s session",
+    async (terminalState) => {
+      const app = await createTestApp();
+      const original = createSessionResponseSchema.parse(
+        (await createSession(app, `terminal-${terminalState.toLowerCase()}-original`)).json()
+      );
+      const terminatedAt = new Date();
+
+      await database.$transaction([
+        database.sessionUploadGrant.updateMany({
+          where: { sessionId: original.session.id },
+          data: { status: "REVOKED", revokedAt: terminatedAt }
+        }),
+        database.printSession.update({
+          where: { id: original.session.id },
+          data: {
+            state: terminalState,
+            stateVersion: 2,
+            terminalReason: "INTEGRATION_TEST_TERMINAL_STATE",
+            cleanupStatus: "PENDING",
+            cleanupDueAt: terminatedAt
+          }
+        })
+      ]);
+
+      const replacement = await createSession(
+        app,
+        `terminal-${terminalState.toLowerCase()}-replacement`
+      );
+      expect(replacement.statusCode, JSON.stringify(replacement.json())).toBe(201);
+      await expect(
+        database.printSession.count({ where: { kioskId: environment.DEV_KIOSK_ID } })
+      ).resolves.toBe(2);
+
+      const competingActive = await createSession(
+        app,
+        `terminal-${terminalState.toLowerCase()}-competing-active`
+      );
+      expect(competingActive.statusCode).toBe(409);
+      expect(competingActive.json()).toMatchObject({
+        error: { code: "ACTIVE_SESSION_EXISTS" }
+      });
+    }
+  );
+
   it("serializes concurrent identical creates into one durable action", async () => {
     const app = await createTestApp();
     const responses = await Promise.all([
