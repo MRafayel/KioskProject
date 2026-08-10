@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { Environment } from "@printing-kiosk/config";
+import type { NonAdminEnvironment } from "@printing-kiosk/config";
 import {
   agentCommandAckSchema,
   claimAgentCommandsResponseSchema,
@@ -27,7 +27,7 @@ export interface PrintRunnerLogger {
 }
 
 export interface PrintCommandRunnerOptions {
-  environment: Environment;
+  environment: NonAdminEnvironment;
   adapter: PrinterAdapter;
   logger: PrintRunnerLogger;
   fetch?: UpstreamFetch;

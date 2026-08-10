@@ -78,6 +78,11 @@ describe("step-up freshness", () => {
     expect(hasFreshStepUp(stale, now, STEP_UP_TTL)).toBe(false);
   });
 
+  it("fails closed when the recorded assertion is in the future", () => {
+    const future = session({ lastStepUpAt: new Date(now.getTime() + 1) });
+    expect(hasFreshStepUp(future, now, STEP_UP_TTL)).toBe(false);
+  });
+
   it("rejects a nonsensical window rather than defaulting to permissive", () => {
     expect(() => hasFreshStepUp(session(), now, -1)).toThrow("ADMIN_STEP_UP_TTL_INVALID");
     expect(() => hasFreshStepUp(session(), now, 1.5)).toThrow("ADMIN_STEP_UP_TTL_INVALID");

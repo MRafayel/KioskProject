@@ -1,4 +1,4 @@
-import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
+import { loadApiEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 import { createDatabaseClient } from "@printing-kiosk/database";
 
 import { buildApp } from "./app.js";
@@ -9,7 +9,7 @@ import { SystemClock } from "./modules/sessions/crypto.js";
 import { checkInfrastructure } from "./readiness.js";
 
 loadWorkspaceEnvironmentFile();
-const environment = loadEnvironment();
+const environment = loadApiEnvironment();
 const objectStore = createS3ObjectStore(environment);
 const database = createDatabaseClient(environment.DATABASE_URL);
 const clock = new SystemClock();

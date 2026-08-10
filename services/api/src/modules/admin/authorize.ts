@@ -134,7 +134,10 @@ async function requireCsrf(
   if (SAFE_METHODS.has(request.method)) return;
 
   const header = request.headers[ADMIN_CSRF_HEADER];
-  const presented = Array.isArray(header) ? header[0] : header;
+  // Ambiguous duplicate security headers can be interpreted differently by a
+  // proxy and the application. Reject them instead of selecting one value.
+  if (Array.isArray(header)) throw csrfFailed();
+  const presented = header;
   if (!presented) throw csrfFailed();
 
   const cookie = readCookie(request, ADMIN_CSRF_COOKIE);

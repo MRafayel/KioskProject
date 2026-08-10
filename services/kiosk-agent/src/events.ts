@@ -1,6 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 
-import type { Environment } from "@printing-kiosk/config";
+import type { NonAdminEnvironment } from "@printing-kiosk/config";
 import {
   SESSION_EVENT_SOCKET_NAME,
   sessionEventReplayResponseSchema,
@@ -32,7 +32,7 @@ export class SessionEventRelay implements SessionEventSource {
   private readonly subscriptions = new Map<string, Set<Subscription>>();
 
   public constructor(
-    private readonly environment: Environment,
+    private readonly environment: NonAdminEnvironment,
     private readonly upstreamFetch: UpstreamFetch = globalThis.fetch
   ) {}
 
@@ -151,7 +151,7 @@ export class SessionEventRelay implements SessionEventSource {
 export class CloudRealtimeConnection {
   private readonly socket: Socket;
 
-  public constructor(environment: Environment, relay: SessionEventRelay) {
+  public constructor(environment: NonAdminEnvironment, relay: SessionEventRelay) {
     this.socket = io(environment.API_ORIGIN, {
       path: "/socket.io",
       transports: ["websocket"],

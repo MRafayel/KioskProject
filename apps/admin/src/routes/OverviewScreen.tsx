@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useSession } from "../features/auth/SessionProvider.js";
 import { adminApi } from "../features/auth/api.js";
@@ -14,17 +14,28 @@ import { adminApi } from "../features/auth/api.js";
 export function OverviewScreen() {
   const session = useSession();
   const [reachable, setReachable] = useState<"checking" | "ok" | "failed">("checking");
+  const checkInFlight = useRef<Promise<void> | null>(null);
+
+  const check = useCallback((): Promise<void> => {
+    if (checkInFlight.current) return checkInFlight.current;
+    setReachable("checking");
+
+    const attempt = adminApi
+      .health()
+      .then(() => setReachable("ok"))
+      .catch((error: unknown) => {
+        if (!session.handleAuthenticationError(error)) setReachable("failed");
+      })
+      .finally(() => {
+        checkInFlight.current = null;
+      });
+    checkInFlight.current = attempt;
+    return attempt;
+  }, [session.handleAuthenticationError]);
 
   useEffect(() => {
-    let cancelled = false;
-    adminApi
-      .health()
-      .then(() => !cancelled && setReachable("ok"))
-      .catch(() => !cancelled && setReachable("failed"));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void check();
+  }, [check]);
 
   const identity = session.identity;
   if (!identity) return null;
@@ -33,13 +44,18 @@ export function OverviewScreen() {
     <section className="panel">
       <h2>Overview</h2>
 
-      <p className="panel__status">
+      <p className="panel__status" role="status">
         {reachable === "checking"
           ? "Checking the control plane…"
           : reachable === "ok"
             ? "Control plane reachable. Authorization is enforced on every request."
             : "Control plane unreachable."}
       </p>
+      {reachable === "failed" ? (
+        <button type="button" onClick={() => void check()}>
+          Try again
+        </button>
+      ) : null}
 
       <h3>What your role can do</h3>
       <p className="panel__hint">

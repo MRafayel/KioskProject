@@ -1,6 +1,6 @@
 import pino from "pino";
 
-import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
+import { loadNonAdminEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
 import { createDatabaseClient } from "@printing-kiosk/database";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
@@ -16,7 +16,7 @@ import { ProcessorScratchJanitor } from "./processing/scratch-cleanup.js";
 import { S3DocumentStore } from "./storage/document-store.js";
 
 loadWorkspaceEnvironmentFile();
-const environment = loadEnvironment();
+const environment = loadNonAdminEnvironment();
 const logger = pino({ level: environment.LOG_LEVEL });
 const database = createDatabaseClient(environment.DATABASE_URL);
 const publisher = new OutboxPublisher(database, environment, logger);

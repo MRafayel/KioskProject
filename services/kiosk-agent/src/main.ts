@@ -1,4 +1,4 @@
-import { loadEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
+import { loadNonAdminEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 import { MockPrinterAdapter } from "@printing-kiosk/printer-adapters";
 
 import { buildAgent } from "./app.js";
@@ -6,7 +6,7 @@ import { CloudRealtimeConnection, SessionEventRelay } from "./events.js";
 import { PrintCommandRunner } from "./print/runner.js";
 
 loadWorkspaceEnvironmentFile();
-const environment = loadEnvironment();
+const environment = loadNonAdminEnvironment();
 const relay = new SessionEventRelay(environment);
 const app = await buildAgent(environment, { eventSource: relay });
 const realtime = new CloudRealtimeConnection(environment, relay);

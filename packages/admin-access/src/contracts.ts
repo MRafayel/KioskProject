@@ -65,6 +65,19 @@ export const webAuthnOptionsResponseSchema = z.object({
 });
 
 /**
+ * Options for a ceremony that acts on the current signed-in account.
+ *
+ * Browser tabs share cookies, so the account represented by a tab can change
+ * between its `/me` check and this response. Echoing the server-selected owner
+ * lets the tab abort before opening a WebAuthn prompt for a different account.
+ * The value is only a consistency check; authorization still comes entirely
+ * from the live server session.
+ */
+export const adminBoundWebAuthnOptionsResponseSchema = webAuthnOptionsResponseSchema.extend({
+  adminUserId: z.string().uuid()
+});
+
+/**
  * The browser's credential response. Validated as a shape only: the library
  * performs the cryptographic verification, and duplicating its schema here
  * would risk rejecting responses it would have accepted.
@@ -81,7 +94,7 @@ export const webAuthnCredentialSchema = z.object({
 export const verifyRegistrationBodySchema = z.object({
   ceremonyId: ceremonyIdSchema,
   credential: webAuthnCredentialSchema,
-  label: z.string().min(1).max(80)
+  label: z.string().trim().min(1).max(80)
 });
 
 export const verifyAuthenticationBodySchema = z.object({
@@ -96,7 +109,7 @@ export const beginBreakGlassBodySchema = z.object({
 
 export const revokeAuthenticatorBodySchema = z.object({
   /** Recorded in the audit event so a revocation is explainable later. */
-  reason: z.string().min(3).max(48)
+  reason: z.string().trim().min(3).max(48)
 });
 
 export const adminHealthResponseSchema = z.object({
@@ -109,5 +122,8 @@ export const adminHealthResponseSchema = z.object({
 
 export type AdminIdentityResponse = z.infer<typeof adminIdentityResponseSchema>;
 export type AdminAuthenticatorsResponse = z.infer<typeof adminAuthenticatorsResponseSchema>;
+export type AdminBoundWebAuthnOptionsResponse = z.infer<
+  typeof adminBoundWebAuthnOptionsResponseSchema
+>;
 export type WebAuthnOptionsResponse = z.infer<typeof webAuthnOptionsResponseSchema>;
 export type WebAuthnCredential = z.infer<typeof webAuthnCredentialSchema>;

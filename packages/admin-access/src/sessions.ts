@@ -53,7 +53,10 @@ export function hasFreshStepUp(
     throw new Error("ADMIN_STEP_UP_TTL_INVALID");
   }
   if (!session.lastStepUpAt) return false;
-  return now.getTime() - session.lastStepUpAt.getTime() < stepUpTtlMilliseconds;
+  const age = now.getTime() - session.lastStepUpAt.getTime();
+  // Fail closed if the wall clock moved backwards or persisted data is from
+  // the future. A negative age must not extend R2 authorization indefinitely.
+  return age >= 0 && age < stepUpTtlMilliseconds;
 }
 
 /**

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Queue } from "bullmq";
 
-import { redisConnectionOptions, type Environment } from "@printing-kiosk/config";
+import { redisConnectionOptions, type NonAdminEnvironment } from "@printing-kiosk/config";
 import {
   realtimeDeliveryJobSchema,
   SESSION_EVENT_QUEUE_NAME,
@@ -28,7 +28,7 @@ export class OutboxPublisher {
 
   public constructor(
     private readonly database: PrismaClient,
-    environment: Environment,
+    environment: NonAdminEnvironment,
     private readonly logger: OutboxPublisherLogger,
     private readonly pollIntervalMs = DEFAULT_POLL_INTERVAL_MS
   ) {

@@ -45,6 +45,7 @@ export {
 export {
   adminAuthenticatorSchema,
   adminAuthenticatorsResponseSchema,
+  adminBoundWebAuthnOptionsResponseSchema,
   adminCapabilitySchema,
   adminHealthResponseSchema,
   adminIdentityResponseSchema,
@@ -57,6 +58,7 @@ export {
   webAuthnCredentialSchema,
   webAuthnOptionsResponseSchema,
   type AdminAuthenticatorsResponse,
+  type AdminBoundWebAuthnOptionsResponse,
   type AdminIdentityResponse,
   type WebAuthnCredential,
   type WebAuthnOptionsResponse

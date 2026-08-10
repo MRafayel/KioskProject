@@ -170,3 +170,14 @@ describe("check ordering", () => {
     expect(thrown?.code).toBe("ADMIN_AUTHENTICATION_REQUIRED");
   });
 });
+
+describe("CSRF header validation", () => {
+  it("rejects duplicate CSRF header values instead of choosing one", async () => {
+    const duplicate = request("POST");
+    duplicate.headers["x-csrf-token"] = ["token", "second-token"];
+
+    await expect(
+      authorizeAdmin(duplicate, dependencies(admin("ADMIN", now)), "authenticator.manage.self")
+    ).rejects.toMatchObject({ statusCode: 403, code: "ADMIN_CSRF_FAILED" });
+  });
+});

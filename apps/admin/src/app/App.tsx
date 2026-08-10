@@ -44,20 +44,46 @@ function Shell() {
             {session.identity.displayName} · <RoleBadge role={session.identity.role} />
           </p>
         </div>
-        <button type="button" onClick={() => void session.signOut()}>
-          Sign out
+        <button
+          type="button"
+          disabled={session.activity === "signing-out"}
+          onClick={() => void session.signOut()}
+        >
+          {session.activity === "signing-out" ? "Signing out…" : "Sign out"}
         </button>
       </header>
 
       <main className="shell__main">
+        {session.error ? (
+          <div role="alert" className="shell__alert">
+            <span>{session.error}</span>
+            <div className="panel__actions">
+              {session.errorCanRetry ? (
+                <button
+                  type="button"
+                  disabled={session.activity === "refreshing"}
+                  onClick={() => void session.refresh()}
+                >
+                  Retry session check
+                </button>
+              ) : null}
+              <button type="button" onClick={session.clearError}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ) : null}
         <OverviewScreen />
         <SecurityKeysPanel />
       </main>
 
       <footer className="shell__footer">
         <p>
-          Session ends {new Date(session.identity.session.hardExpiresAt).toLocaleTimeString()} at
-          the latest.
+          Session ends{" "}
+          <time dateTime={session.identity.session.hardExpiresAt}>
+            {new Date(session.identity.session.hardExpiresAt).toLocaleTimeString()}
+          </time>{" "}
+          at the latest.
         </p>
       </footer>
     </div>

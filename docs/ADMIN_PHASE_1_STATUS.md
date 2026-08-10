@@ -22,9 +22,11 @@ control plane, by decision (Phase 0 §23.1). A security key is the only way in.
   which removes account enumeration entirely — there is no field to probe.
 - **User verification required** on every ceremony, so the authenticator must
   confirm a person (PIN or biometric), not merely that a key is present.
-- **Device-bound keys for Technical Admins.** A synchronised passkey is refused
-  for that role — checked against what the authenticator actually reported,
-  then again by a database trigger.
+- **Device-bound policy for Technical Admins.** A credential whose signed
+  backup flags permit synchronisation is refused, as is one whose browser-
+  reported attachment is not cross-platform; the stored policy is enforced
+  again by a database trigger. The unsigned attachment limitation is recorded
+  in the known gaps below.
 - **Two authenticators minimum.** An account cannot be activated below it and a
   revocation cannot take an active account below it. `PROVISIONING` is the only
   state in which fewer than two exist.
@@ -63,22 +65,25 @@ route to request a subset.
 
 ### Audit
 
-`audit_events` is now append-only, enforced by triggers that reject `UPDATE` and
-`DELETE`. Admin actions are recorded with a new `ADMIN_USER` actor type, and
-metadata passes through a key allow-list so a later caller cannot put a filename
-or an error message into durable storage "for context".
+`audit_events` is now append-only, enforced by triggers that reject `UPDATE`,
+`DELETE`, and `TRUNCATE`. API authentication ceremonies and successful admin
+mutations are recorded with a new `ADMIN_USER` actor type, and metadata passes
+through a key allow-list so a later caller cannot put a filename or an error
+message into durable storage "for context". The known coverage gaps for CLI
+lifecycle commands and gate-level denials are recorded in §6.
 
 ### Bootstrap and recovery
 
 `pnpm db:admin` — an operator-run CLI, deliberately not a dashboard feature. It
-creates accounts, issues sealed break-glass codes, lists accounts, and suspends
-or disables them. See §5 for the runbook.
+creates accounts, issues sealed break-glass codes, lists accounts, and suspends,
+resumes, or permanently disables them. See §5 for the runbook.
 
 ### Admin UI
 
 `apps/admin` (React 19 + Vite, port 5175, loopback-only in development). Sign-in,
-identity and capability display, and self-service security-key management. The
-overview deliberately shows no operational numbers rather than placeholders.
+sealed-code bootstrap/recovery, identity and capability display, and self-service
+security-key management. The overview deliberately shows no operational numbers
+rather than placeholders.
 
 ---
 
@@ -104,10 +109,11 @@ A compromised Operator account produces false observations an Admin must still
 act on — not a payout.
 
 **Invariants in PostgreSQL, not only in TypeScript.** Matching how the rest of
-this repository already works. Five new triggers enforce device-bound keys,
-the two-authenticator minimum on activation and on revocation, single-use
-break-glass, and audit immutability. All five were verified to fire against a
-live database.
+this repository already works. Database triggers enforce device-bound keys,
+serialized activation and revocation, forward-only account status, immutable
+account/authenticator identities, terminal break-glass state, and audit
+immutability. They were verified against a live database, including concurrent
+transitions.
 
 ---
 
@@ -140,14 +146,16 @@ twice in a row from a warm database, which is the property that was missing.
 
 ## 4. Verification
 
-| Check                   | Result                                                                                                          |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `pnpm lint`             | 25/25 packages clean                                                                                            |
-| `pnpm typecheck`        | 25/25 packages clean                                                                                            |
-| `pnpm format:check`     | clean                                                                                                           |
-| `pnpm test`             | 25/25 packages, all suites green                                                                                |
-| `pnpm test:integration` | 139/139 across 8 files, twice consecutively                                                                     |
-| New tests               | 54 capability/authenticator/session unit tests, 14 authorization-gate unit tests, 28 boundary integration tests |
+| Check                   | Result                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------ |
+| `pnpm lint`             | 25/25 tasks clean                                                                                |
+| `pnpm typecheck`        | 25/25 tasks clean                                                                                |
+| `pnpm build`            | 16/16 packages built                                                                             |
+| `pnpm format:check`     | clean                                                                                            |
+| `pnpm test`             | 25/25 tasks; Admin UI 19/19, admin-access 58/58, API 101/101 among the green suites              |
+| `pnpm test:integration` | 148/148 across 8 files, twice consecutively on the same database                                 |
+| `pnpm test:e2e`         | 14 kiosk and 3 mobile browser scenarios passed; no real-authenticator Admin browser suite exists |
+| Production audit        | `pnpm audit --prod --audit-level moderate` found no known vulnerabilities                        |
 
 Database invariants verified directly against PostgreSQL:
 
@@ -187,31 +195,45 @@ itself a sign-in.
 
 ```bash
 pnpm db:admin create --name "Ada Lovelace" --role TECHNICAL_ADMIN
-pnpm db:admin break-glass --admin-user <uuid> --label "safe A — Ada"
+pnpm db:admin break-glass --admin-user <uuid> --label "initial key A — Ada"
+pnpm db:admin break-glass --admin-user <uuid> --label "initial key B — Ada"
 ```
 
-The code is printed once and is not recoverable. Print it, seal it in a labelled
+Each bootstrap code is printed once and authorises one distinct key enrolment.
+The account remains `PROVISIONING` and cannot sign in after the first, so both
+codes are required for the initial two keys. After the second key activates the
+account, issue fresh recovery codes for the sealed envelopes described below.
+
+A code is not recoverable. Print each recovery code, seal it in a labelled
 envelope, and store it offline in a physical safe. Do not save it to a file, a
 password manager, or a chat message.
 
 Issue **two** envelopes per privileged account, stored in different physical
 locations, so losing access to one safe is not itself an incident.
 
-Codes expire after 90 days by default (`--expires-days`, max 365). Re-issue on
+Codes can only be issued for a `PROVISIONING` or `ACTIVE` account; issuing one
+for a suspended or permanently disabled account is refused. Codes use
+`ADMIN_BREAK_GLASS_TTL_HOURS` (90 days by default, one year maximum).
+`--expires-days` remains an explicit per-code override (max 365). Re-issue on
 expiry and destroy the old envelope.
 
 ### Using
 
-1. Operator opens the admin origin and starts recovery with the sealed code.
+1. For a new account, the operator starts enrolment with the first bootstrap
+   code. For recovery, they open the sealed recovery envelope.
 2. The code is consumed **at the point it authorises the ceremony**, not when
    the ceremony succeeds — a failed attempt still burns it, so a code that has
    been read by anyone is spent.
-3. The operator enrols one security key. The account is still `PROVISIONING`
+3. The operator enrols one security key. A new account is still `PROVISIONING`
    and cannot sign in.
-4. They enrol a second key. The account activates and normal sign-in works.
-5. Consumption writes an audit event and an error-level log line. Treat every
+4. For a new account, they use the second distinct bootstrap code to enrol the
+   second key. The account activates and normal sign-in works.
+5. They issue fresh sealed recovery codes after the bootstrap codes have been
+   consumed.
+6. Consumption writes an audit event and an error-level log line. Treat every
    use as an incident until confirmed: verify out-of-band that the named person
-   actually initiated it.
+   actually initiated it. Transactional delivery to an external alert sink is
+   not implemented yet; that limitation is recorded below.
 
 ### After use
 
@@ -238,12 +260,15 @@ recovery that actually happened.
 
 ```bash
 pnpm db:admin suspend --admin-user <uuid>   # revokes live sessions immediately
+pnpm db:admin resume --admin-user <uuid>    # requires the enrolled-key minimum
 pnpm db:admin disable --admin-user <uuid>   # permanent
 pnpm db:admin list
 ```
 
 Suspension takes effect on the next request, not at session expiry. Accounts are
-never deleted: their audit trail refers to them by identifier and outlives them.
+resumed only after operational review; old sessions remain revoked, so the
+operator must sign in again. Accounts are never deleted: their audit trail
+refers to them by identifier and outlives them.
 
 ---
 
@@ -287,20 +312,58 @@ proceed. They expire in 3 minutes.
   a per-account lockout signal would be better telemetry.
 - **Break-glass depends on physical process.** The control is an envelope in a
   safe. Nothing technical prevents a code being photographed.
-- **Attestation is not verified.** Enrolment uses `attestationType: "none"`, so
-  the device-bound rule for Technical Admins rests on the authenticator's own
-  self-reported flags rather than a signed attestation statement. Adequate
-  against a mistake; not against a determined insider using modified firmware.
+- **Hardware provenance is not verified.** Enrolment uses
+  `attestationType: "none"`. Backup eligibility/state comes from signed
+  authenticator data, but `authenticatorAttachment` is a client-provided hint;
+  it does not prove that a Technical Admin used a roaming hardware key. A
+  trusted-attestation/AAGUID policy is required if that distinction must resist
+  a modified client rather than only prevent ordinary mistakes.
+- **Authenticator revocation cannot target its sessions.** Sessions do not
+  record which authenticator created them or most recently stepped them up, so
+  retiring a lost key cannot selectively revoke the grants derived from it.
+  Revoking every session would change key-rotation workflow; provenance should
+  be added before this becomes an operational control.
+- **CLI lifecycle operations are not in `audit_events`.** The direct-database
+  tool has no trustworthy operator identity model, so account creation,
+  suspension, resumption, disablement, and recovery-code issuance/revocation
+  are not attributable there. The runbook must provide operator records until
+  an authenticated operator/reason design exists.
+- **Gate-level refusals are not all durable.** Ceremony failures and successful
+  mutations are audited, but every capability/CSRF/origin refusal is not.
+  Writing an audit row for unauthenticated abuse needs an explicit retention,
+  rate, and availability policy.
+- **Recovery alert delivery is best effort.** Consumption commits an immutable
+  audit row and then emits an error-level application log, but there is no
+  transactional alert/outbox sink. A process failure after commit can therefore
+  miss the real-time notification even though the durable audit evidence stays.
+- **Expired challenge/session cleanup is absent.** Legitimate traffic from the
+  expected administrator population is tiny, but a distributed caller can grow
+  the indexed challenge table indefinitely. Add a bounded scheduled sweep and
+  storage monitoring before public deployment.
+- **Production hosting is an external control.** The reverse proxy must preserve
+  the public admin `Host` value for the route-origin guard and emit the CSP,
+  Permissions-Policy, framing, referrer, nosniff, and HSTS headers. Vite applies
+  the non-HSTS headers only to development and preview; no production hosting
+  target exists in this repository.
 
 ---
 
 ## 7. Printing-performance impact
 
-None. The admin plane shares the API process but touches only `admin_*` tables
-and `audit_events`. It opens no object-storage client, holds no S3 credential,
-issues no query against sessions, files, payments or print jobs, and adds no
-work to any background runner. The one added index is on `audit_events(action,
-occurred_at)`, which is write-side cost on a table already written per action.
+No material impact at the expected peak of 8–10 administrators. A live admin
+request performs an indexed session lookup; mutations add a live CSRF-session
+check and short owner-row serialization for that administrator. The UI makes
+three initial reads, does not poll, and rechecks identity before a sensitive
+self-service action so two browser tabs cannot silently act as different
+accounts. These checks are low-volume and security-relevant; removing them
+would not provide a useful capacity gain.
+
+The admin plane opens no object-storage client, issues no query against customer
+sessions, files, payments or print jobs, and adds no work to a background
+runner. Non-admin API requests pay only an admin-path prefix check. The
+`audit_events(action, occurred_at)` index adds one B-tree update to a table
+already written per action; its first production build should use an appropriate
+maintenance window if that table is already large.
 
 ---
 
@@ -331,6 +394,12 @@ Phase 2 (read-only observability) is unblocked. Before it starts:
 3. **Operator kiosk scoping is stored but unused.** `admin_kiosk_scopes` exists
    and is reported in the identity response; the first query that must respect
    it arrives with Phase 2's session list.
+4. **Add authenticator provenance and expired-row cleanup.** This enables
+   targeted session invalidation after a lost key and bounds challenge/session
+   storage without weakening current request checks.
+5. **Choose an alert and CLI attribution model.** Break-glass consumption needs
+   transactional external delivery, and direct lifecycle commands need a
+   trustworthy actor/reason before their audit coverage can be called complete.
 
 Not started, and correctly so: every operational read, every R1/R2 action, and
 the R3 approval workflow.

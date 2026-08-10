@@ -127,8 +127,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     origin: [
       options.environment.KIOSK_ORIGIN,
       options.environment.UPLOAD_ORIGIN,
-      // The admin plane is its own origin, so a flaw in either customer-facing
-      // surface cannot reach an admin session cookie.
+      // Admin is allowed by global CORS, then narrowed to this exact origin and
+      // host again by the admin route hook. Cookie scope alone is not an origin
+      // boundary because ports on the same hostname share cookies.
       options.environment.ADMIN_ORIGIN
     ]
   });
@@ -502,7 +503,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     relyingParty: {
       id: options.environment.ADMIN_WEBAUTHN_RP_ID,
       name: options.environment.ADMIN_WEBAUTHN_RP_NAME,
-      origin: options.environment.ADMIN_ORIGIN
+      origin: new URL(options.environment.ADMIN_ORIGIN).origin
     },
     sessionPepper: options.environment.ADMIN_SESSION_PEPPER,
     breakGlassPepper: options.environment.ADMIN_BREAK_GLASS_PEPPER,
@@ -514,11 +515,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     admin: adminService,
     clock,
     stepUpTtlMilliseconds,
-    idleTtlMilliseconds: options.environment.ADMIN_SESSION_IDLE_MINUTES * 60_000,
-    // The `__Host-` cookie prefix requires Secure. Configuration validation
-    // already refuses a non-HTTPS admin origin in production, so this is only
-    // ever false for local development.
-    secureCookies: new URL(options.environment.ADMIN_ORIGIN).protocol === "https:"
+    adminOrigin: new URL(options.environment.ADMIN_ORIGIN).origin
   });
 
   return app;

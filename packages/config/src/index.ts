@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { isIP } from "node:net";
 import { dirname, join, resolve } from "node:path";
 
 import { config as loadDotenv } from "dotenv";
@@ -28,9 +29,9 @@ const environmentSchema = z
     KIOSK_ORIGIN: z.string().url().default("http://localhost:5173"),
     UPLOAD_ORIGIN: z.string().url().default("http://localhost:5174"),
     PUBLIC_UPLOAD_ORIGIN: z.string().url().default("http://localhost:5174"),
-    // The admin control plane. It is a separate origin from the kiosk and the
-    // phone so a flaw in either customer-facing surface cannot reach an admin
-    // session cookie.
+    // The admin control plane. Its API routes enforce this exact browser origin
+    // in addition to CORS. Cookies are scoped to hosts rather than ports, so a
+    // dedicated production hostname remains preferable to port-only isolation.
     ADMIN_ORIGIN: z.string().url().default("http://localhost:5175"),
     // The WebAuthn relying party. RP_ID is the registrable domain credentials
     // are bound to; a credential enrolled against one RP_ID cannot be used
@@ -394,13 +395,54 @@ const environmentSchema = z
       });
     }
 
+    const adminUrl = new URL(environment.ADMIN_ORIGIN);
+    // Origins have no path, query, fragment or credentials. Keeping the
+    // serialized value canonical matters because CORS compares it as a string;
+    // accepting a URL-shaped value such as a trailing slash would start an
+    // admin plane that the browser cannot reach.
+    if (adminUrl.origin !== environment.ADMIN_ORIGIN) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_ORIGIN"],
+        message: "ADMIN_ORIGIN must be a serialized origin with no path, query or trailing slash"
+      });
+    }
+
+    // WebAuthn is available over HTTP only in a potentially trustworthy local
+    // context. A LAN URL may work for ordinary HTTP but the browser will refuse
+    // every credential ceremony, so fail at startup in every environment.
+    if (
+      adminUrl.protocol !== "https:" &&
+      !(adminUrl.protocol === "http:" && isWebAuthnLoopbackHostname(adminUrl.hostname))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_ORIGIN"],
+        message: "ADMIN_ORIGIN must use HTTPS unless it is a loopback or localhost origin"
+      });
+    }
+
     // A credential is bound to the relying party identifier, and the browser
     // refuses a ceremony whose RP ID is not a suffix of the page's own domain.
-    // Catching the mismatch at startup turns an unusable login into a failure
-    // that names the setting.
-    const adminHost = new URL(environment.ADMIN_ORIGIN).hostname;
+    // Catching syntax and relationship mistakes at startup turns an unusable
+    // login into a failure that names the setting.
+    const adminHost = adminUrl.hostname;
     const relyingPartyId = environment.ADMIN_WEBAUTHN_RP_ID;
-    if (adminHost !== relyingPartyId && !adminHost.endsWith("." + relyingPartyId)) {
+    if (!isCanonicalWebAuthnRpId(relyingPartyId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_WEBAUTHN_RP_ID"],
+        message: "ADMIN_WEBAUTHN_RP_ID must be a canonical hostname without a scheme or port"
+      });
+    }
+
+    const adminIsIpAddress = ipVersionOfHostname(adminHost) !== 0;
+    const relyingPartyIsIpAddress = ipVersionOfHostname(relyingPartyId) !== 0;
+    const relyingPartyMatches =
+      adminIsIpAddress || relyingPartyIsIpAddress
+        ? adminHost === relyingPartyId
+        : adminHost === relyingPartyId || adminHost.endsWith("." + relyingPartyId);
+    if (!relyingPartyMatches) {
       context.addIssue({
         code: "custom",
         path: ["ADMIN_WEBAUTHN_RP_ID"],
@@ -623,6 +665,41 @@ function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
+function ipVersionOfHostname(hostname: string): number {
+  const unwrapped =
+    hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  return isIP(unwrapped);
+}
+
+function isWebAuthnLoopbackHostname(hostname: string): boolean {
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) return true;
+  const unwrapped =
+    hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  const version = isIP(unwrapped);
+  if (version === 6) return unwrapped === "::1";
+  return version === 4 && unwrapped.startsWith("127.");
+}
+
+function isCanonicalWebAuthnRpId(value: string): boolean {
+  if (value.endsWith(".")) return false;
+  const ipVersion = ipVersionOfHostname(value);
+  if (ipVersion !== 0) {
+    try {
+      return new URL(`https://${value}`).hostname === value;
+    } catch {
+      return false;
+    }
+  }
+
+  if (value.length > 253) return false;
+  return value
+    .split(".")
+    .every(
+      (label) =>
+        label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
+    );
+}
+
 function isPostgresConnectionUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -633,6 +710,24 @@ function isPostgresConnectionUrl(value: string): boolean {
 }
 
 export type Environment = z.infer<typeof environmentSchema>;
+
+const ADMIN_ENVIRONMENT_KEYS = [
+  "ADMIN_ORIGIN",
+  "ADMIN_WEBAUTHN_RP_ID",
+  "ADMIN_WEBAUTHN_RP_NAME",
+  "ADMIN_SESSION_PEPPER",
+  "ADMIN_BREAK_GLASS_PEPPER",
+  "ADMIN_SESSION_IDLE_MINUTES",
+  "ADMIN_SESSION_ABSOLUTE_MINUTES",
+  "ADMIN_STEP_UP_TTL_SECONDS",
+  "ADMIN_CHALLENGE_TTL_SECONDS",
+  "ADMIN_BREAK_GLASS_TTL_HOURS"
+] as const;
+type AdminEnvironmentKey = (typeof ADMIN_ENVIRONMENT_KEYS)[number];
+const ADMIN_ENVIRONMENT_KEY_SET: ReadonlySet<string> = new Set(ADMIN_ENVIRONMENT_KEYS);
+
+/** Runtime configuration for processes that must never receive admin secrets. */
+export type NonAdminEnvironment = Omit<Environment, AdminEnvironmentKey>;
 
 export interface RedisConnectionOptions {
   host: string;
@@ -668,6 +763,44 @@ export function redisConnectionOptions(redisUrl: string): RedisConnectionOptions
 
 export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Environment {
   return environmentSchema.parse(source);
+}
+
+/** Explicit API entry point: the API is the only long-running process that owns admin secrets. */
+export function loadApiEnvironment(source: NodeJS.ProcessEnv = process.env): Environment {
+  return loadEnvironment(source);
+}
+
+/**
+ * Parse shared worker/device settings without requiring or retaining any admin
+ * control-plane configuration. Values from the source are deliberately
+ * overwritten before validation, then removed from the returned object. This
+ * prevents a broad legacy Environment type from turning into a reason to
+ * distribute recovery peppers to a kiosk or background worker.
+ */
+export function loadNonAdminEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NonAdminEnvironment {
+  const nonAdminSource: NodeJS.ProcessEnv = {};
+  for (const name of Object.keys(source)) {
+    if (!ADMIN_ENVIRONMENT_KEY_SET.has(name)) nonAdminSource[name] = source[name];
+  }
+
+  const parsed = environmentSchema.parse({
+    ...nonAdminSource,
+    ADMIN_ORIGIN: "https://admin.invalid",
+    ADMIN_WEBAUTHN_RP_ID: "admin.invalid",
+    ADMIN_WEBAUTHN_RP_NAME: "Unused outside API",
+    ADMIN_SESSION_PEPPER: "not-loaded-outside-api-admin-session-pepper",
+    ADMIN_BREAK_GLASS_PEPPER: "not-loaded-outside-api-break-glass-pepper",
+    ADMIN_SESSION_IDLE_MINUTES: "15",
+    ADMIN_SESSION_ABSOLUTE_MINUTES: "240",
+    ADMIN_STEP_UP_TTL_SECONDS: "300",
+    ADMIN_CHALLENGE_TTL_SECONDS: "180",
+    ADMIN_BREAK_GLASS_TTL_HOURS: "2160"
+  });
+  return Object.fromEntries(
+    Object.entries(parsed).filter(([name]) => !ADMIN_ENVIRONMENT_KEY_SET.has(name))
+  ) as NonAdminEnvironment;
 }
 
 /**

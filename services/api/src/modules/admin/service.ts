@@ -80,6 +80,18 @@ export interface AuthenticatedAdmin {
   kioskScopes: readonly string[];
 }
 
+/** Internal sentinel used to roll back a transaction before returning a generic auth failure. */
+class AdminCredentialStateChangedError extends Error {}
+
+class AdminAuthenticatorRevocationError extends Error {
+  public constructor(
+    public readonly reason:
+      "USER_NOT_FOUND" | "KEY_NOT_FOUND" | "LAST_SPARE" | "AUTHORIZATION_CHANGED"
+  ) {
+    super(reason);
+  }
+}
+
 export class AdminService {
   public constructor(private readonly options: AdminServiceOptions) {}
 
@@ -176,6 +188,7 @@ export class AdminService {
       displayName: stored.adminUser.displayName,
       role,
       authenticatorId: stored.id,
+      expectedSignCount: stored.signCount,
       newSignCount: verified.newSignCount,
       now,
       requestId: input.requestId
@@ -255,25 +268,63 @@ export class AdminService {
       throw stepUpFailed();
     }
 
-    await this.options.database.$transaction(async (transaction) => {
-      await transaction.adminAuthenticator.update({
-        where: { id: stored.id },
-        data: { signCount: verified.newSignCount, lastUsedAt: now }
+    try {
+      await this.options.database.$transaction(async (transaction) => {
+        // Keep the same owner -> authenticator lock order as login, enrolment
+        // and revocation. Database authenticator triggers also lock the owner,
+        // so reversing this order here could otherwise deadlock with them.
+        const activeUser = await transaction.adminUser.updateMany({
+          where: {
+            id: input.admin.adminUserId,
+            role: input.admin.role,
+            status: "ACTIVE"
+          },
+          data: { updatedAt: now }
+        });
+        if (activeUser.count !== 1) throw new AdminCredentialStateChangedError();
+
+        const authenticator = await transaction.adminAuthenticator.updateMany({
+          where: {
+            id: stored.id,
+            adminUserId: input.admin.adminUserId,
+            revokedAt: null,
+            signCount: stored.signCount
+          },
+          data: { signCount: verified.newSignCount, lastUsedAt: now }
+        });
+        if (authenticator.count !== 1) throw new AdminCredentialStateChangedError();
+
+        const session = await transaction.adminSession.updateMany({
+          where: {
+            id: input.admin.sessionId,
+            adminUserId: input.admin.adminUserId,
+            revokedAt: null,
+            idleExpiresAt: { gt: now },
+            hardExpiresAt: { gt: now }
+          },
+          data: { lastStepUpAt: now, lastSeenAt: now }
+        });
+        if (session.count !== 1) throw new AdminCredentialStateChangedError();
+
+        await writeAdminAuditEvent(transaction, {
+          id: this.options.random.uuid(now),
+          occurredAt: now,
+          actorId: input.admin.adminUserId,
+          action: "admin.step_up",
+          outcome: "SUCCESS",
+          requestId: input.requestId,
+          metadata: { role: input.admin.role, authenticatorId: stored.id }
+        });
       });
-      await transaction.adminSession.update({
-        where: { id: input.admin.sessionId },
-        data: { lastStepUpAt: now, lastSeenAt: now }
+    } catch (error) {
+      if (!(error instanceof AdminCredentialStateChangedError)) throw error;
+      await this.auditFailure(input.admin.adminUserId, "admin.step_up", input.requestId, now, {
+        role: input.admin.role,
+        authenticatorId: stored.id,
+        failureCode: "CREDENTIAL_STATE_CHANGED"
       });
-      await writeAdminAuditEvent(transaction, {
-        id: this.options.random.uuid(now),
-        occurredAt: now,
-        actorId: input.admin.adminUserId,
-        action: "admin.step_up",
-        outcome: "SUCCESS",
-        requestId: input.requestId,
-        metadata: { role: input.admin.role, authenticatorId: stored.id }
-      });
-    });
+      throw stepUpFailed();
+    }
 
     return now;
   }
@@ -285,9 +336,9 @@ export class AdminService {
   /**
    * Begin enrolling an authenticator onto an account.
    *
-   * `targetAdminUserId` is the account being enrolled onto. A caller may always
-   * enrol onto themselves; enrolling onto someone else is an Admin capability
-   * restricted to Operators, checked by the route before this is reached.
+   * `targetAdminUserId` is the account being enrolled onto. Phase 1 exposes
+   * self-enrolment only; cross-account enrolment needs its own service contract
+   * when Operator administration arrives.
    */
   public async beginRegistration(
     targetAdminUserId: string
@@ -324,17 +375,22 @@ export class AdminService {
    * minimum, which is what makes PROVISIONING the only state in which fewer
    * than two usable authenticators exist.
    */
-  public async completeRegistration(input: {
-    targetAdminUserId: string;
-    actorAdminUserId: string;
-    ceremonyId: string;
-    credential: WebAuthnCredential;
-    label: string;
-    requestId: string;
-    purpose?: "REGISTRATION" | "BREAK_GLASS_REGISTRATION";
-  }): Promise<{ authenticatorId: string; activated: boolean }> {
+  public async completeRegistration(
+    input: {
+      targetAdminUserId: string;
+      actorAdminUserId: string;
+      ceremonyId: string;
+      credential: WebAuthnCredential;
+      label: string;
+      requestId: string;
+    } & (
+      | { purpose?: "REGISTRATION"; actorSessionId: string }
+      | { purpose: "BREAK_GLASS_REGISTRATION"; actorSessionId?: never }
+    )
+  ): Promise<{ authenticatorId: string; activated: boolean }> {
     const now = this.options.clock.now();
     const purpose = input.purpose ?? "REGISTRATION";
+    const isBreakGlass = purpose === "BREAK_GLASS_REGISTRATION";
     const challenge = await this.consumeChallenge(
       input.ceremonyId,
       purpose,
@@ -348,6 +404,20 @@ export class AdminService {
     if (!user) throw new ApiError(404, "ADMIN_USER_NOT_FOUND", "Account not found.");
     const role = asRole(user.role);
     const status = asStatus(user.status);
+
+    if (
+      (isBreakGlass && !isRecoveryEligibleStatus(status)) ||
+      (!isBreakGlass && status !== "ACTIVE")
+    ) {
+      await this.auditFailure(
+        input.actorAdminUserId,
+        "admin.authenticator.enrol",
+        input.requestId,
+        now,
+        { role, targetAdminUserId: input.targetAdminUserId, failureCode: "ACCOUNT_" + status }
+      );
+      throw isBreakGlass ? recoveryFailed() : mutationAuthorizationFailed();
+    }
 
     const verified = await verifyRegistration({
       relyingParty: this.options.relyingParty,
@@ -399,52 +469,112 @@ export class AdminService {
     const authenticatorId = this.options.random.uuid(now);
     let activated = false;
 
-    await this.options.database.$transaction(async (transaction) => {
-      await transaction.adminAuthenticator.create({
-        data: {
-          id: authenticatorId,
-          adminUserId: input.targetAdminUserId,
-          credentialId: verified.credentialId,
-          publicKey: Buffer.from(verified.publicKey),
-          signCount: verified.signCount,
-          transports: verified.transports,
-          attachment: verified.attachment,
-          backupEligible: verified.backupEligible,
-          backedUp: verified.backedUp,
-          aaguid: verified.aaguid,
-          label: input.label,
-          createdAt: now
-        }
-      });
-
-      const usable = await transaction.adminAuthenticator.count({
-        where: { adminUserId: input.targetAdminUserId, revokedAt: null }
-      });
-      if (evaluateActivation(role, status, usable).allowed) {
-        await transaction.adminUser.update({
-          where: { id: input.targetAdminUserId },
-          data: { status: "ACTIVE", activatedAt: now }
+    try {
+      await this.options.database.$transaction(async (transaction) => {
+        // Registration and activation are one account-level state transition.
+        // Serialising on the owner row prevents two first-key ceremonies from
+        // each counting only their own insert and leaving a two-key account stuck
+        // in PROVISIONING. The status/role predicate is also the final authority:
+        // authorization may have raced with suspension, disablement or a role
+        // change after the route's earlier checks.
+        const locked = await transaction.adminUser.updateMany({
+          where: {
+            id: input.targetAdminUserId,
+            role,
+            status: isBreakGlass ? { in: ["PROVISIONING", "ACTIVE"] } : "ACTIVE"
+          },
+          data: { updatedAt: now }
         });
-        activated = true;
-      }
+        if (locked.count !== 1) throw new AdminCredentialStateChangedError();
 
-      await writeAdminAuditEvent(transaction, {
-        id: this.options.random.uuid(now),
-        occurredAt: now,
-        actorId: input.actorAdminUserId,
-        action: "admin.authenticator.enrol",
-        outcome: "SUCCESS",
-        requestId: input.requestId,
-        metadata: {
+        // Ordinary enrolment is self-management in Phase 1. Locking the live
+        // session in the same transaction means a logout/suspension that wins
+        // this race prevents the key change. Recovery deliberately has no
+        // session and is restricted by the account-status predicate above.
+        if (!isBreakGlass) {
+          const actorSessionId = input.actorSessionId;
+          if (!actorSessionId) throw new AdminCredentialStateChangedError();
+          const session = await transaction.adminSession.updateMany({
+            where: {
+              id: actorSessionId,
+              adminUserId: input.targetAdminUserId,
+              revokedAt: null,
+              idleExpiresAt: { gt: now },
+              hardExpiresAt: { gt: now }
+            },
+            data: { lastSeenAt: now }
+          });
+          if (session.count !== 1) throw new AdminCredentialStateChangedError();
+        }
+
+        const lockedUser = await transaction.adminUser.findUnique({
+          where: { id: input.targetAdminUserId },
+          select: { role: true, status: true }
+        });
+        if (!lockedUser) throw new AdminCredentialStateChangedError();
+        const lockedRole = asRole(lockedUser.role);
+        const lockedStatus = asStatus(lockedUser.status);
+
+        await transaction.adminAuthenticator.create({
+          data: {
+            id: authenticatorId,
+            adminUserId: input.targetAdminUserId,
+            credentialId: verified.credentialId,
+            publicKey: Buffer.from(verified.publicKey),
+            signCount: verified.signCount,
+            transports: verified.transports,
+            attachment: verified.attachment,
+            backupEligible: verified.backupEligible,
+            backedUp: verified.backedUp,
+            aaguid: verified.aaguid,
+            label: input.label,
+            createdAt: now
+          }
+        });
+
+        const usable = await transaction.adminAuthenticator.count({
+          where: { adminUserId: input.targetAdminUserId, revokedAt: null }
+        });
+        if (evaluateActivation(lockedRole, lockedStatus, usable).allowed) {
+          await transaction.adminUser.update({
+            where: { id: input.targetAdminUserId },
+            data: { status: "ACTIVE", activatedAt: now }
+          });
+          activated = true;
+        }
+
+        await writeAdminAuditEvent(transaction, {
+          id: this.options.random.uuid(now),
+          occurredAt: now,
+          actorId: input.actorAdminUserId,
+          action: "admin.authenticator.enrol",
+          outcome: "SUCCESS",
+          requestId: input.requestId,
+          metadata: {
+            role: lockedRole,
+            targetAdminUserId: input.targetAdminUserId,
+            authenticatorId,
+            authenticatorLabel: input.label,
+            ceremonyPurpose: purpose,
+            resultingState: activated ? "ACTIVE" : lockedStatus
+          }
+        });
+      });
+    } catch (error) {
+      if (!(error instanceof AdminCredentialStateChangedError)) throw error;
+      await this.auditFailure(
+        input.actorAdminUserId,
+        "admin.authenticator.enrol",
+        input.requestId,
+        now,
+        {
           role,
           targetAdminUserId: input.targetAdminUserId,
-          authenticatorId,
-          authenticatorLabel: input.label,
-          ceremonyPurpose: purpose,
-          resultingState: activated ? "ACTIVE" : status
+          failureCode: "ACCOUNT_OR_SESSION_STATE_CHANGED"
         }
-      });
-    });
+      );
+      throw isBreakGlass ? recoveryFailed() : mutationAuthorizationFailed();
+    }
 
     return { authenticatorId, activated };
   }
@@ -464,26 +594,114 @@ export class AdminService {
     requestId: string;
   }): Promise<void> {
     const now = this.options.clock.now();
-    const user = await this.options.database.adminUser.findUnique({
-      where: { id: input.targetAdminUserId },
-      include: { authenticators: { where: { revokedAt: null }, select: { id: true } } }
-    });
-    if (!user) throw new ApiError(404, "ADMIN_USER_NOT_FOUND", "Account not found.");
+    let targetRole: AdminRole = input.admin.role;
+    try {
+      await this.options.database.$transaction(async (transaction) => {
+        // Every enrolment and revocation locks the same owner row first. This
+        // prevents two requests from each observing the same spare count and
+        // concurrently taking an ACTIVE account below its minimum.
+        const locked = await transaction.adminUser.updateMany({
+          where: {
+            id: input.targetAdminUserId,
+            role: input.admin.role,
+            status: "ACTIVE"
+          },
+          data: { updatedAt: now }
+        });
+        if (locked.count !== 1) {
+          throw new AdminAuthenticatorRevocationError("AUTHORIZATION_CHANGED");
+        }
 
-    const owns = user.authenticators.some((entry) => entry.id === input.authenticatorId);
-    if (!owns) {
-      throw new ApiError(404, "ADMIN_AUTHENTICATOR_NOT_FOUND", "Authenticator not found.");
-    }
+        // Lock and revalidate the self-management session after the account
+        // row. This matches suspension's owner -> sessions order and prevents
+        // a request authorized just before logout from retiring a key later.
+        const session = await transaction.adminSession.updateMany({
+          where: {
+            id: input.admin.sessionId,
+            adminUserId: input.targetAdminUserId,
+            revokedAt: null,
+            idleExpiresAt: { gt: now },
+            hardExpiresAt: { gt: now }
+          },
+          data: { lastSeenAt: now }
+        });
+        if (session.count !== 1) {
+          throw new AdminAuthenticatorRevocationError("AUTHORIZATION_CHANGED");
+        }
 
-    const role = asRole(user.role);
-    if (!canRevokeAuthenticator(role, asStatus(user.status), user.authenticators.length)) {
+        const user = await transaction.adminUser.findUnique({
+          where: { id: input.targetAdminUserId },
+          include: { authenticators: { where: { revokedAt: null }, select: { id: true } } }
+        });
+        if (!user) throw new AdminAuthenticatorRevocationError("USER_NOT_FOUND");
+        targetRole = asRole(user.role);
+
+        const owns = user.authenticators.some((entry) => entry.id === input.authenticatorId);
+        if (!owns) throw new AdminAuthenticatorRevocationError("KEY_NOT_FOUND");
+        if (
+          !canRevokeAuthenticator(targetRole, asStatus(user.status), user.authenticators.length)
+        ) {
+          throw new AdminAuthenticatorRevocationError("LAST_SPARE");
+        }
+
+        const revoked = await transaction.adminAuthenticator.updateMany({
+          where: {
+            id: input.authenticatorId,
+            adminUserId: input.targetAdminUserId,
+            revokedAt: null
+          },
+          data: { revokedAt: now, revokedReason: input.reason.slice(0, 48) }
+        });
+        if (revoked.count !== 1) {
+          throw new AdminAuthenticatorRevocationError("KEY_NOT_FOUND");
+        }
+
+        await writeAdminAuditEvent(transaction, {
+          id: this.options.random.uuid(now),
+          occurredAt: now,
+          actorId: input.admin.adminUserId,
+          action: "admin.authenticator.revoke",
+          outcome: "SUCCESS",
+          requestId: input.requestId,
+          metadata: {
+            role: input.admin.role,
+            targetAdminUserId: input.targetAdminUserId,
+            authenticatorId: input.authenticatorId,
+            reason: input.reason
+          }
+        });
+      });
+    } catch (error) {
+      if (!(error instanceof AdminAuthenticatorRevocationError)) throw error;
+      if (error.reason === "AUTHORIZATION_CHANGED") {
+        await this.auditFailure(
+          input.admin.adminUserId,
+          "admin.authenticator.revoke",
+          input.requestId,
+          now,
+          {
+            role: input.admin.role,
+            targetAdminUserId: input.targetAdminUserId,
+            authenticatorId: input.authenticatorId,
+            failureCode: "ACCOUNT_OR_SESSION_STATE_CHANGED"
+          }
+        );
+        throw mutationAuthorizationFailed();
+      }
+      if (error.reason === "USER_NOT_FOUND") {
+        throw new ApiError(404, "ADMIN_USER_NOT_FOUND", "Account not found.");
+      }
+      if (error.reason === "KEY_NOT_FOUND") {
+        throw new ApiError(404, "ADMIN_AUTHENTICATOR_NOT_FOUND", "Authenticator not found.");
+      }
+
       await this.auditFailure(
         input.admin.adminUserId,
         "admin.authenticator.revoke",
         input.requestId,
         now,
         {
-          role,
+          role: targetRole,
           targetAdminUserId: input.targetAdminUserId,
           authenticatorId: input.authenticatorId,
           failureCode: "WOULD_LEAVE_NO_SPARE"
@@ -495,27 +713,6 @@ export class AdminService {
         "Enrol a replacement before retiring this key."
       );
     }
-
-    await this.options.database.$transaction(async (transaction) => {
-      await transaction.adminAuthenticator.update({
-        where: { id: input.authenticatorId },
-        data: { revokedAt: now, revokedReason: input.reason.slice(0, 48) }
-      });
-      await writeAdminAuditEvent(transaction, {
-        id: this.options.random.uuid(now),
-        occurredAt: now,
-        actorId: input.admin.adminUserId,
-        action: "admin.authenticator.revoke",
-        outcome: "SUCCESS",
-        requestId: input.requestId,
-        metadata: {
-          role: input.admin.role,
-          targetAdminUserId: input.targetAdminUserId,
-          authenticatorId: input.authenticatorId,
-          reason: input.reason
-        }
-      });
-    });
   }
 
   // -------------------------------------------------------------------------
@@ -540,7 +737,13 @@ export class AdminService {
       where: {
         secretDigest: digestBreakGlassSecret(input.recoveryCode, this.options.breakGlassPepper)
       },
-      include: { adminUser: true }
+      include: {
+        adminUser: {
+          include: {
+            authenticators: { where: { revokedAt: null }, select: { credentialId: true } }
+          }
+        }
+      }
     });
 
     if (
@@ -555,21 +758,60 @@ export class AdminService {
         now,
         "RECOVERY_CODE_INVALID"
       );
-      throw new ApiError(401, "ADMIN_RECOVERY_FAILED", "Recovery failed.");
+      throw recoveryFailed();
     }
 
     const user = credential.adminUser;
     const role = asRole(user.role);
+    const status = asStatus(user.status);
+    if (!isRecoveryEligibleStatus(status)) {
+      await this.auditAnonymousFailure(
+        "admin.break_glass",
+        input.requestId,
+        now,
+        "RECOVERY_ACCOUNT_UNAVAILABLE"
+      );
+      throw recoveryFailed();
+    }
     const options = await createRegistrationOptions({
       relyingParty: this.options.relyingParty,
       userHandle: new Uint8Array(user.userHandle),
       displayName: user.displayName,
-      existingCredentialIds: [],
+      // Recovery must not let the same physical authenticator masquerade as
+      // the required spare by creating another credential for this RP.
+      existingCredentialIds: user.authenticators.map((entry) => entry.credentialId),
       requireCrossPlatform: role === "TECHNICAL_ADMIN"
     });
 
     const ceremonyId = this.options.random.uuid(now);
-    await this.options.database.$transaction(async (transaction) => {
+    const claimed = await this.options.database.$transaction(async (transaction) => {
+      // Recovery cannot override account suspension or permanent disablement.
+      // Lock the owner first, matching every other identity mutation, so a
+      // concurrent status change and this one-use claim have a clear winner.
+      const eligibleUser = await transaction.adminUser.updateMany({
+        where: {
+          id: user.id,
+          role,
+          status: { in: ["PROVISIONING", "ACTIVE"] }
+        },
+        data: { updatedAt: now }
+      });
+      if (eligibleUser.count !== 1) return false;
+
+      // The read above is intentionally not the claim. Only this conditional
+      // write consumes the credential, so concurrent requests cannot both open
+      // a valid recovery ceremony (or leak a database constraint error).
+      const consumed = await transaction.adminBreakGlassCredential.updateMany({
+        where: {
+          id: credential.id,
+          consumedAt: null,
+          revokedAt: null,
+          expiresAt: { gt: now }
+        },
+        data: { consumedAt: now }
+      });
+      if (consumed.count !== 1) return false;
+
       await transaction.adminWebAuthnChallenge.create({
         data: {
           id: ceremonyId,
@@ -583,10 +825,6 @@ export class AdminService {
       // Consumed at the point it authorises a ceremony, not at the point the
       // ceremony succeeds. A failed attempt must still burn the code, or it
       // would be retryable by anyone who saw it.
-      await transaction.adminBreakGlassCredential.update({
-        where: { id: credential.id },
-        data: { consumedAt: now }
-      });
       await writeAdminAuditEvent(transaction, {
         id: this.options.random.uuid(now),
         occurredAt: now,
@@ -596,7 +834,18 @@ export class AdminService {
         requestId: input.requestId,
         metadata: { role, targetAdminUserId: user.id, ceremonyPurpose: "BREAK_GLASS_REGISTRATION" }
       });
+      return true;
     });
+
+    if (!claimed) {
+      await this.auditAnonymousFailure(
+        "admin.break_glass",
+        input.requestId,
+        now,
+        "RECOVERY_CODE_INVALID"
+      );
+      throw recoveryFailed();
+    }
 
     return { ceremonyId, options, adminUserId: user.id };
   }
@@ -653,8 +902,17 @@ export class AdminService {
   }
 
   public async verifyCsrf(sessionId: string, presentedToken: string): Promise<boolean> {
-    const session = await this.options.database.adminSession.findUnique({
-      where: { id: sessionId },
+    const now = this.options.clock.now();
+    const session = await this.options.database.adminSession.findFirst({
+      // Re-check liveness while binding the token. This closes the ordinary
+      // race where logout or suspension commits after initial session
+      // resolution but before a mutating request reaches its CSRF check.
+      where: {
+        id: sessionId,
+        revokedAt: null,
+        idleExpiresAt: { gt: now },
+        hardExpiresAt: { gt: now }
+      },
       select: { csrfDigest: true }
     });
     if (!session) return false;
@@ -671,10 +929,13 @@ export class AdminService {
   }): Promise<void> {
     const now = this.options.clock.now();
     await this.options.database.$transaction(async (transaction) => {
-      await transaction.adminSession.updateMany({
+      const revoked = await transaction.adminSession.updateMany({
         where: { id: input.admin.sessionId, revokedAt: null },
         data: { revokedAt: now, revokedReason: input.reason.slice(0, 48) }
       });
+      // Logout is idempotent. A concurrent duplicate still succeeds and clears
+      // its cookies, but only the request that changed state records SUCCESS.
+      if (revoked.count !== 1) return;
       await writeAdminAuditEvent(transaction, {
         id: this.options.random.uuid(now),
         occurredAt: now,
@@ -771,6 +1032,7 @@ export class AdminService {
     displayName: string;
     role: AdminRole;
     authenticatorId: string;
+    expectedSignCount: number;
     newSignCount: number;
     now: Date;
     requestId: string;
@@ -783,45 +1045,73 @@ export class AdminService {
     const idleCandidate = nextIdleExpiry(now, this.options.idleTtlMilliseconds);
     const idleExpiresAt = idleCandidate > hardExpiresAt ? hardExpiresAt : idleCandidate;
 
-    await this.options.database.$transaction(async (transaction) => {
-      await transaction.adminSession.create({
-        data: {
-          id: sessionId,
-          adminUserId: input.adminUserId,
-          tokenDigest: digestAdminSessionToken(sessionToken, this.options.sessionPepper),
-          csrfDigest: digestAdminCsrfToken(csrfToken, this.options.sessionPepper),
-          createdAt: now,
-          idleExpiresAt,
-          hardExpiresAt,
-          lastSeenAt: now,
-          // Logging in is itself a fresh assertion, so a sensitive action taken
-          // immediately after does not ask for the key twice.
-          lastStepUpAt: now
-        }
-      });
-      await transaction.adminAuthenticator.update({
-        where: { id: input.authenticatorId },
-        data: { signCount: input.newSignCount, lastUsedAt: now }
-      });
-      await transaction.adminUser.update({
-        where: { id: input.adminUserId },
-        data: { lastLoginAt: now }
-      });
-      await writeAdminAuditEvent(transaction, {
-        id: this.options.random.uuid(now),
-        occurredAt: now,
-        actorId: input.adminUserId,
-        action: "admin.authentication",
-        outcome: "SUCCESS",
-        requestId: input.requestId,
-        metadata: { role: input.role, authenticatorId: input.authenticatorId, sessionId }
-      });
-    });
+    let scopes: { kioskId: string }[];
+    try {
+      scopes = await this.options.database.$transaction(async (transaction) => {
+        // Lock the account first so authentication has the same lock order as
+        // enrolment and account suspension. The conditional role/status check
+        // also closes the gap between the pre-verification lookup and issuance.
+        const activeUser = await transaction.adminUser.updateMany({
+          where: { id: input.adminUserId, role: input.role, status: "ACTIVE" },
+          data: { lastLoginAt: now }
+        });
+        if (activeUser.count !== 1) throw new AdminCredentialStateChangedError();
 
-    const scopes = await this.options.database.adminKioskScope.findMany({
-      where: { adminUserId: input.adminUserId },
-      select: { kioskId: true }
-    });
+        // Compare-and-set is required in addition to cryptographic verification:
+        // two assertions can verify against the same old counter concurrently.
+        // Exactly one may advance it and receive a session.
+        const authenticator = await transaction.adminAuthenticator.updateMany({
+          where: {
+            id: input.authenticatorId,
+            adminUserId: input.adminUserId,
+            revokedAt: null,
+            signCount: input.expectedSignCount
+          },
+          data: { signCount: input.newSignCount, lastUsedAt: now }
+        });
+        if (authenticator.count !== 1) throw new AdminCredentialStateChangedError();
+
+        await transaction.adminSession.create({
+          data: {
+            id: sessionId,
+            adminUserId: input.adminUserId,
+            tokenDigest: digestAdminSessionToken(sessionToken, this.options.sessionPepper),
+            csrfDigest: digestAdminCsrfToken(csrfToken, this.options.sessionPepper),
+            createdAt: now,
+            idleExpiresAt,
+            hardExpiresAt,
+            lastSeenAt: now,
+            // Logging in is itself a fresh assertion, so a sensitive action taken
+            // immediately after does not ask for the key twice.
+            lastStepUpAt: now
+          }
+        });
+        await writeAdminAuditEvent(transaction, {
+          id: this.options.random.uuid(now),
+          occurredAt: now,
+          actorId: input.adminUserId,
+          action: "admin.authentication",
+          outcome: "SUCCESS",
+          requestId: input.requestId,
+          metadata: { role: input.role, authenticatorId: input.authenticatorId, sessionId }
+        });
+        // Keep every database operation needed to return the new identity in
+        // this transaction. If scope loading fails, no unreachable live session
+        // is committed after the one-time ceremony has been consumed.
+        return transaction.adminKioskScope.findMany({
+          where: { adminUserId: input.adminUserId },
+          select: { kioskId: true }
+        });
+      });
+    } catch (error) {
+      if (!(error instanceof AdminCredentialStateChangedError)) throw error;
+      await this.auditFailure(input.adminUserId, "admin.authentication", input.requestId, now, {
+        role: input.role,
+        authenticatorId: input.authenticatorId,
+        failureCode: "CREDENTIAL_STATE_CHANGED"
+      });
+      throw authenticationFailed();
+    }
 
     return {
       admin: {
@@ -937,6 +1227,10 @@ function asStatus(value: string): AdminUserStatus {
   return value;
 }
 
+function isRecoveryEligibleStatus(status: AdminUserStatus): boolean {
+  return status === "PROVISIONING" || status === "ACTIVE";
+}
+
 /**
  * One message for every login failure. Distinguishing "no such credential"
  * from "wrong account state" would tell an attacker which guesses were close.
@@ -947,6 +1241,14 @@ function authenticationFailed(): ApiError {
 
 function stepUpFailed(): ApiError {
   return new ApiError(401, "ADMIN_STEP_UP_FAILED", "Confirmation failed.");
+}
+
+function recoveryFailed(): ApiError {
+  return new ApiError(401, "ADMIN_RECOVERY_FAILED", "Recovery failed.");
+}
+
+function mutationAuthorizationFailed(): ApiError {
+  return new ApiError(401, "ADMIN_AUTHENTICATION_REQUIRED", "Sign in to continue.");
 }
 
 function ceremonyExpired(): ApiError {

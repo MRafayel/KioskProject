@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -64,7 +65,9 @@ async function cleanUpSeededAdmins(): Promise<void> {
   // Suspend first: the "keep a spare" trigger refuses to strip an ACTIVE
   // account, which is exactly the invariant these tests rely on elsewhere.
   await database.adminUser.updateMany({
-    where: { id: { in: ids } },
+    // DISABLED is permanent and already permits key cleanup. Every other
+    // seeded state may transition to SUSPENDED.
+    where: { id: { in: ids }, status: { not: "DISABLED" } },
     data: { status: "SUSPENDED" }
   });
   await database.adminAuthenticator.deleteMany({ where: { adminUserId: { in: ids } } });
@@ -392,6 +395,7 @@ describe("step-up enforcement", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toHaveProperty("ceremonyId");
+    expect(response.json().adminUserId).toBe(session.adminUserId);
   });
 
   it("lets an Operator manage their own keys, since that capability is theirs", async () => {
@@ -516,6 +520,402 @@ describe("authenticator invariants", () => {
       database.adminUser.update({ where: { id: adminUserId }, data: { status: "ACTIVE" } })
     ).rejects.toThrow();
   });
+
+  it("serializes concurrent registrations so the second key activates the account", async () => {
+    const adminUserId = randomUUID();
+    seededAdminUserIds.push(adminUserId);
+    await database.adminUser.create({
+      data: {
+        id: adminUserId,
+        userHandle: randomBytes(32),
+        displayName: "Concurrent enrolment",
+        role: "ADMIN",
+        status: "PROVISIONING"
+      }
+    });
+
+    const firstInserted = deferred();
+    const releaseFirst = deferred();
+    const register = async (index: number, holdAfterCount: boolean): Promise<void> => {
+      await database.$transaction(async (transaction) => {
+        await transaction.adminAuthenticator.create({
+          data: {
+            id: randomUUID(),
+            adminUserId,
+            credentialId: `concurrent-registration-${adminUserId}-${index}`,
+            publicKey: randomBytes(32),
+            label: `key ${index}`,
+            attachment: "cross-platform",
+            backupEligible: false
+          }
+        });
+        const usable = await transaction.adminAuthenticator.count({
+          where: { adminUserId, revokedAt: null }
+        });
+        if (holdAfterCount) {
+          firstInserted.resolve();
+          await releaseFirst.promise;
+        }
+        if (usable >= 2) {
+          await transaction.adminUser.update({
+            where: { id: adminUserId },
+            data: { status: "ACTIVE" }
+          });
+        }
+      });
+    };
+
+    const first = register(0, true);
+    await firstInserted.promise;
+    let secondSettled = false;
+    const second = register(1, false).finally(() => {
+      secondSettled = true;
+    });
+    const both = Promise.allSettled([first, second]);
+    await delay(75);
+    const secondWaitedForOwner = !secondSettled;
+    releaseFirst.resolve();
+
+    const results = await both;
+    expect(secondWaitedForOwner).toBe(true);
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    await expect(
+      database.adminUser.findUniqueOrThrow({ where: { id: adminUserId } })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+    await expect(
+      database.adminAuthenticator.count({ where: { adminUserId, revokedAt: null } })
+    ).resolves.toBe(2);
+  });
+
+  it("serializes concurrent revocations so three keys cannot become one", async () => {
+    const session = await seedAdminWithSession("ADMIN");
+    await database.adminAuthenticator.create({
+      data: {
+        id: randomUUID(),
+        adminUserId: session.adminUserId,
+        credentialId: `concurrent-revocation-${session.adminUserId}-third`,
+        publicKey: randomBytes(32),
+        label: "third key",
+        attachment: "cross-platform",
+        backupEligible: false
+      }
+    });
+    const keys = await database.adminAuthenticator.findMany({
+      where: { adminUserId: session.adminUserId, revokedAt: null },
+      orderBy: { createdAt: "asc" }
+    });
+
+    const firstRevoked = deferred();
+    const releaseFirst = deferred();
+    const first = database.$transaction(async (transaction) => {
+      await transaction.adminAuthenticator.update({
+        where: { id: keys[0]!.id },
+        data: { revokedAt: new Date(), revokedReason: "first concurrent request" }
+      });
+      firstRevoked.resolve();
+      await releaseFirst.promise;
+    });
+    await firstRevoked.promise;
+
+    let secondSettled = false;
+    const second = database
+      .$transaction(async (transaction) => {
+        await transaction.adminAuthenticator.update({
+          where: { id: keys[1]!.id },
+          data: { revokedAt: new Date(), revokedReason: "second concurrent request" }
+        });
+      })
+      .finally(() => {
+        secondSettled = true;
+      });
+    const both = Promise.allSettled([first, second]);
+    await delay(75);
+    const secondWaitedForOwner = !secondSettled;
+    releaseFirst.resolve();
+
+    const results = await both;
+    expect(secondWaitedForOwner).toBe(true);
+    expect(results[0]!.status).toBe("fulfilled");
+    expect(results[1]!.status).toBe("rejected");
+    if (results[1]!.status === "rejected") {
+      expect(String(results[1]!.reason)).toContain("at least two usable authenticators");
+    }
+    await expect(
+      database.adminAuthenticator.count({
+        where: { adminUserId: session.adminUserId, revokedAt: null }
+      })
+    ).resolves.toBe(2);
+  });
+
+  it("serializes activation against revocation", async () => {
+    const adminUserId = randomUUID();
+    seededAdminUserIds.push(adminUserId);
+    await database.adminUser.create({
+      data: {
+        id: adminUserId,
+        userHandle: randomBytes(32),
+        displayName: "Activation race",
+        role: "ADMIN",
+        status: "PROVISIONING"
+      }
+    });
+    const authenticatorIds: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const id = randomUUID();
+      authenticatorIds.push(id);
+      await database.adminAuthenticator.create({
+        data: {
+          id,
+          adminUserId,
+          credentialId: `activation-race-${adminUserId}-${index}`,
+          publicKey: randomBytes(32),
+          label: `key ${index}`,
+          attachment: "cross-platform",
+          backupEligible: false
+        }
+      });
+    }
+
+    const activated = deferred();
+    const releaseActivation = deferred();
+    const first = database.$transaction(async (transaction) => {
+      await transaction.adminUser.update({
+        where: { id: adminUserId },
+        data: { status: "ACTIVE" }
+      });
+      activated.resolve();
+      await releaseActivation.promise;
+    });
+    await activated.promise;
+
+    let revocationSettled = false;
+    const second = database
+      .$transaction(async (transaction) => {
+        await transaction.adminAuthenticator.update({
+          where: { id: authenticatorIds[0]! },
+          data: { revokedAt: new Date(), revokedReason: "raced activation" }
+        });
+      })
+      .finally(() => {
+        revocationSettled = true;
+      });
+    const both = Promise.allSettled([first, second]);
+    await delay(75);
+    const revocationWaitedForOwner = !revocationSettled;
+    releaseActivation.resolve();
+
+    const results = await both;
+    expect(revocationWaitedForOwner).toBe(true);
+    expect(results[0]!.status).toBe("fulfilled");
+    expect(results[1]!.status).toBe("rejected");
+    await expect(
+      database.adminUser.findUniqueOrThrow({ where: { id: adminUserId } })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+    await expect(
+      database.adminAuthenticator.count({ where: { adminUserId, revokedAt: null } })
+    ).resolves.toBe(2);
+  });
+
+  it("keeps authenticator ownership, policy and revocation history immutable", async () => {
+    const owner = await seedAdminWithSession("ADMIN");
+    const other = await seedAdminWithSession("ADMIN");
+    await database.adminAuthenticator.create({
+      data: {
+        id: randomUUID(),
+        adminUserId: owner.adminUserId,
+        credentialId: `immutable-authenticator-${owner.adminUserId}`,
+        publicKey: randomBytes(32),
+        label: "replacement",
+        attachment: "cross-platform",
+        backupEligible: false
+      }
+    });
+    const authenticator = await database.adminAuthenticator.findFirstOrThrow({
+      where: { adminUserId: owner.adminUserId, revokedAt: null }
+    });
+
+    await expect(
+      database.adminAuthenticator.update({
+        where: { id: authenticator.id },
+        data: { adminUserId: other.adminUserId }
+      })
+    ).rejects.toThrow("identity and policy are immutable");
+
+    await expect(
+      database.adminAuthenticator.update({
+        where: { id: authenticator.id },
+        data: { id: randomUUID() }
+      })
+    ).rejects.toThrow("identity and policy are immutable");
+
+    const revokedAt = new Date();
+    await database.adminAuthenticator.update({
+      where: { id: authenticator.id },
+      data: { revokedAt, revokedReason: "rotation" }
+    });
+    await expect(
+      database.adminAuthenticator.update({
+        where: { id: authenticator.id },
+        data: { revokedAt: null, revokedReason: null }
+      })
+    ).rejects.toThrow("revocation is final");
+  });
+
+  it("refuses promotion to Technical Admin while a usable synced passkey exists", async () => {
+    const session = await seedAdminWithSession("ADMIN");
+    const authenticator = await database.adminAuthenticator.findFirstOrThrow({
+      where: { adminUserId: session.adminUserId }
+    });
+    // Identity and policy become immutable after this migration, so create the
+    // unsafe-but-valid Admin credential as a replacement rather than rewriting
+    // an enrolled credential.
+    await database.adminUser.update({
+      where: { id: session.adminUserId },
+      data: { status: "SUSPENDED" }
+    });
+    await database.adminAuthenticator.delete({ where: { id: authenticator.id } });
+    await database.adminAuthenticator.create({
+      data: {
+        id: randomUUID(),
+        adminUserId: session.adminUserId,
+        credentialId: `synced-admin-${session.adminUserId}`,
+        publicKey: randomBytes(32),
+        label: "synced passkey",
+        attachment: "platform",
+        backupEligible: true,
+        backedUp: true
+      }
+    });
+
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { role: "TECHNICAL_ADMIN" }
+      })
+    ).rejects.toThrow("device-bound roaming authenticators");
+  });
+
+  it("enforces forward-only account status transitions", async () => {
+    const session = await seedAdminWithSession("ADMIN");
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { status: "PROVISIONING" }
+      })
+    ).rejects.toThrow("status transition");
+
+    await database.adminUser.update({
+      where: { id: session.adminUserId },
+      data: { status: "SUSPENDED" }
+    });
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { status: "ACTIVE" }
+      })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+
+    await database.adminUser.update({
+      where: { id: session.adminUserId },
+      data: { status: "DISABLED" }
+    });
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { status: "SUSPENDED" }
+      })
+    ).rejects.toThrow("status transition");
+  });
+
+  it("keeps durable admin account identity immutable", async () => {
+    const session = await seedAdminWithSession("ADMIN");
+    const account = await database.adminUser.findUniqueOrThrow({
+      where: { id: session.adminUserId }
+    });
+
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { id: randomUUID() }
+      })
+    ).rejects.toThrow("admin account identity is immutable");
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { userHandle: randomBytes(32) }
+      })
+    ).rejects.toThrow("admin account identity is immutable");
+    await expect(
+      database.adminUser.update({
+        where: { id: session.adminUserId },
+        data: { createdAt: new Date(account.createdAt.getTime() + 1_000) }
+      })
+    ).rejects.toThrow("admin account identity is immutable");
+  });
+
+  it("makes break-glass consumption, revocation and identity final", async () => {
+    const session = await seedAdminWithSession("ADMIN");
+    const consumedId = randomUUID();
+    const consumedAt = new Date();
+    await database.adminBreakGlassCredential.create({
+      data: {
+        id: consumedId,
+        adminUserId: session.adminUserId,
+        label: "consumed",
+        secretDigest: randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+    });
+    await database.adminBreakGlassCredential.update({
+      where: { id: consumedId },
+      data: { consumedAt }
+    });
+    await expect(
+      database.adminBreakGlassCredential.update({
+        where: { id: consumedId },
+        data: { consumedAt }
+      })
+    ).rejects.toThrow("consumed break-glass credential cannot be changed");
+
+    const revokedId = randomUUID();
+    await database.adminBreakGlassCredential.create({
+      data: {
+        id: revokedId,
+        adminUserId: session.adminUserId,
+        label: "revoked",
+        secretDigest: randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+    });
+    await database.adminBreakGlassCredential.update({
+      where: { id: revokedId },
+      data: { revokedAt: new Date() }
+    });
+    await expect(
+      database.adminBreakGlassCredential.update({
+        where: { id: revokedId },
+        data: { revokedAt: null }
+      })
+    ).rejects.toThrow("revoked break-glass credential cannot be changed");
+
+    const unusedId = randomUUID();
+    const originalExpiry = new Date(Date.now() + 60_000);
+    await database.adminBreakGlassCredential.create({
+      data: {
+        id: unusedId,
+        adminUserId: session.adminUserId,
+        label: "unused",
+        secretDigest: randomBytes(32).toString("hex"),
+        expiresAt: originalExpiry
+      }
+    });
+    await expect(
+      database.adminBreakGlassCredential.update({
+        where: { id: unusedId },
+        data: { expiresAt: new Date(originalExpiry.getTime() + 60_000) }
+      })
+    ).rejects.toThrow("cannot be re-pointed or extended");
+  });
 });
 
 describe("audit integrity", () => {
@@ -550,6 +950,25 @@ describe("audit integrity", () => {
       database.auditEvent.update({ where: { id: event!.id }, data: { outcome: "FAILURE" } })
     ).rejects.toThrow();
     await expect(database.auditEvent.delete({ where: { id: event!.id } })).rejects.toThrow();
+  });
+
+  it("cannot be truncated by the application's own credential", async () => {
+    const session = await seedAdminWithSession("ADMIN");
+    await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/logout",
+      headers: { cookie: session.cookieHeader, "x-csrf-token": session.csrfToken }
+    });
+    const event = await database.auditEvent.findFirstOrThrow({
+      where: { actorId: session.adminUserId, action: "admin.logout" }
+    });
+
+    await expect(database.$executeRawUnsafe('TRUNCATE TABLE "audit_events"')).rejects.toThrow(
+      "audit_events is append-only"
+    );
+    await expect(
+      database.auditEvent.findUnique({ where: { id: event.id } })
+    ).resolves.not.toBeNull();
   });
 
   it("keeps document identifiers and free text out of admin audit metadata", async () => {
@@ -619,3 +1038,16 @@ describe("the admin plane reads nothing operational in Phase 1", () => {
     }
   });
 });
+
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}

@@ -24,7 +24,7 @@
     "verify:phase6-upgrade": "node scripts/verify-phase6-upgrade.mjs",
     "verify:phase7-upgrade": "node scripts/verify-phase7-upgrade.mjs",
     "typecheck": "pnpm generate && tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src --passWithNoTests",
+    "test": "vitest run src scripts --passWithNoTests",
     "verify:phase8-upgrade": "node scripts/verify-phase8-upgrade.mjs",
     "verify:phase9-upgrade": "node scripts/verify-phase9-upgrade.mjs",
     "admin": "node scripts/admin-account.mjs"

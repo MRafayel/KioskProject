@@ -225,28 +225,57 @@ export function hasCapability(role: AdminRole, capability: AdminCapability): boo
 export type ActionRisk = "R0" | "R1" | "R2" | "R3";
 
 /**
- * The risk of each capability that can change something. Read-only capabilities
- * are absent and default to R0.
+ * The risk of every capability.
+ *
+ * Read-only capabilities are written out as R0 instead of falling through to a
+ * permissive default. That makes this record an authorization review gate: a
+ * newly declared capability cannot compile until somebody deliberately assigns
+ * its risk.
  */
-const CAPABILITY_RISK: Readonly<Partial<Record<AdminCapability, ActionRisk>>> = {
-  "incident.acknowledge": "R1",
+const CAPABILITY_RISK: Readonly<Record<AdminCapability, ActionRisk>> = {
+  "dashboard.read": "R0",
+
+  "kiosk.read": "R0",
+  "kiosk.liveness.read": "R0",
+  "kiosk.maintenance_mode": "R2",
+
+  "session.read": "R0",
+  "session.timeline.read": "R0",
+
+  "document.metadata.read": "R0",
+  "document.retention.read": "R0",
   "document.retention.retry": "R1",
 
+  "print.read": "R0",
+  "print.diagnostics.read": "R0",
   "print.recovery.resolve": "R2",
-  "refund.authorize": "R2",
-  "kiosk.maintenance_mode": "R2",
-  "operator.manage": "R2",
-  "authenticator.manage.self": "R2",
-  "authenticator.manage.operator": "R2",
 
+  "payment.read": "R0",
+  "payment.reconcile.read": "R0",
+  "payment.mismatch.read": "R0",
+  "refund.obligation.read": "R0",
+  "refund.authorize": "R2",
+
+  "error.read": "R0",
+  "incident.acknowledge": "R1",
+
+  "audit.read": "R0",
+  "audit.read.self": "R0",
+
+  "pricing.read": "R0",
   "pricing.publish.request": "R3",
+
   "change.propose": "R3",
   "change.approve.technical": "R3",
-  "change.approve.admin": "R3"
+  "change.approve.admin": "R3",
+
+  "operator.manage": "R2",
+  "authenticator.manage.self": "R2",
+  "authenticator.manage.operator": "R2"
 };
 
 export function riskOfCapability(capability: AdminCapability): ActionRisk {
-  return CAPABILITY_RISK[capability] ?? "R0";
+  return CAPABILITY_RISK[capability];
 }
 
 /** Whether an action at this risk needs a fresh WebAuthn assertion. */

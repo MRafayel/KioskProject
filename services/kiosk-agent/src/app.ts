@@ -2,7 +2,7 @@ import helmet from "@fastify/helmet";
 import Fastify, { LogController, type FastifyInstance, type FastifyReply } from "fastify";
 import { Readable } from "node:stream";
 
-import type { Environment } from "@printing-kiosk/config";
+import type { NonAdminEnvironment } from "@printing-kiosk/config";
 import {
   PRODUCT_SCOPE,
   createPaymentBodySchema,
@@ -23,7 +23,7 @@ export interface BuildAgentOptions {
 }
 
 export async function buildAgent(
-  environment: Environment,
+  environment: NonAdminEnvironment,
   options: BuildAgentOptions = {}
 ): Promise<FastifyInstance> {
   const app = Fastify({
@@ -546,7 +546,7 @@ export async function buildAgent(
 }
 
 function upstreamHeaders(
-  environment: Environment,
+  environment: NonAdminEnvironment,
   additional: Readonly<Record<string, string>> = {}
 ): Record<string, string> {
   return {
@@ -557,7 +557,7 @@ function upstreamHeaders(
 
 async function forwardApiResponse(
   upstreamFetch: UpstreamFetch,
-  environment: Environment,
+  environment: NonAdminEnvironment,
   path: string,
   init: RequestInit,
   reply: FastifyReply
@@ -587,7 +587,7 @@ async function sendApiResponse(response: Response, reply: FastifyReply) {
 
 async function forwardPreviewResponse(
   upstreamFetch: UpstreamFetch,
-  environment: Environment,
+  environment: NonAdminEnvironment,
   path: string,
   maximumBytes: number,
   reply: FastifyReply

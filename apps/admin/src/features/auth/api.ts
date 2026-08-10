@@ -1,5 +1,6 @@
 import type {
   AdminAuthenticatorsResponse,
+  AdminBoundWebAuthnOptionsResponse,
   AdminIdentityResponse
 } from "@printing-kiosk/admin-access";
 
@@ -17,6 +18,7 @@ import type {
  */
 
 const CSRF_COOKIE = "__Host-admin_csrf";
+export const ADMIN_REQUEST_TIMEOUT_MILLISECONDS = 15_000;
 
 export class AdminApiError extends Error {
   public constructor(
@@ -44,7 +46,15 @@ function readCsrfToken(): string {
     .split(";")
     .map((entry) => entry.trim())
     .find((entry) => entry.startsWith(`${CSRF_COOKIE}=`));
-  return match ? decodeURIComponent(match.slice(CSRF_COOKIE.length + 1)) : "";
+  if (!match) return "";
+
+  // A malformed cookie must fail closed at the API boundary rather than throw
+  // before the request is sent. The server will reject the empty token.
+  try {
+    return decodeURIComponent(match.slice(CSRF_COOKIE.length + 1));
+  } catch {
+    return "";
+  }
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -54,6 +64,9 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     // Same-origin only. The admin plane is served from its own origin and the
     // session cookie is `SameSite=Strict`.
     credentials: "same-origin",
+    cache: "no-store",
+    redirect: "error",
+    signal: AbortSignal.timeout(ADMIN_REQUEST_TIMEOUT_MILLISECONDS),
     headers: {
       accept: "application/json",
       ...(body === undefined ? {} : { "content-type": "application/json" }),
@@ -66,18 +79,40 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    const error =
-      payload && typeof payload === "object" && "error" in payload
-        ? (payload.error as { code?: string; message?: string })
-        : null;
+    const error = readErrorPayload(payload);
     throw new AdminApiError(
       response.status,
-      error?.code ?? "UNKNOWN",
+      error.code,
       // The server's messages are deliberately generic and safe to show.
-      error?.message ?? "The request could not be completed."
+      error.message
+    );
+  }
+  if (payload === null) {
+    throw new AdminApiError(
+      response.status,
+      "INVALID_RESPONSE",
+      "The control plane returned an invalid response."
     );
   }
   return payload as T;
+}
+
+function readErrorPayload(payload: unknown): { code: string; message: string } {
+  if (!payload || typeof payload !== "object" || !("error" in payload)) {
+    return { code: "UNKNOWN", message: "The request could not be completed." };
+  }
+
+  const value = payload.error;
+  if (!value || typeof value !== "object") {
+    return { code: "UNKNOWN", message: "The request could not be completed." };
+  }
+
+  const code = "code" in value && typeof value.code === "string" ? value.code : "UNKNOWN";
+  const message =
+    "message" in value && typeof value.message === "string" && value.message.length <= 500
+      ? value.message
+      : "The request could not be completed.";
+  return { code, message };
 }
 
 export interface CeremonyResponse {
@@ -97,7 +132,8 @@ export const adminApi = {
       credential
     }),
 
-  beginStepUp: () => call<CeremonyResponse>("POST", "/v1/admin/auth/step-up/options"),
+  beginStepUp: () =>
+    call<AdminBoundWebAuthnOptionsResponse>("POST", "/v1/admin/auth/step-up/options"),
   completeStepUp: (ceremonyId: string, credential: unknown) =>
     call<AdminIdentityResponse>("POST", "/v1/admin/auth/step-up/verify", {
       ceremonyId,
@@ -106,7 +142,10 @@ export const adminApi = {
 
   authenticators: () => call<AdminAuthenticatorsResponse>("GET", "/v1/admin/authenticators"),
   beginEnrolment: () =>
-    call<CeremonyResponse>("POST", "/v1/admin/authenticators/registration/options"),
+    call<AdminBoundWebAuthnOptionsResponse>(
+      "POST",
+      "/v1/admin/authenticators/registration/options"
+    ),
   completeEnrolment: (ceremonyId: string, credential: unknown, label: string) =>
     call<{ authenticatorId: string }>("POST", "/v1/admin/authenticators/registration/verify", {
       ceremonyId,
@@ -114,5 +153,18 @@ export const adminApi = {
       label
     }),
   revokeAuthenticator: (authenticatorId: string, reason: string) =>
-    call<void>("POST", `/v1/admin/authenticators/${authenticatorId}/revoke`, { reason })
+    call<void>("POST", `/v1/admin/authenticators/${encodeURIComponent(authenticatorId)}/revoke`, {
+      reason
+    }),
+
+  beginBreakGlassEnrolment: (recoveryCode: string) =>
+    call<CeremonyResponse>("POST", "/v1/admin/auth/break-glass/registration/options", {
+      recoveryCode
+    }),
+  completeBreakGlassEnrolment: (ceremonyId: string, credential: unknown, label: string) =>
+    call<{ authenticatorId: string }>("POST", "/v1/admin/auth/break-glass/registration/verify", {
+      ceremonyId,
+      credential,
+      label
+    })
 };

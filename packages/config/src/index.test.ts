@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { loadEnvironment, loadWorkspaceEnvironmentFile, redisConnectionOptions } from "./index.js";
+import {
+  loadEnvironment,
+  loadNonAdminEnvironment,
+  loadWorkspaceEnvironmentFile,
+  redisConnectionOptions
+} from "./index.js";
 
 describe("loadEnvironment", () => {
   it("converts Redis URLs into BullMQ-safe connection settings", () => {
@@ -499,7 +504,56 @@ describe("loadEnvironment", () => {
   });
 });
 
+describe("loadNonAdminEnvironment", () => {
+  it("does not require or retain admin control-plane settings in production processes", () => {
+    const source = Object.fromEntries(
+      Object.entries(secureProductionEnvironment).filter(([name]) => !name.startsWith("ADMIN_"))
+    );
+    const environment = loadNonAdminEnvironment({
+      ...source,
+      // Even accidental injection is discarded rather than copied into the
+      // worker or kiosk-agent configuration object.
+      ADMIN_SESSION_PEPPER: "an-admin-session-secret-that-must-not-be-retained"
+    });
+
+    expect(environment.NODE_ENV).toBe("production");
+    expect("ADMIN_ORIGIN" in environment).toBe(false);
+    expect("ADMIN_SESSION_PEPPER" in environment).toBe(false);
+    expect("ADMIN_BREAK_GLASS_PEPPER" in environment).toBe(false);
+  });
+});
+
 describe("admin WebAuthn relying party", () => {
+  it.each([
+    "https://admin.example.test/",
+    "https://admin.example.test/path",
+    "https://admin.example.test?mode=recovery",
+    "https://admin.example.test#security",
+    "https://operator@admin.example.test"
+  ])("refuses non-canonical ADMIN_ORIGIN=%s", (adminOrigin) => {
+    expect(() =>
+      loadEnvironment({
+        ADMIN_ORIGIN: adminOrigin,
+        ADMIN_WEBAUTHN_RP_ID: "admin.example.test"
+      })
+    ).toThrow();
+  });
+
+  it("refuses insecure non-loopback admin origins outside production too", () => {
+    expect(() =>
+      loadEnvironment({
+        ADMIN_ORIGIN: "http://192.168.10.20:5175",
+        ADMIN_WEBAUTHN_RP_ID: "192.168.10.20"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        ADMIN_ORIGIN: "http://127.0.0.2:5175",
+        ADMIN_WEBAUTHN_RP_ID: "127.0.0.2"
+      }).ADMIN_ORIGIN
+    ).toBe("http://127.0.0.2:5175");
+  });
+
   it("accepts an RP ID equal to the admin host", () => {
     expect(
       loadEnvironment({
@@ -534,6 +588,37 @@ describe("admin WebAuthn relying party", () => {
         ADMIN_WEBAUTHN_RP_ID: "ample.test"
       })
     ).toThrow();
+  });
+
+  it.each([
+    "https://admin.example.test",
+    "admin.example.test:443",
+    "admin.example.test.",
+    "admin..example.test",
+    "_admin.example.test",
+    "-admin.example.test"
+  ])("refuses non-hostname RP ID %s", (relyingPartyId) => {
+    expect(() =>
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://admin.example.test",
+        ADMIN_WEBAUTHN_RP_ID: relyingPartyId
+      })
+    ).toThrow();
+  });
+
+  it("requires an IP RP ID to match an IP origin exactly", () => {
+    expect(() =>
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://127.0.0.1",
+        ADMIN_WEBAUTHN_RP_ID: "0.0.1"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://127.0.0.1",
+        ADMIN_WEBAUTHN_RP_ID: "127.0.0.1"
+      }).ADMIN_WEBAUTHN_RP_ID
+    ).toBe("127.0.0.1");
   });
 
   it("keeps the step-up window inside the idle session window", () => {

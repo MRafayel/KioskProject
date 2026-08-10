@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import {
   adminAuthenticatorsResponseSchema,
+  adminBoundWebAuthnOptionsResponseSchema,
   adminHealthResponseSchema,
   adminIdentityResponseSchema,
   beginBreakGlassBodySchema,
@@ -43,14 +44,18 @@ const authenticatorParamsSchema = z.object({ authenticatorId: z.string().uuid() 
 /** Ceremonies are cheap to start and expensive to brute-force; still, bound them. */
 const CEREMONY_RATE = { max: 30, timeWindow: "1 minute" } as const;
 const VERIFY_RATE = { max: 20, timeWindow: "1 minute" } as const;
-/** Recovery is a rare, alarming event. A tight ceiling makes guessing useless. */
-const BREAK_GLASS_RATE = { max: 5, timeWindow: "1 hour" } as const;
+/**
+ * Recovery is rare and alarming, but initial provisioning needs two one-use
+ * ceremonies per account. Thirty per hour supports a ten-admin rollout (and
+ * retries) even when a reverse proxy makes everyone share one source address;
+ * the sealed code itself has 256 bits and is not made guessable by this bound.
+ */
+const BREAK_GLASS_RATE = { max: 30, timeWindow: "1 hour" } as const;
 
 export interface AdminRouteDependencies extends AdminAuthorizationDependencies {
   admin: AdminService;
-  /** HTTPS in production; false only for local development over http. */
-  secureCookies: boolean;
-  idleTtlMilliseconds: number;
+  /** The only browser origin allowed to reach the admin control plane. */
+  adminOrigin: string;
   stepUpTtlMilliseconds: number;
 }
 
@@ -58,6 +63,41 @@ export function registerAdminRoutes(
   app: FastifyInstance,
   dependencies: AdminRouteDependencies
 ): void {
+  const adminHost = new URL(dependencies.adminOrigin).host.toLowerCase();
+  // CORS is necessarily shared by the kiosk, upload and admin applications at
+  // the API boundary. Narrow it again here: an XSS in either customer-facing
+  // application must not be able to make credentialed admin requests.
+  // Non-browser clients with no browser metadata remain available for operator
+  // tooling; browser requests also have to arrive through the configured host.
+  app.addHook("onRequest", (request) => {
+    if (!request.url.startsWith("/v1/admin/")) return Promise.resolve();
+    const origin = request.headers.origin;
+    const hasFetchMetadata = Object.keys(request.headers).some((name) =>
+      name.startsWith("sec-fetch-")
+    );
+    const browserUserAgent = request.headers["user-agent"]?.toLowerCase().includes("mozilla/");
+    const host = request.headers.host?.toLowerCase();
+    const wrongExplicitOrigin =
+      origin !== undefined && (Array.isArray(origin) || origin !== dependencies.adminOrigin);
+    const wrongFetchContext =
+      hasFetchMetadata &&
+      (request.headers["sec-fetch-site"] !== "same-origin" || host !== adminHost);
+    // Older browsers may omit Fetch Metadata on a same-origin GET, and such a
+    // request also omits Origin. Their browser-only User-Agent is the remaining
+    // signal that prevents a customer application's same-host dev proxy from
+    // becoming an admin proxy. Non-browser clients may omit all three headers.
+    const wrongLegacyBrowserHost = browserUserAgent === true && host !== adminHost;
+
+    if (wrongExplicitOrigin || wrongFetchContext || wrongLegacyBrowserHost) {
+      throw new ApiError(
+        403,
+        "ADMIN_ORIGIN_FORBIDDEN",
+        "This origin cannot access the admin control plane."
+      );
+    }
+    return Promise.resolve();
+  });
+
   // -------------------------------------------------------------------------
   // Authentication
   // -------------------------------------------------------------------------
@@ -82,7 +122,7 @@ export function registerAdminRoutes(
         requestId: request.id
       });
 
-      setSessionCookies(reply, cookies, dependencies.secureCookies);
+      setSessionCookies(reply, cookies);
       return sendNoStore(
         reply,
         identityResponse(admin, dependencies.stepUpTtlMilliseconds, dependencies.clock.now())
@@ -97,7 +137,7 @@ export function registerAdminRoutes(
       reason: "USER_LOGOUT",
       requestId: request.id
     });
-    clearSessionCookies(reply, dependencies.secureCookies);
+    clearSessionCookies(reply);
     return reply.header("cache-control", "no-store").code(204).send();
   });
 
@@ -111,7 +151,13 @@ export function registerAdminRoutes(
     async (request, reply) => {
       const admin = await requireAdminSession(request, dependencies);
       const ceremony = await dependencies.admin.beginStepUp(admin.adminUserId);
-      return sendNoStore(reply, webAuthnOptionsResponseSchema.parse(ceremony));
+      return sendNoStore(
+        reply,
+        adminBoundWebAuthnOptionsResponseSchema.parse({
+          ...ceremony,
+          adminUserId: admin.adminUserId
+        })
+      );
     }
   );
 
@@ -200,7 +246,13 @@ export function registerAdminRoutes(
       // capability and arrives with Operator administration in Phase 4.
       const admin = await authorizeAdmin(request, dependencies, "authenticator.manage.self");
       const ceremony = await dependencies.admin.beginRegistration(admin.adminUserId);
-      return sendNoStore(reply, webAuthnOptionsResponseSchema.parse(ceremony));
+      return sendNoStore(
+        reply,
+        adminBoundWebAuthnOptionsResponseSchema.parse({
+          ...ceremony,
+          adminUserId: admin.adminUserId
+        })
+      );
     }
   );
 
@@ -213,6 +265,7 @@ export function registerAdminRoutes(
       const result = await dependencies.admin.completeRegistration({
         targetAdminUserId: admin.adminUserId,
         actorAdminUserId: admin.adminUserId,
+        actorSessionId: admin.sessionId,
         ceremonyId: body.ceremonyId,
         credential: body.credential,
         label: body.label,
@@ -334,17 +387,17 @@ function identityResponse(admin: AuthenticatedAdmin, stepUpTtlMilliseconds: numb
   });
 }
 
-function setSessionCookies(
-  reply: FastifyReply,
-  cookies: AdminSessionCookiePair,
-  secure: boolean
-): void {
-  // `__Host-` binds the cookie to this exact origin with no Domain attribute,
+function setSessionCookies(reply: FastifyReply, cookies: AdminSessionCookiePair): void {
+  // `__Host-` binds the cookie to this exact host with no Domain attribute,
   // so a compromised sibling subdomain cannot set or read it. It requires
-  // Secure and Path=/, which is why the admin origin must be HTTPS.
+  // Secure and Path=/. Production therefore uses HTTPS; browsers also treat
+  // localhost as a trustworthy context for the loopback-only development UI.
   reply.setCookie(ADMIN_SESSION_COOKIE, cookies.sessionToken, {
     httpOnly: true,
-    secure,
+    // The Secure attribute is mandatory for the `__Host-` prefix. Browsers
+    // treat localhost as a trustworthy context, so development must keep it
+    // too; omitting it causes the cookie to be rejected rather than weakened.
+    secure: true,
     sameSite: "strict",
     path: "/",
     expires: cookies.hardExpiresAt
@@ -353,18 +406,18 @@ function setSessionCookies(
   // the page echoes back in a header. It is not a credential on its own.
   reply.setCookie(ADMIN_CSRF_COOKIE, cookies.csrfToken, {
     httpOnly: false,
-    secure,
+    secure: true,
     sameSite: "strict",
     path: "/",
     expires: cookies.hardExpiresAt
   });
 }
 
-function clearSessionCookies(reply: FastifyReply, secure: boolean): void {
+function clearSessionCookies(reply: FastifyReply): void {
   for (const name of [ADMIN_SESSION_COOKIE, ADMIN_CSRF_COOKIE]) {
     reply.setCookie(name, "", {
       httpOnly: name === ADMIN_SESSION_COOKIE,
-      secure,
+      secure: true,
       sameSite: "strict",
       path: "/",
       expires: new Date(0)

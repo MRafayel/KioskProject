@@ -14,6 +14,7 @@
  *   node scripts/admin-account.mjs break-glass --admin-user <uuid> --label "safe A"
  *   node scripts/admin-account.mjs list
  *   node scripts/admin-account.mjs suspend --admin-user <uuid>
+ *   node scripts/admin-account.mjs resume --admin-user <uuid>
  *
  * A created account is PROVISIONING and can do nothing until the person uses a
  * break-glass code to enrol their first security key and then enrols a second.
@@ -32,6 +33,14 @@ import { parseArgs } from "node:util";
 
 import { config as loadDotenv } from "dotenv";
 import pg from "pg";
+
+import {
+  assertBreakGlassIssuable,
+  normalizeAdminUserId,
+  normalizeRequiredOption,
+  resolveAdminStatusTransition,
+  resolveBreakGlassTtl
+} from "./admin-account-options.mjs";
 
 const packageDirectory = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const workspaceDirectory = dirname(dirname(packageDirectory));
@@ -75,13 +84,16 @@ try {
     case "suspend":
       await setStatus("SUSPENDED");
       break;
+    case "resume":
+      await setStatus("ACTIVE");
+      break;
     case "disable":
       await setStatus("DISABLED");
       break;
     default:
       fail(
         "Usage: admin-account.mjs " +
-          "<create|break-glass|revoke-break-glass|list|suspend|disable> [options]"
+          "<create|break-glass|revoke-break-glass|list|suspend|resume|disable> [options]"
       );
   }
 } finally {
@@ -89,9 +101,8 @@ try {
 }
 
 async function create() {
-  const name = values.name;
+  const name = validated(() => normalizeRequiredOption(values.name, "--name", 120));
   const role = values.role;
-  if (!name) fail("--name is required.");
   if (!role || !ROLES.includes(role)) fail(`--role must be one of ${ROLES.join(", ")}.`);
 
   const id = randomUUID();
@@ -109,37 +120,33 @@ async function create() {
       `  admin user id: ${id}`,
       "",
       "The account is PROVISIONING and cannot sign in yet.",
-      "Issue a break-glass code so they can enrol their first security key:",
+      "Issue two one-time bootstrap codes, one for each initial security key:",
       "",
-      `  pnpm db:admin break-glass --admin-user ${id} --label "initial enrolment"`,
+      `  pnpm db:admin break-glass --admin-user ${id} --label "initial key A"`,
+      `  pnpm db:admin break-glass --admin-user ${id} --label "initial key B"`,
       "",
-      "They must enrol two keys before the account activates.",
+      "Each code authorises exactly one enrolment. The account activates only",
+      "after both keys are enrolled; it cannot sign in between them.",
+      "After activation, issue fresh codes for the sealed recovery envelopes.",
       ""
     ].join("\n")
   );
 }
 
 async function issueBreakGlass() {
-  const adminUserId = values["admin-user"];
-  const label = values.label;
+  const adminUserId = validated(() => normalizeAdminUserId(values["admin-user"]));
+  const label = validated(() => normalizeRequiredOption(values.label, "--label", 80));
   const pepper = process.env.ADMIN_BREAK_GLASS_PEPPER;
-  if (!adminUserId) fail("--admin-user is required.");
-  if (!label) fail("--label is required, so a sealed envelope can be identified.");
   if (!pepper || pepper.length < 32) {
     fail("ADMIN_BREAK_GLASS_PEPPER must be set to the value the API uses.");
   }
 
-  const found = await client.query(
-    `SELECT "display_name", "role" FROM "admin_users" WHERE "id" = $1`,
-    [adminUserId]
+  const ttl = validated(() =>
+    resolveBreakGlassTtl({
+      expiresDays: values["expires-days"],
+      configuredHours: process.env.ADMIN_BREAK_GLASS_TTL_HOURS
+    })
   );
-  if (found.rowCount !== 1) fail("No such admin account.");
-  const user = found.rows[0];
-
-  const expiresDays = Number(values["expires-days"] ?? 90);
-  if (!Number.isSafeInteger(expiresDays) || expiresDays < 1 || expiresDays > 365) {
-    fail("--expires-days must be between 1 and 365.");
-  }
 
   // 256 bits. There is no rate at which this is guessable, which is why a
   // peppered digest rather than a slow hash is the right storage for it.
@@ -150,18 +157,31 @@ async function issueBreakGlass() {
     .update(secret, "utf8")
     .digest("hex");
 
-  await client.query(
-    `INSERT INTO "admin_break_glass_credentials"
-       ("id", "admin_user_id", "label", "secret_digest", "expires_at")
-     VALUES ($1, $2, $3, $4, $5)`,
-    [
-      randomUUID(),
-      adminUserId,
-      label,
-      secretDigest,
-      new Date(Date.now() + expiresDays * 86_400_000)
-    ]
-  );
+  let user;
+  await client.query("BEGIN");
+  try {
+    const found = await client.query(
+      `SELECT "display_name", "role", "status"
+       FROM "admin_users"
+       WHERE "id" = $1::uuid
+       FOR UPDATE`,
+      [adminUserId]
+    );
+    if (found.rowCount !== 1) throw new Error("No such admin account.");
+    user = found.rows[0];
+    assertBreakGlassIssuable(user.status);
+
+    await client.query(
+      `INSERT INTO "admin_break_glass_credentials"
+         ("id", "admin_user_id", "label", "secret_digest", "expires_at")
+       VALUES ($1, $2, $3, $4, $5)`,
+      [randomUUID(), adminUserId, label, secretDigest, new Date(Date.now() + ttl.hours * 3_600_000)]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    fail(error instanceof Error ? error.message : "Could not issue a recovery code.");
+  }
 
   process.stdout.write(
     [
@@ -172,7 +192,7 @@ async function issueBreakGlass() {
       "",
       `  account : ${user.display_name} (${user.role})`,
       `  label   : ${label}`,
-      `  expires : ${expiresDays} days`,
+      `  expires : ${ttl.display}`,
       "",
       "  Print it, seal it, store it offline. Do not save it to a file, a",
       "  password manager, or a chat message.",
@@ -193,8 +213,7 @@ async function issueBreakGlass() {
  * rewrite the record of a recovery that actually happened.
  */
 async function revokeBreakGlass() {
-  const adminUserId = values["admin-user"];
-  if (!adminUserId) fail("--admin-user is required.");
+  const adminUserId = validated(() => normalizeAdminUserId(values["admin-user"]));
 
   const result = await client.query(
     `UPDATE "admin_break_glass_credentials"
@@ -232,11 +251,28 @@ async function list() {
 }
 
 async function setStatus(status) {
-  const adminUserId = values["admin-user"];
-  if (!adminUserId) fail("--admin-user is required.");
+  const adminUserId = validated(() => normalizeAdminUserId(values["admin-user"]));
+  let changed = false;
 
   await client.query("BEGIN");
   try {
+    const found = await client.query(
+      `SELECT "status", "activated_at"
+       FROM "admin_users"
+       WHERE "id" = $1::uuid
+       FOR UPDATE`,
+      [adminUserId]
+    );
+    if (found.rowCount !== 1) throw new Error("No such admin account.");
+    const current = found.rows[0];
+    const transition = resolveAdminStatusTransition(current.status, status, current.activated_at);
+
+    if (!transition.shouldUpdate) {
+      await client.query("COMMIT");
+      process.stdout.write(`Account ${adminUserId} is already ${status}; no changes made.\n`);
+      return;
+    }
+
     const updated = await client.query(
       `UPDATE "admin_users"
        SET "status" = $2::varchar,
@@ -245,28 +281,45 @@ async function setStatus(status) {
            "disabled_at" =
              CASE WHEN $2::varchar = 'DISABLED' THEN now() ELSE "disabled_at" END,
            "updated_at" = now()
-       WHERE "id" = $1::uuid`,
-      [adminUserId, status]
+       WHERE "id" = $1::uuid
+         AND "status" = $3::varchar`,
+      [adminUserId, status, current.status]
     );
-    if (updated.rowCount !== 1) throw new Error("No such admin account.");
+    if (updated.rowCount !== 1) throw new Error("The account status changed concurrently.");
 
     // Suspension takes effect now, not when the session happens to expire.
-    await client.query(
-      `UPDATE "admin_sessions"
-       SET "revoked_at" = now(), "revoked_reason" = $2
-       WHERE "admin_user_id" = $1 AND "revoked_at" IS NULL`,
-      [adminUserId, `ACCOUNT_${status}`]
-    );
+    if (status !== "ACTIVE") {
+      await client.query(
+        `UPDATE "admin_sessions"
+         SET "revoked_at" = now(), "revoked_reason" = $2
+         WHERE "admin_user_id" = $1 AND "revoked_at" IS NULL`,
+        [adminUserId, `ACCOUNT_${status}`]
+      );
+    }
     await client.query("COMMIT");
+    changed = true;
   } catch (error) {
     await client.query("ROLLBACK");
     fail(error instanceof Error ? error.message : "Could not update the account.");
   }
 
-  process.stdout.write(`Account ${adminUserId} is now ${status}; sessions revoked.\n`);
+  if (changed)
+    process.stdout.write(
+      status === "ACTIVE"
+        ? `Account ${adminUserId} is now ACTIVE; previously revoked sessions remain revoked.\n`
+        : `Account ${adminUserId} is now ${status}; sessions revoked.\n`
+    );
 }
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exit(1);
+}
+
+function validated(operation) {
+  try {
+    return operation();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "Invalid command options.");
+  }
 }
