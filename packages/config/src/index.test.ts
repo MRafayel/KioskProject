@@ -457,6 +457,105 @@ describe("loadEnvironment", () => {
     ).toThrow();
   });
 
+  it("requires HTTPS for the admin origin with no loopback exception", () => {
+    // WebAuthn needs a secure context and the session cookie uses the __Host-
+    // prefix, so unlike the API and kiosk origins this one has no HTTP escape.
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        ADMIN_ORIGIN: "http://127.0.0.1:5175",
+        ADMIN_WEBAUTHN_RP_ID: "127.0.0.1"
+      })
+    ).toThrow();
+  });
+
+  it("requires the admin peppers to be independent production values", () => {
+    for (const collision of [
+      secureProductionEnvironment.COOKIE_SIGNING_KEY,
+      secureProductionEnvironment.UPLOAD_TOKEN_PEPPER,
+      secureProductionEnvironment.PAYMENT_WEBHOOK_SECRET
+    ]) {
+      expect(() =>
+        loadEnvironment({ ...secureProductionEnvironment, ADMIN_SESSION_PEPPER: collision })
+      ).toThrow();
+    }
+    // The break-glass pepper must also differ from the session pepper, so
+    // leaking one cannot be used to forge the other.
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        ADMIN_BREAK_GLASS_PEPPER: secureProductionEnvironment.ADMIN_SESSION_PEPPER
+      })
+    ).toThrow();
+  });
+
+  it("refuses default admin peppers in production", () => {
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        ADMIN_SESSION_PEPPER: "development-only-admin-session-pepper-change-me"
+      })
+    ).toThrow();
+  });
+});
+
+describe("admin WebAuthn relying party", () => {
+  it("accepts an RP ID equal to the admin host", () => {
+    expect(
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://admin.example.test",
+        ADMIN_WEBAUTHN_RP_ID: "admin.example.test"
+      })
+    ).toMatchObject({ ADMIN_WEBAUTHN_RP_ID: "admin.example.test" });
+  });
+
+  it("accepts an RP ID that is a parent domain of the admin host", () => {
+    expect(
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://admin.example.test",
+        ADMIN_WEBAUTHN_RP_ID: "example.test"
+      })
+    ).toMatchObject({ ADMIN_WEBAUTHN_RP_ID: "example.test" });
+  });
+
+  it("refuses an RP ID the browser would reject", () => {
+    // A credential enrolled against an unrelated RP ID can never be asserted
+    // from this origin, so every login would fail at the browser.
+    expect(() =>
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://admin.example.test",
+        ADMIN_WEBAUTHN_RP_ID: "attacker.test"
+      })
+    ).toThrow();
+    // A suffix that is not a domain boundary must not pass either.
+    expect(() =>
+      loadEnvironment({
+        ADMIN_ORIGIN: "https://admin.example.test",
+        ADMIN_WEBAUTHN_RP_ID: "ample.test"
+      })
+    ).toThrow();
+  });
+
+  it("keeps the step-up window inside the idle session window", () => {
+    expect(() =>
+      loadEnvironment({
+        ADMIN_SESSION_IDLE_MINUTES: "5",
+        ADMIN_STEP_UP_TTL_SECONDS: "600"
+      })
+    ).toThrow();
+  });
+
+  it("keeps the idle window inside the absolute window", () => {
+    expect(() =>
+      loadEnvironment({
+        ADMIN_SESSION_IDLE_MINUTES: "120",
+        ADMIN_SESSION_ABSOLUTE_MINUTES: "60"
+      })
+    ).toThrow();
+  });
+});
+
+describe("workspace environment file", () => {
   it("loads the documented root environment file from a package working directory", () => {
     const root = mkdtempSync(join(tmpdir(), "printing-kiosk-config-"));
     const nested = join(root, "services", "api");
@@ -494,6 +593,10 @@ const secureProductionEnvironment = {
     "registry.example.test/printing-kiosk-processor@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   DOCUMENT_PROCESSOR_AUTH_TOKEN: "production-processor-auth-token-at-least-32-characters",
   PAYMENT_WEBHOOK_SECRET: "production-payment-webhook-secret-at-least-32-characters",
+  ADMIN_ORIGIN: "https://admin.example.test",
+  ADMIN_WEBAUTHN_RP_ID: "admin.example.test",
+  ADMIN_SESSION_PEPPER: "production-admin-session-pepper-at-least-32-characters",
+  ADMIN_BREAK_GLASS_PEPPER: "production-admin-break-glass-pepper-at-least-32-chars",
   MALWARE_SCANNER_ADAPTER: "clamav",
   S3_SERVER_SIDE_ENCRYPTION: "AES256"
 } as const;

@@ -11,6 +11,12 @@ Customer uploads are private, untrusted, and potentially malicious.
   placeholders only through .env.example.
 - Do not put original customer filenames, document contents, QR tokens, or
   signed object URLs in logs.
+- Never write an administrator break-glass recovery code to a file. The
+  provisioning command prints it once to a terminal; redirecting that output
+  puts a credential that can enrol a security key on a privileged account into
+  a path .gitignore does not cover. Print it, seal it, store it offline.
+  If one is exposed, revoke it with
+  `pnpm db:admin revoke-break-glass --admin-user <uuid>` and issue a new one.
 - Treat a token, credential, or private document accidentally committed to Git
   as exposed. Revoke it and remove the data from all reachable history and
   backups.

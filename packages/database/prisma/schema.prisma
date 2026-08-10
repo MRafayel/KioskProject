@@ -32,10 +32,10 @@ model Kiosk {
   updatedAt           DateTime          @default(now()) @updatedAt @map("updated_at")
   credentials         KioskCredential[]
   sessions            PrintSession[]
-  auditEvents         AuditEvent[]
   sessionEvents       SessionEvent[]
   printJobs           PrintJob[]
   agentCommands       AgentCommand[]
+  adminScopes         AdminKioskScope[]
 
   @@index([status])
   @@index([lastSeenAt])
@@ -95,7 +95,6 @@ model PrintSession {
   refunds                 Refund[]
   printJobs               PrintJob[]
   agentCommands           AgentCommand[]
-  auditEvents             AuditEvent[]
   outboxEvents            OutboxEvent[]
   sessionEvents           SessionEvent[]
   cleanupRun              CleanupRun?
@@ -607,23 +606,196 @@ model FileDerivative {
   @@map("file_derivatives")
 }
 
+/// The record of who did what. Append-only and enforced as such by a trigger:
+/// an actor who could rewrite this table could erase the evidence of every
+/// other thing they did, so no application path and no administrator may
+/// update or delete a row.
+///
+/// The kiosk and session identifiers are recorded values, not foreign keys. An
+/// audit row keeps naming the session it was about after that session is gone,
+/// which is what a historical record is for — and it means an operational
+/// deletion is never blocked by, or able to rewrite, the log that describes it.
 model AuditEvent {
-  id         String        @id @db.Uuid
-  occurredAt DateTime      @default(now()) @map("occurred_at")
-  actorType  String        @map("actor_type") @db.VarChar(32)
-  actorId    String        @map("actor_id") @db.VarChar(100)
-  kioskId    String?       @map("kiosk_id") @db.VarChar(64)
-  sessionId  String?       @map("session_id") @db.Uuid
-  action     String        @db.VarChar(100)
-  outcome    String        @db.VarChar(32)
-  requestId  String?       @map("request_id") @db.VarChar(100)
+  id         String   @id @db.Uuid
+  occurredAt DateTime @default(now()) @map("occurred_at")
+  actorType  String   @map("actor_type") @db.VarChar(32)
+  actorId    String   @map("actor_id") @db.VarChar(100)
+  kioskId    String?  @map("kiosk_id") @db.VarChar(64)
+  sessionId  String?  @map("session_id") @db.Uuid
+  action     String   @db.VarChar(100)
+  outcome    String   @db.VarChar(32)
+  requestId  String?  @map("request_id") @db.VarChar(100)
   metadata   Json?
-  kiosk      Kiosk?        @relation(fields: [kioskId], references: [id], onDelete: SetNull)
-  session    PrintSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   @@index([sessionId, occurredAt])
   @@index([actorType, actorId, occurredAt])
+  @@index([action, occurredAt])
   @@map("audit_events")
+}
+
+/// A person who may use the control plane.
+///
+/// There is no password column and there never will be one: WebAuthn is the
+/// only factor, so there is no shared secret here to phish, reuse or leak. The
+/// display name is for an operator to recognise a colleague; nothing in this
+/// row identifies a customer.
+///
+/// An account holds exactly one role. Multiple roles would raise a question
+/// about how their capabilities combine, and the answer would eventually be
+/// "the union", which is how a superuser appears by accident.
+model AdminUser {
+  id           String   @id @db.Uuid
+  /// The WebAuthn user handle. Random, opaque and stable: never an email
+  /// address, so a stolen authenticator database reveals no identities.
+  userHandle   Bytes    @unique @map("user_handle")
+  displayName  String   @map("display_name") @db.VarChar(120)
+  role         String   @db.VarChar(24)
+  status       String   @default("PROVISIONING") @db.VarChar(24)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+  activatedAt  DateTime? @map("activated_at")
+  suspendedAt  DateTime? @map("suspended_at")
+  disabledAt   DateTime? @map("disabled_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+
+  authenticators AdminAuthenticator[]
+  sessions       AdminSession[]
+  kioskScopes    AdminKioskScope[]
+  challenges     AdminWebAuthnChallenge[]
+  breakGlass     AdminBreakGlassCredential[]
+
+  @@index([status, role])
+  @@map("admin_users")
+}
+
+/// One enrolled FIDO2 credential.
+///
+/// Several per account, by requirement: a privileged account below its minimum
+/// cannot be activated, and a revocation that would take it below the minimum
+/// is refused. Both rules are enforced here in the database as well as in the
+/// application, because the failure mode is an operator locked out of the
+/// control plane during the incident they needed it for.
+model AdminAuthenticator {
+  id             String    @id @db.Uuid
+  adminUserId    String    @map("admin_user_id") @db.Uuid
+  /// base64url, as returned by the authenticator.
+  credentialId   String    @unique @map("credential_id") @db.VarChar(400)
+  publicKey      Bytes     @map("public_key")
+  /// Replay defence. An authenticator that reports a counter must never report
+  /// one lower than we already saw.
+  signCount      Int       @default(0) @map("sign_count")
+  transports     String[]
+  /// "platform" | "cross-platform" | null when the authenticator declined.
+  attachment     String?   @db.VarChar(24)
+  /// True when the credential may leave the device it was created on. A
+  /// Technical Admin credential may not.
+  backupEligible Boolean   @default(false) @map("backup_eligible")
+  backedUp       Boolean   @default(false) @map("backed_up")
+  aaguid         String?   @db.VarChar(36)
+  /// Chosen by the operator so they can tell two keys apart when revoking one.
+  label          String    @db.VarChar(80)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  lastUsedAt     DateTime? @map("last_used_at")
+  revokedAt      DateTime? @map("revoked_at")
+  revokedReason  String?   @map("revoked_reason") @db.VarChar(48)
+  adminUser      AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@index([adminUserId, revokedAt])
+  @@map("admin_authenticators")
+}
+
+/// A revocable server-side admin session.
+///
+/// The cookie carries a random token; only its digest is stored, so reading
+/// this table yields nothing that can be replayed. Revocation is immediate
+/// because every request re-reads this row — there is no stateless token that
+/// stays valid until it expires.
+model AdminSession {
+  id            String    @id @db.Uuid
+  adminUserId   String    @map("admin_user_id") @db.Uuid
+  tokenDigest   String    @unique @map("token_digest") @db.VarChar(64)
+  /// Bound to this session, so a token lifted from another session's cookie
+  /// cannot satisfy the double-submit check here.
+  csrfDigest    String    @map("csrf_digest") @db.VarChar(64)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  /// Rolls forward while the session is used.
+  idleExpiresAt DateTime  @map("idle_expires_at")
+  /// Never extends.
+  hardExpiresAt DateTime  @map("hard_expires_at")
+  lastSeenAt    DateTime? @map("last_seen_at")
+  /// When this session last completed a WebAuthn assertion. R2 actions require
+  /// this to be recent; a stolen cookie alone can never satisfy it.
+  lastStepUpAt  DateTime? @map("last_step_up_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedReason String?   @map("revoked_reason") @db.VarChar(48)
+  adminUser     AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@index([adminUserId, revokedAt])
+  @@index([hardExpiresAt])
+  @@map("admin_sessions")
+}
+
+/// One in-flight WebAuthn ceremony.
+///
+/// Single-use and short-lived. The challenge is a public nonce — it is sent to
+/// the browser in the clear — so it is stored as issued; what makes the
+/// ceremony safe is the signature, not the secrecy of the challenge.
+model AdminWebAuthnChallenge {
+  id          String     @id @db.Uuid
+  /// REGISTRATION | AUTHENTICATION | STEP_UP | BREAK_GLASS_REGISTRATION
+  purpose     String     @db.VarChar(32)
+  challenge   String     @db.VarChar(400)
+  /// Null for a discoverable-credential login, where the account is not known
+  /// until the authenticator answers.
+  adminUserId String?    @map("admin_user_id") @db.Uuid
+  createdAt   DateTime   @default(now()) @map("created_at")
+  expiresAt   DateTime   @map("expires_at")
+  consumedAt  DateTime?  @map("consumed_at")
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("admin_webauthn_challenges")
+}
+
+/// The sealed offline path back in when every authenticator for an account is
+/// gone.
+///
+/// Only its digest is stored, so the database holds nothing usable. It can do
+/// exactly one thing: authorise the enrolment of a new authenticator on the one
+/// account it names. It never creates a session, never carries a capability and
+/// can never perform an operational action. Consuming it is a single-use event
+/// that raises an alert.
+model AdminBreakGlassCredential {
+  id            String    @id @db.Uuid
+  adminUserId   String    @map("admin_user_id") @db.Uuid
+  label         String    @db.VarChar(80)
+  secretDigest  String    @unique @map("secret_digest") @db.VarChar(64)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  revokedAt     DateTime? @map("revoked_at")
+  adminUser     AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@index([adminUserId, consumedAt])
+  @@map("admin_break_glass_credentials")
+}
+
+/// Which kiosks an Operator may act on.
+///
+/// A contextual restriction rather than a capability: the Operator holds
+/// `print.recovery.resolve` everywhere or nowhere, but the query that finds the
+/// job is bounded by these rows. An account with no scope rows can act on no
+/// kiosk, which is the safe default for a newly created Operator.
+model AdminKioskScope {
+  adminUserId String    @map("admin_user_id") @db.Uuid
+  kioskId     String    @map("kiosk_id") @db.VarChar(64)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  kiosk       Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+
+  @@id([adminUserId, kioskId])
+  @@index([kioskId])
+  @@map("admin_kiosk_scopes")
 }
 
 model OutboxEvent {

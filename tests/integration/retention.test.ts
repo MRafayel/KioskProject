@@ -793,7 +793,8 @@ async function resetFixtures(): Promise<void> {
   await database.uploadedFile.deleteMany({ where: { sessionId: { in: ids } } });
   await database.sessionUploadGrant.deleteMany({ where: { sessionId: { in: ids } } });
   await database.mobileClient.deleteMany({ where: { sessionId: { in: ids } } });
-  await database.auditEvent.deleteMany({ where: { sessionId: { in: ids } } });
+  // Audit events are append-only and are deliberately not cleaned up: the
+  // log outlives the rows it describes, which is the point of it.
   await database.sessionEvent.deleteMany({ where: { sessionId: { in: ids } } });
   await database.outboxEvent.deleteMany({ where: { aggregateId: { in: ids } } });
   await database.printSession.deleteMany({ where: { id: { in: ids } } });

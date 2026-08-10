@@ -16,15 +16,15 @@ proposals and are not implemented.
 A pnpm/Turbo TypeScript monorepo (Node ≥24, ESM, TypeScript 6, Zod 4) with
 three tiers:
 
-| Path | Runtime | Role |
-| --- | --- | --- |
-| `apps/kiosk` | React 19 + Vite, port 5173 | Touchscreen UI. Talks to the local agent and the API. |
-| `apps/mobile-upload` | React 19 + Vite, port 5174 | Phone upload page reached from the QR link. |
-| `services/api` | Fastify 5, port 3000 | The control plane. Owns PostgreSQL, owns the private bucket, owns all business rules. |
-| `services/worker` | Node, no HTTP surface | Six background runners (§8). |
-| `services/document-processor` | Fastify, port 3200, container-isolated | Malware scan, validation, normalization, previews. No network egress. |
-| `services/kiosk-agent` | Fastify, port 3100, **loopback-only** | On-kiosk process. Owns the printer and the local spool. |
-| `packages/*` | libraries | `config`, `contracts` (Zod), `database` (Prisma), `domain` (pure state machines), `file-processing`, `payment-adapters`, `pricing`, `printer-adapters` |
+| Path                          | Runtime                                | Role                                                                                                                                                   |
+| ----------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apps/kiosk`                  | React 19 + Vite, port 5173             | Touchscreen UI. Talks to the local agent and the API.                                                                                                  |
+| `apps/mobile-upload`          | React 19 + Vite, port 5174             | Phone upload page reached from the QR link.                                                                                                            |
+| `services/api`                | Fastify 5, port 3000                   | The control plane. Owns PostgreSQL, owns the private bucket, owns all business rules.                                                                  |
+| `services/worker`             | Node, no HTTP surface                  | Six background runners (§8).                                                                                                                           |
+| `services/document-processor` | Fastify, port 3200, container-isolated | Malware scan, validation, normalization, previews. No network egress.                                                                                  |
+| `services/kiosk-agent`        | Fastify, port 3100, **loopback-only**  | On-kiosk process. Owns the printer and the local spool.                                                                                                |
+| `packages/*`                  | libraries                              | `config`, `contracts` (Zod), `database` (Prisma), `domain` (pure state machines), `file-processing`, `payment-adapters`, `pricing`, `printer-adapters` |
 
 ### 1.2 Infrastructure (`infrastructure/compose/dev.yml`)
 
@@ -165,25 +165,25 @@ at creation (`print_jobs_immutable_snapshot`); status is monotonic
 Dispatch is pull-based. The kiosk **opens no inbound port**. The agent polls
 `POST /v1/agent/commands/claim` (scope `print-jobs:agent`), leases an
 `AgentCommand` with a stable `operationId`, fetches the normalized PDF via
-`GET /v1/agent/print-jobs/:id/documents/:docId` — which requires a *live lease
-on that exact job*, verifies the manifest is the allow-list, checks size, MIME,
+`GET /v1/agent/print-jobs/:id/documents/:docId` — which requires a _live lease
+on that exact job_, verifies the manifest is the allow-list, checks size, MIME,
 and prefix, and returns a `x-document-sha256` the agent verifies before
 anything reaches a device — prints, then reports progress and result.
 
 Settlement is `packages/domain/src/print-job.ts`, and it is the most important
 piece of domain logic in the repository for operations:
 
-| Device says | Confidence | Sheets | Outcome | Refund owed |
-| --- | --- | --- | --- | --- |
-| COMPLETED | CONFIRMED | >0 | `COMPLETED` | no |
-| COMPLETED | anything else | — | `RECOVERY_REQUIRED` | no |
-| NOT_SUBMITTED | CONFIRMED | 0 | `FAILED` | **yes** |
-| FAILED | CONFIRMED | 0 | `FAILED` | **yes** |
-| FAILED | UNCONFIRMED | any | `RECOVERY_REQUIRED` | no |
-| CANCELED | CONFIRMED | 0 | `CANCELED` | **yes** |
-| SUBMITTED / PRINTING / UNKNOWN | — | — | `RECOVERY_REQUIRED` | no |
+| Device says                    | Confidence    | Sheets | Outcome             | Refund owed |
+| ------------------------------ | ------------- | ------ | ------------------- | ----------- |
+| COMPLETED                      | CONFIRMED     | >0     | `COMPLETED`         | no          |
+| COMPLETED                      | anything else | —      | `RECOVERY_REQUIRED` | no          |
+| NOT_SUBMITTED                  | CONFIRMED     | 0      | `FAILED`            | **yes**     |
+| FAILED                         | CONFIRMED     | 0      | `FAILED`            | **yes**     |
+| FAILED                         | UNCONFIRMED   | any    | `RECOVERY_REQUIRED` | no          |
+| CANCELED                       | CONFIRMED     | 0      | `CANCELED`          | **yes**     |
+| SUBMITTED / PRINTING / UNKNOWN | —             | —      | `RECOVERY_REQUIRED` | no          |
 
-`RECOVERY_REQUIRED` means *a person must decide*. There is currently no person
+`RECOVERY_REQUIRED` means _a person must decide_. There is currently no person
 surface. This is the primary operational gap the dashboard exists to fill.
 
 ---
@@ -208,6 +208,7 @@ relational metadata **last**, because a scrubbed row can no longer tell anyone
 which object to delete.
 
 Backstops:
+
 - `print_sessions_documents_are_removed` — a trigger refuses to set
   `filesDeletedAt` unless the artifact ledger proves nothing is left.
 - Retries with jittered exponential backoff, capped at 15 min, max 8 attempts.
@@ -233,15 +234,15 @@ no surface. Documented in `PHASE_9_STATUS.md:327` as intentional for the phase.
 Redis/BullMQ exists but is used narrowly. Most runners are `setInterval` loops
 over PostgreSQL with `FOR UPDATE SKIP LOCKED` row leasing.
 
-| Runner | Location | Cadence | Purpose |
-| --- | --- | --- | --- |
-| `OutboxPublisher` | worker | continuous | Transactional outbox → realtime |
-| `DocumentProcessingCoordinator` | worker | BullMQ, concurrency 1 | Processing |
-| `PaymentReconciler` | worker | 5s | Settle expired payment windows |
-| `PrintDispatcher` | worker | continuous | Lease/redeliver print commands, deadline settlement |
-| `SessionCleanupRunner` | worker | 30s | Retention checkpoints |
-| `StorageReconciler` | worker | periodic | Orphan object sweep |
-| `FileJanitor` | **API process** | interval | Expire sessions, quotes, mobile clients; mark interrupted uploads; purge idempotency records |
+| Runner                          | Location        | Cadence               | Purpose                                                                                      |
+| ------------------------------- | --------------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| `OutboxPublisher`               | worker          | continuous            | Transactional outbox → realtime                                                              |
+| `DocumentProcessingCoordinator` | worker          | BullMQ, concurrency 1 | Processing                                                                                   |
+| `PaymentReconciler`             | worker          | 5s                    | Settle expired payment windows                                                               |
+| `PrintDispatcher`               | worker          | continuous            | Lease/redeliver print commands, deadline settlement                                          |
+| `SessionCleanupRunner`          | worker          | 30s                   | Retention checkpoints                                                                        |
+| `StorageReconciler`             | worker          | periodic              | Orphan object sweep                                                                          |
+| `FileJanitor`                   | **API process** | interval              | Expire sessions, quotes, mobile clients; mark interrupted uploads; purge idempotency records |
 
 Note `FileJanitor` runs inside the API, not the worker. Session expiry is
 therefore coupled to API replicas.
@@ -271,13 +272,13 @@ new capture mechanism.**
 
 This is the largest finding.
 
-| Principal | Mechanism | Where |
-| --- | --- | --- |
-| Kiosk terminal | Bearer secret → `sha256` → `KioskCredential.secretDigest` | `modules/sessions/auth.ts` |
-| Kiosk agent | Same credential, distinct scope `print-jobs:agent` | same |
-| Phone | Signed `HttpOnly` cookie + nonce digest | `modules/mobile-access` |
-| Document processor | Static bearer token | config |
-| Payment provider | HMAC-signed callback + timestamp tolerance | `payment-adapters` |
+| Principal          | Mechanism                                                 | Where                      |
+| ------------------ | --------------------------------------------------------- | -------------------------- |
+| Kiosk terminal     | Bearer secret → `sha256` → `KioskCredential.secretDigest` | `modules/sessions/auth.ts` |
+| Kiosk agent        | Same credential, distinct scope `print-jobs:agent`        | same                       |
+| Phone              | Signed `HttpOnly` cookie + nonce digest                   | `modules/mobile-access`    |
+| Document processor | Static bearer token                                       | config                     |
+| Payment provider   | HMAC-signed callback + timestamp tolerance                | `payment-adapters`         |
 
 **There is no human identity anywhere in this system.** No `admin_users` table,
 no OIDC, no password, no MFA, no human session, no CSRF token for a human UI.
@@ -340,17 +341,17 @@ Genuinely strong, and worth preserving unchanged:
 
 ## 12. Sensitive-data inventory
 
-| Data | Location | Exposure risk |
-| --- | --- | --- |
-| Original document bytes | `quarantine/v1/` | Highest |
-| Normalized print-ready PDF | `normalized/v1/` | Highest |
-| Rendered page previews (WebP) | `previews/v1/` | **Highest — these are readable page images** |
-| Original filename | `UploadedFile.displayName` | High; identifies content |
-| Content digest | `contentSha256`, manifest digests | Medium; confirms a known file |
-| Page count, size, MIME, dimensions | `UploadedFile`, `FilePage` | Low — safe for operations |
-| Money, quotes, refunds | `Payment`, `PriceQuote`, `Refund` | Medium; no card data exists |
-| Kiosk credential secret | digest only | Secret |
-| Peppers / signing keys | `.env` | Secret |
+| Data                               | Location                          | Exposure risk                                |
+| ---------------------------------- | --------------------------------- | -------------------------------------------- |
+| Original document bytes            | `quarantine/v1/`                  | Highest                                      |
+| Normalized print-ready PDF         | `normalized/v1/`                  | Highest                                      |
+| Rendered page previews (WebP)      | `previews/v1/`                    | **Highest — these are readable page images** |
+| Original filename                  | `UploadedFile.displayName`        | High; identifies content                     |
+| Content digest                     | `contentSha256`, manifest digests | Medium; confirms a known file                |
+| Page count, size, MIME, dimensions | `UploadedFile`, `FilePage`        | Low — safe for operations                    |
+| Money, quotes, refunds             | `Payment`, `PriceQuote`, `Refund` | Medium; no card data exists                  |
+| Kiosk credential secret            | digest only                       | Secret                                       |
+| Peppers / signing keys             | `.env`                            | Secret                                       |
 
 ### The escalation path that matters most
 
@@ -384,27 +385,27 @@ document-access feature**. The proposal below honours both.
 
 The dashboard needs essentially nothing new on the backend:
 
-| Need | Existing capability |
-| --- | --- |
-| HTTP, routing, hooks | Fastify 5 |
-| Validation | Zod 4 + `packages/contracts` |
-| Database | Prisma + PostgreSQL |
-| AuthZ pattern | scope-array check in `sessions/auth.ts` |
-| Rate limiting | `@fastify/rate-limit`, already per-actor |
-| Cookies | `@fastify/cookie` (signed) |
-| Headers/CSP | `@fastify/helmet` |
-| CORS | `@fastify/cors`, origin allow-list |
-| Audit | `AuditEvent` |
-| Idempotency | `IdempotencyRecord` |
-| Realtime | existing SSE / Socket.IO + outbox |
-| Frontend | React 19, Vite, TanStack Query — same stack as `apps/kiosk` |
-| Charts | none needed initially; see §18 |
+| Need                 | Existing capability                                         |
+| -------------------- | ----------------------------------------------------------- |
+| HTTP, routing, hooks | Fastify 5                                                   |
+| Validation           | Zod 4 + `packages/contracts`                                |
+| Database             | Prisma + PostgreSQL                                         |
+| AuthZ pattern        | scope-array check in `sessions/auth.ts`                     |
+| Rate limiting        | `@fastify/rate-limit`, already per-actor                    |
+| Cookies              | `@fastify/cookie` (signed)                                  |
+| Headers/CSP          | `@fastify/helmet`                                           |
+| CORS                 | `@fastify/cors`, origin allow-list                          |
+| Audit                | `AuditEvent`                                                |
+| Idempotency          | `IdempotencyRecord`                                         |
+| Realtime             | existing SSE / Socket.IO + outbox                           |
+| Frontend             | React 19, Vite, TanStack Query — same stack as `apps/kiosk` |
+| Charts               | none needed initially; see §18                              |
 
 ### 13.1 The one unavoidable new dependency — DECIDED
 
 **Decision: self-hosted WebAuthn / FIDO2. No third-party identity provider.**
 
-Rationale accepted from the owner: the system must not acquire a *runtime*
+Rationale accepted from the owner: the system must not acquire a _runtime_
 dependency on an external IdP. An OIDC outage would otherwise lock every
 operator out of the control plane at exactly the moment — a kiosk incident —
 when it is needed. Self-hosting keeps the failure domain inside infrastructure
@@ -514,7 +515,7 @@ authenticator.manage            # enrollment/revocation; step-up always required
 **Deliberately absent by owner decision: any kiosk-credential capability.**
 Issuing, rotating, or revoking a `KioskCredential` is not reachable from the
 dashboard in any role, at any risk level. It remains an operator-run CLI with
-its own audit trail. This *removes* threat T4 (§19) rather than mitigating it:
+its own audit trail. This _removes_ threat T4 (§19) rather than mitigating it:
 no compromised dashboard account of any level can reach customer documents by
 minting a device credential.
 
@@ -524,26 +525,26 @@ content.
 
 ### Role bundles
 
-| | Operator | Admin | Technical Admin |
-| --- | --- | --- | --- |
-| `dashboard.read`, `kiosk.read`, `session.read`, `print.read` | ✅ | ✅ | ✅ |
-| `document.metadata.read` | ✅ | ✅ | ✅ |
-| `document.retention.read` | ✅ | ✅ | ✅ |
-| `payment.read` | summary only | ✅ | ✅ |
-| `error.read` | operator view | admin view | technical view |
-| `incident.acknowledge` | ✅ | ✅ | ✅ |
-| `audit.read` | own actions | ✅ | ✅ |
-| `print.recovery.resolve` | ✅ own kiosks | ✅ | ✅ |
-| `refund.authorize` | ❌ | ✅ | ✅ |
-| `document.retention.retry` | ❌ | ✅ | ✅ |
-| `print.diagnostics.read` | ❌ | limited | ✅ |
-| `operator.manage` | ❌ | ✅ | ❌ |
-| `authenticator.manage` | own only | Operators + own | own only |
-| `change.propose` | ❌ | ❌ | ✅ |
-| `change.approve.technical` | ❌ | ❌ | ✅ (different identity) |
-| `change.approve.admin` | ❌ | ✅ | ❌ |
-| kiosk credentials | ❌ | ❌ | ❌ (not in dashboard at all) |
-| document contents | ❌ | ❌ | ❌ |
+|                                                              | Operator      | Admin           | Technical Admin              |
+| ------------------------------------------------------------ | ------------- | --------------- | ---------------------------- |
+| `dashboard.read`, `kiosk.read`, `session.read`, `print.read` | ✅            | ✅              | ✅                           |
+| `document.metadata.read`                                     | ✅            | ✅              | ✅                           |
+| `document.retention.read`                                    | ✅            | ✅              | ✅                           |
+| `payment.read`                                               | summary only  | ✅              | ✅                           |
+| `error.read`                                                 | operator view | admin view      | technical view               |
+| `incident.acknowledge`                                       | ✅            | ✅              | ✅                           |
+| `audit.read`                                                 | own actions   | ✅              | ✅                           |
+| `print.recovery.resolve`                                     | ✅ own kiosks | ✅              | ✅                           |
+| `refund.authorize`                                           | ❌            | ✅              | ✅                           |
+| `document.retention.retry`                                   | ❌            | ✅              | ✅                           |
+| `print.diagnostics.read`                                     | ❌            | limited         | ✅                           |
+| `operator.manage`                                            | ❌            | ✅              | ❌                           |
+| `authenticator.manage`                                       | own only      | Operators + own | own only                     |
+| `change.propose`                                             | ❌            | ❌              | ✅                           |
+| `change.approve.technical`                                   | ❌            | ❌              | ✅ (different identity)      |
+| `change.approve.admin`                                       | ❌            | ✅              | ❌                           |
+| kiosk credentials                                            | ❌            | ❌              | ❌ (not in dashboard at all) |
+| document contents                                            | ❌            | ❌              | ❌                           |
 
 Note the deliberate asymmetry: **Technical Admin cannot manage Operator
 accounts, and Admin cannot propose technical changes.** Neither role is a
@@ -572,7 +573,7 @@ of false observations that an Admin must still act on — not free money.
 
 Constraints on `print.recovery.resolve`, all enforced server-side:
 
-- **Strict eligibility.** Only a print job whose *current* state genuinely
+- **Strict eligibility.** Only a print job whose _current_ state genuinely
   qualifies, revalidated inside the transaction: the job's status, its
   payment's capture state, and its session's state are all re-read and checked
   at execution time. An Operator cannot force an arbitrary job into a recovery
@@ -615,8 +616,9 @@ moves money), `authenticator.manage`. Confirmation + mandatory reason + step-up
 WebAuthn + current-state revalidation + idempotency key + audit with
 before/after. Operator-held R2 is additionally kiosk-scoped.
 
-**R3 — serious production change.** Requires proposer + a *different* Technical
+**R3 — serious production change.** Requires proposer + a _different_ Technical
 Admin + an Admin. Allow-listed operations only:
+
 - publish a new `PricingRuleSet` version (money);
 - change a kiosk's `status` or `capabilities`;
 - adjust retention grace configuration.
@@ -701,24 +703,24 @@ Phase 2 to draw a sparkline nobody asked for would violate §3 of the brief.
 
 ## 19. Threat model
 
-| # | Threat | Existing control | Gap |
-| --- | --- | --- | --- |
-| T1 | Attacker gets an Operator account | — | No human auth exists yet |
-| T2 | Attacker gets an Admin account | — | Must not reach documents (§12) |
-| T3 | Attacker gets one Technical Admin account | — | Must not execute R3 alone |
-| T4 | Admin reads customer documents via credential issuance | — | **Closed by decision**: no kiosk-credential capability exists in the dashboard at any level (§14) |
-| T5 | Admin rewrites audit history | none | `audit_events` lacks an update/delete trigger |
-| T6 | Dashboard queries degrade printing | good indexes | Needs bounded queries, timeouts, read-only role |
-| T7 | Session fixation / CSRF on admin UI | cookie plugin present | No human session or CSRF token yet |
-| T8 | IDOR across kiosks/sessions | kiosk-scoped queries today | Admin queries are cross-tenant by design; needs explicit object-level checks + non-enumerable IDs. Operator R2 is kiosk-scoped (§14.1) |
-| T9 | Forced session reopen / free print | domain state machine + DB triggers | Already impossible; keep it that way |
-| T10 | Retention disabled to preserve documents | policy is pure and shared | Retention config must be R3, never editable inline |
-| T11 | Stolen admin session replayed | — | Short TTL + server-side revocation + step-up WebAuthn on every R2/R3, so a stolen cookie alone cannot act |
-| T12 | Compromised admin *backend* | split S3 creds, DB triggers, processor isolation | Triggers and IAM still bound the damage; secrets remain the weak point until a secret manager exists |
-| T13 | Compromised Operator manufactures refund obligations | — | **Closed by decision**: `print.recovery.resolve` records observations only; `refund.authorize` is Admin+ (§14.1) |
-| T14 | Operator forces arbitrary jobs into recovery | — | Server-side eligibility revalidation inside the transaction; the operation resolves jobs already eligible, it cannot create the state (§14.1) |
-| T15 | Phishing of an admin authenticator | — | WebAuthn origin binding makes credential phishing ineffective; this is the main reason the owner chose it over a shared-secret factor |
-| T16 | Loss of all authenticators for a privileged account | — | Multiple mandatory enrollments + documented sealed break-glass that can only enroll, never act (§13.1) |
+| #   | Threat                                                 | Existing control                                 | Gap                                                                                                                                           |
+| --- | ------------------------------------------------------ | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| T1  | Attacker gets an Operator account                      | —                                                | No human auth exists yet                                                                                                                      |
+| T2  | Attacker gets an Admin account                         | —                                                | Must not reach documents (§12)                                                                                                                |
+| T3  | Attacker gets one Technical Admin account              | —                                                | Must not execute R3 alone                                                                                                                     |
+| T4  | Admin reads customer documents via credential issuance | —                                                | **Closed by decision**: no kiosk-credential capability exists in the dashboard at any level (§14)                                             |
+| T5  | Admin rewrites audit history                           | none                                             | `audit_events` lacks an update/delete trigger                                                                                                 |
+| T6  | Dashboard queries degrade printing                     | good indexes                                     | Needs bounded queries, timeouts, read-only role                                                                                               |
+| T7  | Session fixation / CSRF on admin UI                    | cookie plugin present                            | No human session or CSRF token yet                                                                                                            |
+| T8  | IDOR across kiosks/sessions                            | kiosk-scoped queries today                       | Admin queries are cross-tenant by design; needs explicit object-level checks + non-enumerable IDs. Operator R2 is kiosk-scoped (§14.1)        |
+| T9  | Forced session reopen / free print                     | domain state machine + DB triggers               | Already impossible; keep it that way                                                                                                          |
+| T10 | Retention disabled to preserve documents               | policy is pure and shared                        | Retention config must be R3, never editable inline                                                                                            |
+| T11 | Stolen admin session replayed                          | —                                                | Short TTL + server-side revocation + step-up WebAuthn on every R2/R3, so a stolen cookie alone cannot act                                     |
+| T12 | Compromised admin _backend_                            | split S3 creds, DB triggers, processor isolation | Triggers and IAM still bound the damage; secrets remain the weak point until a secret manager exists                                          |
+| T13 | Compromised Operator manufactures refund obligations   | —                                                | **Closed by decision**: `print.recovery.resolve` records observations only; `refund.authorize` is Admin+ (§14.1)                              |
+| T14 | Operator forces arbitrary jobs into recovery           | —                                                | Server-side eligibility revalidation inside the transaction; the operation resolves jobs already eligible, it cannot create the state (§14.1) |
+| T15 | Phishing of an admin authenticator                     | —                                                | WebAuthn origin binding makes credential phishing ineffective; this is the main reason the owner chose it over a shared-secret factor         |
+| T16 | Loss of all authenticators for a privileged account    | —                                                | Multiple mandatory enrollments + documented sealed break-glass that can only enroll, never act (§13.1)                                        |
 
 ---
 
@@ -741,6 +743,7 @@ loopback-only agent; the processor's lack of egress; the no-filename-in-keys
 rule.
 
 **Genuinely missing, in priority order:**
+
 1. Human identity, sessions, and MFA — nothing exists.
 2. Capability model and enforcement for humans.
 3. Audit immutability (`audit_events` update/delete trigger) and a human actor
@@ -796,14 +799,14 @@ derivatives, cleanup runs, pricing, or any trigger other than the audit one.
 
 ## 22. Proposed phase plan
 
-| Phase | Content | Gate |
-| --- | --- | --- |
-| 1 | WebAuthn registration + assertion, multi-authenticator enrollment, revocation/replacement, break-glass procedure, revocable sessions, step-up assertion, capability enforcement, Operator kiosk scoping, audit immutability, admin UI shell, protected routes, permission tests. No read of production data yet beyond a health page. | Boundary tests pass; no privileged account has fewer than two authenticators; break-glass documented |
-| 2 | Read-only observability: overview, kiosks, sessions + timeline, printing, payments, documents/retention, error centre. Bounded queries, read-only DB role. | No mutations exist |
-| 3 | Operator tools: R1 incident acknowledge; constrained R2 `print.recovery.resolve` with kiosk scoping, eligibility revalidation, step-up. | Operator cannot move money, cannot act outside assigned kiosks, cannot force a job into recovery |
-| 4 | Admin tools: `refund.authorize` (money), `document.retention.retry`, Operator and authenticator management. | Reason + before/after audited; refund path separate from Operator observation path |
-| 5 | Technical Admin + R3 approval workflow: propose → validate → dry run → second Technical Admin → Admin → revalidate → execute → verify. | Self-approval and amendment tests pass |
-| 6 | Hardening: authz matrix review per endpoint, IDOR, CSRF, XSS, secret leakage, query performance, audit integrity. | Security test suite green |
+| Phase | Content                                                                                                                                                                                                                                                                                                                               | Gate                                                                                                 |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 1     | WebAuthn registration + assertion, multi-authenticator enrollment, revocation/replacement, break-glass procedure, revocable sessions, step-up assertion, capability enforcement, Operator kiosk scoping, audit immutability, admin UI shell, protected routes, permission tests. No read of production data yet beyond a health page. | Boundary tests pass; no privileged account has fewer than two authenticators; break-glass documented |
+| 2     | Read-only observability: overview, kiosks, sessions + timeline, printing, payments, documents/retention, error centre. Bounded queries, read-only DB role.                                                                                                                                                                            | No mutations exist                                                                                   |
+| 3     | Operator tools: R1 incident acknowledge; constrained R2 `print.recovery.resolve` with kiosk scoping, eligibility revalidation, step-up.                                                                                                                                                                                               | Operator cannot move money, cannot act outside assigned kiosks, cannot force a job into recovery     |
+| 4     | Admin tools: `refund.authorize` (money), `document.retention.retry`, Operator and authenticator management.                                                                                                                                                                                                                           | Reason + before/after audited; refund path separate from Operator observation path                   |
+| 5     | Technical Admin + R3 approval workflow: propose → validate → dry run → second Technical Admin → Admin → revalidate → execute → verify.                                                                                                                                                                                                | Self-approval and amendment tests pass                                                               |
+| 6     | Hardening: authz matrix review per endpoint, IDOR, CSRF, XSS, secret leakage, query performance, audit integrity.                                                                                                                                                                                                                     | Security test suite green                                                                            |
 
 ---
 
@@ -813,7 +816,7 @@ All three Phase 0 gating questions are answered. Recorded here because each
 changed the design away from my initial recommendation.
 
 **23.1 Authentication — self-hosted WebAuthn/FIDO2 only.**
-I had recommended managed OIDC. The owner rejected it to avoid a *runtime*
+I had recommended managed OIDC. The owner rejected it to avoid a _runtime_
 dependency on a third-party IdP, and resolved my stated objection to
 WebAuthn-only — no recovery path for a lost key — by requiring multiple
 enrolled authenticators per privileged account plus an explicit break-glass

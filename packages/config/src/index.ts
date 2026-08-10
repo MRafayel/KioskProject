@@ -28,6 +28,36 @@ const environmentSchema = z
     KIOSK_ORIGIN: z.string().url().default("http://localhost:5173"),
     UPLOAD_ORIGIN: z.string().url().default("http://localhost:5174"),
     PUBLIC_UPLOAD_ORIGIN: z.string().url().default("http://localhost:5174"),
+    // The admin control plane. It is a separate origin from the kiosk and the
+    // phone so a flaw in either customer-facing surface cannot reach an admin
+    // session cookie.
+    ADMIN_ORIGIN: z.string().url().default("http://localhost:5175"),
+    // The WebAuthn relying party. RP_ID is the registrable domain credentials
+    // are bound to; a credential enrolled against one RP_ID cannot be used
+    // against another, which is what makes admin credentials unphishable.
+    ADMIN_WEBAUTHN_RP_ID: z.string().min(1).max(253).default("localhost"),
+    ADMIN_WEBAUTHN_RP_NAME: z.string().min(1).max(64).default("Printing Kiosk Admin"),
+    ADMIN_SESSION_PEPPER: z
+      .string()
+      .min(32)
+      .default("development-only-admin-session-pepper-change-me"),
+    // Break-glass digests are peppered separately, so a leak of the session
+    // pepper cannot be used to forge a recovery credential.
+    ADMIN_BREAK_GLASS_PEPPER: z
+      .string()
+      .min(32)
+      .default("development-only-admin-break-glass-pepper-change-me"),
+    // Admin sessions are short. An unattended browser in a back office is a
+    // realistic threat, and nothing in this plane is worth a long window.
+    ADMIN_SESSION_IDLE_MINUTES: z.coerce.number().int().min(2).max(120).default(15),
+    ADMIN_SESSION_ABSOLUTE_MINUTES: z.coerce.number().int().min(5).max(720).default(240),
+    // How long a WebAuthn assertion authorises R2 actions. Short enough that it
+    // covers one deliberate task, not a whole shift.
+    ADMIN_STEP_UP_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
+    // A ceremony a person is actively completing. Long enough to find a key in
+    // a drawer, short enough that an abandoned challenge does not linger.
+    ADMIN_CHALLENGE_TTL_SECONDS: z.coerce.number().int().min(30).max(600).default(180),
+    ADMIN_BREAK_GLASS_TTL_HOURS: z.coerce.number().int().min(1).max(8_760).default(2_160),
     DATABASE_URL: z
       .string()
       .min(1)
@@ -364,6 +394,40 @@ const environmentSchema = z
       });
     }
 
+    // A credential is bound to the relying party identifier, and the browser
+    // refuses a ceremony whose RP ID is not a suffix of the page's own domain.
+    // Catching the mismatch at startup turns an unusable login into a failure
+    // that names the setting.
+    const adminHost = new URL(environment.ADMIN_ORIGIN).hostname;
+    const relyingPartyId = environment.ADMIN_WEBAUTHN_RP_ID;
+    if (adminHost !== relyingPartyId && !adminHost.endsWith("." + relyingPartyId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_WEBAUTHN_RP_ID"],
+        message: "ADMIN_WEBAUTHN_RP_ID must equal the ADMIN_ORIGIN host or be a parent domain of it"
+      });
+    }
+
+    // An admin session that could outlive its absolute window would be ended by
+    // a sweep rather than by policy.
+    if (environment.ADMIN_SESSION_IDLE_MINUTES > environment.ADMIN_SESSION_ABSOLUTE_MINUTES) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_SESSION_IDLE_MINUTES"],
+        message: "ADMIN_SESSION_IDLE_MINUTES must not exceed ADMIN_SESSION_ABSOLUTE_MINUTES"
+      });
+    }
+
+    // Step-up exists so a sensitive action needs a fresh touch. If it outlived
+    // the session's own idle window it would never be the binding constraint.
+    if (environment.ADMIN_STEP_UP_TTL_SECONDS > environment.ADMIN_SESSION_IDLE_MINUTES * 60) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_STEP_UP_TTL_SECONDS"],
+        message: "ADMIN_STEP_UP_TTL_SECONDS must not exceed the admin idle session window"
+      });
+    }
+
     // Every consumer parses this value as a URL. Rejecting it here keeps a typo
     // a fast startup failure instead of a later HTTP 500 from readiness.
     if (!isPostgresConnectionUrl(environment.DATABASE_URL)) {
@@ -404,7 +468,9 @@ const environmentSchema = z
       ["S3_WORKER_SECRET_ACCESS_KEY", environment.S3_WORKER_SECRET_ACCESS_KEY],
       ["DOCUMENT_PROCESSOR_AUTH_TOKEN", environment.DOCUMENT_PROCESSOR_AUTH_TOKEN],
       ["DEV_KIOSK_API_KEY", environment.DEV_KIOSK_API_KEY],
-      ["PAYMENT_WEBHOOK_SECRET", environment.PAYMENT_WEBHOOK_SECRET]
+      ["PAYMENT_WEBHOOK_SECRET", environment.PAYMENT_WEBHOOK_SECRET],
+      ["ADMIN_SESSION_PEPPER", environment.ADMIN_SESSION_PEPPER],
+      ["ADMIN_BREAK_GLASS_PEPPER", environment.ADMIN_BREAK_GLASS_PEPPER]
     ] as const;
 
     for (const [name, value] of productionSecrets) {
@@ -429,7 +495,9 @@ const environmentSchema = z
       environment.S3_WORKER_SECRET_ACCESS_KEY,
       environment.DOCUMENT_PROCESSOR_AUTH_TOKEN,
       environment.DEV_KIOSK_API_KEY,
-      environment.PAYMENT_WEBHOOK_SECRET
+      environment.PAYMENT_WEBHOOK_SECRET,
+      environment.ADMIN_SESSION_PEPPER,
+      environment.ADMIN_BREAK_GLASS_PEPPER
     ];
     if (new Set(independentSecrets).size !== independentSecrets.length) {
       context.addIssue({
@@ -485,7 +553,10 @@ const environmentSchema = z
       ["API_ORIGIN", environment.API_ORIGIN, true],
       ["KIOSK_ORIGIN", environment.KIOSK_ORIGIN, true],
       ["UPLOAD_ORIGIN", environment.UPLOAD_ORIGIN, false],
-      ["PUBLIC_UPLOAD_ORIGIN", environment.PUBLIC_UPLOAD_ORIGIN, false]
+      ["PUBLIC_UPLOAD_ORIGIN", environment.PUBLIC_UPLOAD_ORIGIN, false],
+      // No loopback exception. WebAuthn requires a secure context, and the
+      // `__Host-` session cookie the admin plane sets requires HTTPS.
+      ["ADMIN_ORIGIN", environment.ADMIN_ORIGIN, false]
     ] as const;
 
     for (const [name, value, allowHttpLoopback] of productionOrigins) {

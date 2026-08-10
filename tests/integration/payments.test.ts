@@ -1206,7 +1206,8 @@ async function cleanFixtures(): Promise<void> {
   await database.uploadedFile.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.sessionUploadGrant.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.mobileClient.deleteMany({ where: { sessionId: { in: sessionIds } } });
-  await database.auditEvent.deleteMany({ where: { sessionId: { in: sessionIds } } });
+  // Audit events are append-only and are deliberately not cleaned up: the
+  // log outlives the rows it describes, which is the point of it.
   await database.idempotencyRecord.deleteMany({
     where: { actorId: { in: clients.map((client) => client.id) } }
   });

@@ -12,6 +12,8 @@ import { createDatabaseClient, type PrismaClient } from "@printing-kiosk/databas
 import type { RetentionPolicy } from "@printing-kiosk/domain";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { registerAdminRoutes } from "./modules/admin/routes.js";
+import { AdminService } from "./modules/admin/service.js";
 import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
 import { registerDocumentPreviewRoutes } from "./modules/files/previews.js";
@@ -122,7 +124,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   });
   await app.register(cors, {
     credentials: true,
-    origin: [options.environment.KIOSK_ORIGIN, options.environment.UPLOAD_ORIGIN]
+    origin: [
+      options.environment.KIOSK_ORIGIN,
+      options.environment.UPLOAD_ORIGIN,
+      // The admin plane is its own origin, so a flaw in either customer-facing
+      // surface cannot reach an admin session cookie.
+      options.environment.ADMIN_ORIGIN
+    ]
   });
 
   const ownsDatabase = !options.database;
@@ -484,6 +492,33 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     clock,
     kioskAuthentication,
     maxPreviewBytes: options.environment.MAX_PREVIEW_FILE_BYTES
+  });
+
+  const stepUpTtlMilliseconds = options.environment.ADMIN_STEP_UP_TTL_SECONDS * 1_000;
+  const adminService = new AdminService({
+    database,
+    clock,
+    random,
+    relyingParty: {
+      id: options.environment.ADMIN_WEBAUTHN_RP_ID,
+      name: options.environment.ADMIN_WEBAUTHN_RP_NAME,
+      origin: options.environment.ADMIN_ORIGIN
+    },
+    sessionPepper: options.environment.ADMIN_SESSION_PEPPER,
+    breakGlassPepper: options.environment.ADMIN_BREAK_GLASS_PEPPER,
+    idleTtlMilliseconds: options.environment.ADMIN_SESSION_IDLE_MINUTES * 60_000,
+    absoluteTtlMilliseconds: options.environment.ADMIN_SESSION_ABSOLUTE_MINUTES * 60_000,
+    challengeTtlMilliseconds: options.environment.ADMIN_CHALLENGE_TTL_SECONDS * 1_000
+  });
+  registerAdminRoutes(app, {
+    admin: adminService,
+    clock,
+    stepUpTtlMilliseconds,
+    idleTtlMilliseconds: options.environment.ADMIN_SESSION_IDLE_MINUTES * 60_000,
+    // The `__Host-` cookie prefix requires Secure. Configuration validation
+    // already refuses a non-HTTPS admin origin in production, so this is only
+    // ever false for local development.
+    secureCookies: new URL(options.environment.ADMIN_ORIGIN).protocol === "https:"
   });
 
   return app;

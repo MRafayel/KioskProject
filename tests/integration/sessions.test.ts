@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 
 import { DeleteObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
@@ -141,7 +141,8 @@ async function cleanIntegrationSessions(): Promise<void> {
   await database.uploadedFile.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.sessionUploadGrant.deleteMany({ where: { sessionId: { in: sessionIds } } });
   await database.mobileClient.deleteMany({ where: { sessionId: { in: sessionIds } } });
-  await database.auditEvent.deleteMany({ where: { kioskId: environment.DEV_KIOSK_ID } });
+  // Audit events are append-only and are deliberately not cleaned up: the
+  // log outlives the rows it describes, which is the point of it.
   await database.printSession.deleteMany({ where: { kioskId: environment.DEV_KIOSK_ID } });
   await database.idempotencyRecord.deleteMany({
     where: {
@@ -298,8 +299,11 @@ describe.sequential("authoritative print sessions", () => {
       await database.sessionUploadGrant.count({ where: { sessionId: created.session.id } })
     ).toBe(1);
     expect(
+      // Scoped to this session rather than the kiosk: the audit log is
+      // append-only and outlives individual test runs, so a kiosk-wide count
+      // would measure history rather than this operation.
       await database.auditEvent.count({
-        where: { kioskId: environment.DEV_KIOSK_ID, action: "session.created" }
+        where: { sessionId: created.session.id, action: "session.created" }
       })
     ).toBe(1);
     expect(
@@ -1707,13 +1711,21 @@ class MutableClock {
 }
 
 class CollisionThenUniqueRandom {
+  /**
+   * Identifiers must be unique per run. Audit events are append-only, so a row
+   * this source wrote in an earlier run is still there and a fixed identifier
+   * would collide on its primary key. Only the token sequence is what this test
+   * actually pins down, so the counter moves into the low bits and the rest is
+   * drawn once per instance.
+   */
+  private readonly runPrefix = randomUUID().replaceAll("-", "").slice(0, 8);
   private uuidCounter = 0;
   private tokenCounter = 0;
   private integerCounter = 0;
 
   public uuid(_now: Date): string {
     this.uuidCounter += 1;
-    return `01900000-0000-7000-8000-${String(this.uuidCounter).padStart(12, "0")}`;
+    return `01900000-0000-7000-8000-${this.runPrefix}${String(this.uuidCounter).padStart(4, "0")}`;
   }
 
   public token(bytes: number): string {
