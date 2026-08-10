@@ -50,6 +50,10 @@ export const READABLE_TABLES = Object.freeze({
   pricing_rules: "*",
   audit_events: "*",
   admin_kiosk_scopes: "*",
+  // An operator's own account of what they saw at a tray. Every column is
+  // meant to be read back — including `reason`, which is free text written by
+  // somebody the system never shows a filename to.
+  print_job_recovery_resolutions: "*",
 
   // `selections` carries per-document content digests until retention strips
   // them. The priced aggregates beside it answer every operational question.

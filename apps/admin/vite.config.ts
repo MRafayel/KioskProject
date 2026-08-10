@@ -17,16 +17,51 @@ const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
  * Framing is already refused outright, and the two together mean a compromised
  * page elsewhere cannot borrow an operator's security key.
  */
-const securityHeaders = {
-  "Content-Security-Policy":
-    "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'",
-  "Cross-Origin-Opener-Policy": "same-origin",
-  "Permissions-Policy":
-    "camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-get=(self), publickey-credentials-create=(self)",
-  "Referrer-Policy": "no-referrer",
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY"
-} as const;
+export function securityHeaders(styleSource: string) {
+  return {
+    "Content-Security-Policy": [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "object-src 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "script-src 'self'",
+      `style-src ${styleSource}`,
+      "img-src 'self' data:",
+      "connect-src 'self'"
+    ].join("; "),
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy":
+      "camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-get=(self), publickey-credentials-create=(self)",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY"
+  } as const;
+}
+
+/**
+ * What ships. A built bundle extracts every rule into a real stylesheet loaded
+ * with `<link rel="stylesheet">`, so `'self'` covers it and no inline style is
+ * needed anywhere. `vite preview` serves that same output, which makes preview
+ * the honest rehearsal of the deployed policy.
+ */
+export const PRODUCTION_STYLE_SOURCE = "'self'";
+
+/**
+ * The development server cannot meet that, and fails in a way worth naming.
+ *
+ * Vite serves each stylesheet as a JavaScript module that injects a `<style>`
+ * element at runtime. `style-src 'self'` refuses an inline style block, so
+ * under the production policy the dev server delivers the CSS, the browser
+ * discards it, and every screen renders as unstyled HTML — no request fails, no
+ * error surfaces outside the console, and the dashboard simply looks broken.
+ *
+ * This is the one place development diverges from production, and it is
+ * confined to styles: `script-src` stays `'self'` here, which is why HMR is off
+ * above. A stylesheet cannot exfiltrate a session or call the API, and the
+ * server is bound to loopback, so the exposure is a local page styling itself.
+ */
+export const DEVELOPMENT_STYLE_SOURCE = "'self' 'unsafe-inline'";
 
 export default defineConfig(({ command, isPreview, mode }) => {
   const environment = loadEnv(mode, repositoryRoot, "");
@@ -61,7 +96,7 @@ export default defineConfig(({ command, isPreview, mode }) => {
       // development exercise the same strict script policy as production.
       hmr: false,
       ...(https ? { https } : {}),
-      headers: securityHeaders,
+      headers: securityHeaders(DEVELOPMENT_STYLE_SOURCE),
       // Same-origin proxy, so the admin session cookie is first-party and the
       // strict `connect-src 'self'` policy above holds.
       proxy: {
@@ -72,7 +107,7 @@ export default defineConfig(({ command, isPreview, mode }) => {
       }
     },
     preview: {
-      headers: securityHeaders
+      headers: securityHeaders(PRODUCTION_STYLE_SOURCE)
     }
   };
 });

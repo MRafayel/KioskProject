@@ -156,7 +156,34 @@ describe("loadEnvironment", () => {
     ).toThrow(/must not equal DATABASE_URL/u);
   });
 
-  it("holds the control plane's connection to the same transport rule as the application's", () => {
+  it("requires the control plane's write role to differ from both other roles", () => {
+    // The write pool is the only connection in the system that can append to
+    // the audit log. Sharing the application role would hand it every grant the
+    // print path holds — including the ability to issue a refund — and sharing
+    // the read role would fail every operator action at runtime rather than at
+    // deploy time, because that role cannot write at all.
+    expect(() =>
+      loadEnvironment({ ...secureProductionEnvironment, ADMIN_WRITE_DATABASE_URL: undefined })
+    ).toThrow(/ADMIN_WRITE_DATABASE_URL/u);
+
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        DATABASE_URL: "postgresql://app:secret@localhost:5432/kiosk",
+        ADMIN_WRITE_DATABASE_URL: "postgresql://app:secret@localhost:5432/kiosk"
+      })
+    ).toThrow(/must differ from both/u);
+
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        ADMIN_READ_DATABASE_URL: "postgresql://shared:secret@localhost:5432/kiosk",
+        ADMIN_WRITE_DATABASE_URL: "postgresql://shared:secret@localhost:5432/kiosk"
+      })
+    ).toThrow(/must differ from both/u);
+  });
+
+  it("holds the control plane's connections to the same transport rule as the application's", () => {
     expect(() =>
       loadEnvironment({
         ...secureProductionEnvironment,
@@ -164,23 +191,35 @@ describe("loadEnvironment", () => {
       })
     ).toThrow(/sslmode=verify-full/u);
 
-    expect(
+    expect(() =>
       loadEnvironment({
         ...secureProductionEnvironment,
-        DATABASE_URL: "postgresql://app:secret@db.example.test:5432/kiosk?sslmode=verify-full",
-        ADMIN_READ_DATABASE_URL:
-          "postgresql://reader:secret@db.example.test:5432/kiosk?sslmode=verify-full"
-      }).ADMIN_READ_DATABASE_URL
-    ).toContain("reader");
+        ADMIN_WRITE_DATABASE_URL: "postgresql://writer:secret@db.example.test:5432/kiosk"
+      })
+    ).toThrow(/sslmode=verify-full/u);
+
+    const loaded = loadEnvironment({
+      ...secureProductionEnvironment,
+      DATABASE_URL: "postgresql://app:secret@db.example.test:5432/kiosk?sslmode=verify-full",
+      ADMIN_READ_DATABASE_URL:
+        "postgresql://reader:secret@db.example.test:5432/kiosk?sslmode=verify-full",
+      ADMIN_WRITE_DATABASE_URL:
+        "postgresql://writer:secret@db.example.test:5432/kiosk?sslmode=verify-full"
+    });
+    expect(loaded.ADMIN_READ_DATABASE_URL).toContain("reader");
+    expect(loaded.ADMIN_WRITE_DATABASE_URL).toContain("writer");
   });
 
-  it("keeps the control plane's database password out of worker and kiosk processes", () => {
+  it("keeps the control plane's database passwords out of worker and kiosk processes", () => {
     const environment = loadNonAdminEnvironment({
       ...process.env,
-      ADMIN_READ_DATABASE_URL: "postgresql://reader:secret@localhost:5432/kiosk"
+      ADMIN_READ_DATABASE_URL: "postgresql://reader:secret@localhost:5432/kiosk",
+      ADMIN_WRITE_DATABASE_URL: "postgresql://writer:hunter2@localhost:5432/kiosk"
     });
     expect(environment).not.toHaveProperty("ADMIN_READ_DATABASE_URL");
+    expect(environment).not.toHaveProperty("ADMIN_WRITE_DATABASE_URL");
     expect(JSON.stringify(environment)).not.toContain("secret@localhost");
+    expect(JSON.stringify(environment)).not.toContain("hunter2");
   });
 
   it("requires isolated, digest-pinned processing and malware scanning in production", () => {
@@ -730,6 +769,7 @@ const secureProductionEnvironment = {
   // The control plane connects as its own least-privilege role, never as the
   // application's. Loopback here so the transport rule is exercised separately.
   ADMIN_READ_DATABASE_URL: "postgresql://printing_kiosk_admin_reader:secret@localhost:5432/kiosk",
+  ADMIN_WRITE_DATABASE_URL: "postgresql://printing_kiosk_admin_writer:secret@localhost:5432/kiosk",
   MALWARE_SCANNER_ADAPTER: "clamav",
   S3_SERVER_SIDE_ENCRYPTION: "AES256"
 } as const;

@@ -172,6 +172,7 @@ describe("response contracts refuse document content", () => {
       failedAt: null,
       manifestRedactedAt: null,
       overdue: false,
+      recoveryResolved: false,
       jobManifest: { documents: [{ objectKey: "normalized/v1/secret" }] }
     });
 

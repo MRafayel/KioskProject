@@ -33,7 +33,8 @@
     "db:verify-phase8-upgrade": "pnpm --filter @printing-kiosk/database verify:phase8-upgrade",
     "db:verify-phase9-upgrade": "pnpm --filter @printing-kiosk/database verify:phase9-upgrade",
     "db:admin": "pnpm --filter @printing-kiosk/database admin",
-    "db:admin-reader": "pnpm --filter @printing-kiosk/database admin-reader"
+    "db:admin-reader": "pnpm --filter @printing-kiosk/database admin-reader",
+    "db:admin-writer": "pnpm --filter @printing-kiosk/database admin-writer"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "3.1086.0",

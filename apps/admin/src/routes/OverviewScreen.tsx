@@ -95,6 +95,16 @@ export function OverviewScreen() {
           <Counters
             items={[
               { label: "Open", value: overview.printing.open },
+              // The number a person works through, next to the number that
+              // reached this state. Watching the first go down is what makes
+              // recording an observation feel like doing the job rather than
+              // filing a form.
+              {
+                label: "Waiting for a person",
+                value: overview.printing.recoveryUnresolved,
+                alarming: true
+              },
+              { label: "In recovery", value: overview.printing.recoveryRequired },
               { label: "Overdue", value: overview.printing.overdue, alarming: true },
               { label: "Failed (24h)", value: overview.printing.failedRecently, alarming: true },
               {

@@ -19,19 +19,23 @@ import {
   hasCapability
 } from "@printing-kiosk/admin-access";
 
-import { ApiError } from "../sessions/errors.js";
 import { authorizeAdmin, type AdminAuthorizationDependencies } from "./authorize.js";
-import { adminRateKey, sendNoStore } from "./http.js";
+import {
+  adminNamespacedRateKey,
+  adminNotFound,
+  createAdminAccountThrottle,
+  sendNoStore
+} from "./http.js";
 import { scopeForAdmin, type AdminObservabilityService } from "./observability.js";
 
 /**
  * The control plane's operational read surface.
  *
- * Every route in this file is a GET, and that is the phase's acceptance gate:
- * there is nothing here that changes anything. The routes that will — resolving
- * a recovery, authorising a refund — arrive in later phases with step-up,
- * eligibility revalidation and their own audit events, and keeping them out of
- * this file means the read surface can be reviewed as a closed set.
+ * Every route in this file is a GET, and it stays that way. The two routes that
+ * change something live in `operations-routes.ts` with their step-up,
+ * eligibility revalidation and audit events, and keeping them apart means each
+ * surface can be reviewed as a closed set — this one for what it discloses,
+ * that one for what it permits.
  *
  * Each route names one capability and hands the result to a schema that decides
  * what may leave the process. Where a role difference changes the *content*
@@ -104,11 +108,19 @@ const auditQuerySchema = z.object({
  * A ceiling on reads, keyed by source address.
  *
  * Generous, because a dashboard polls and several operators can share one
- * address behind a router. Its job is not to shape normal use but to stop a
- * stolen session from paging the entire operational history out of the system
- * faster than anybody notices.
+ * address behind a router. Its job is not to shape normal use but to stop an
+ * anonymous flood from reaching the database at all.
  */
 const READ_RATE = { max: 300, timeWindow: "1 minute" } as const;
+
+/**
+ * And a ceiling per signed-in session, applied once the session is known.
+ *
+ * The address limit cannot tell a stolen session from the colleagues sharing
+ * its network. This one can: paging the entire operational history out of the
+ * system costs the account doing it, not the office it is sitting in.
+ */
+const READ_ACCOUNT_RATE = { max: 240, timeWindow: "1 minute" } as const;
 
 export interface AdminObservabilityRouteDependencies extends AdminAuthorizationDependencies {
   observability: AdminObservabilityService;
@@ -118,16 +130,24 @@ export function registerAdminObservabilityRoutes(
   app: FastifyInstance,
   dependencies: AdminObservabilityRouteDependencies
 ): void {
-  const readRoute = { config: { rateLimit: { ...READ_RATE, keyGenerator: adminRateKey } } };
+  const readRoute = {
+    config: { rateLimit: { ...READ_RATE, keyGenerator: adminNamespacedRateKey("read") } }
+  };
+  const throttleAccount = createAdminAccountThrottle(app, {
+    namespace: "read",
+    ...READ_ACCOUNT_RATE
+  });
 
   app.get("/v1/admin/overview", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "dashboard.read");
+    await throttleAccount(request, admin.sessionId);
     const overview = await dependencies.observability.overview(scopeForAdmin(admin));
     return sendNoStore(reply, adminOverviewResponseSchema.parse(overview));
   });
 
   app.get("/v1/admin/kiosks", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "kiosk.read");
+    await throttleAccount(request, admin.sessionId);
     const kiosks = await dependencies.observability.kiosks(scopeForAdmin(admin));
     return sendNoStore(reply, adminKiosksResponseSchema.parse(kiosks));
   });
@@ -138,6 +158,7 @@ export function registerAdminObservabilityRoutes(
 
   app.get("/v1/admin/sessions", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "session.read");
+    await throttleAccount(request, admin.sessionId);
     const query = sessionsQuerySchema.parse(request.query ?? {});
     const sessions = await dependencies.observability.sessions(scopeForAdmin(admin), query);
     return sendNoStore(reply, adminSessionsResponseSchema.parse(sessions));
@@ -145,14 +166,16 @@ export function registerAdminObservabilityRoutes(
 
   app.get("/v1/admin/sessions/:sessionId", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "session.read");
+    await throttleAccount(request, admin.sessionId);
     const params = sessionParams.parse(request.params);
     const detail = await dependencies.observability.session(scopeForAdmin(admin), params.sessionId);
-    if (!detail) throw notFound();
+    if (!detail) throw adminNotFound();
     return sendNoStore(reply, adminSessionDetailResponseSchema.parse(detail));
   });
 
   app.get("/v1/admin/sessions/:sessionId/timeline", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "session.timeline.read");
+    await throttleAccount(request, admin.sessionId);
     const params = sessionParams.parse(request.params);
     const query = z.object({ cursor: cursorSchema }).parse(request.query ?? {});
     const timeline = await dependencies.observability.timeline(
@@ -160,7 +183,7 @@ export function registerAdminObservabilityRoutes(
       params.sessionId,
       query.cursor
     );
-    if (!timeline) throw notFound();
+    if (!timeline) throw adminNotFound();
     return sendNoStore(reply, adminTimelineResponseSchema.parse(timeline));
   });
 
@@ -174,12 +197,13 @@ export function registerAdminObservabilityRoutes(
    */
   app.get("/v1/admin/sessions/:sessionId/documents", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "document.metadata.read");
+    await throttleAccount(request, admin.sessionId);
     const params = sessionParams.parse(request.params);
     const documents = await dependencies.observability.documents(
       scopeForAdmin(admin),
       params.sessionId
     );
-    if (!documents) throw notFound();
+    if (!documents) throw adminNotFound();
     return sendNoStore(reply, adminDocumentsResponseSchema.parse(documents));
   });
 
@@ -189,6 +213,7 @@ export function registerAdminObservabilityRoutes(
 
   app.get("/v1/admin/print-jobs", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "print.read");
+    await throttleAccount(request, admin.sessionId);
     const query = printJobsQuerySchema.parse(request.query ?? {});
     const jobs = await dependencies.observability.printJobs(scopeForAdmin(admin), query);
     return sendNoStore(reply, adminPrintJobsResponseSchema.parse(jobs));
@@ -196,6 +221,7 @@ export function registerAdminObservabilityRoutes(
 
   app.get("/v1/admin/print-jobs/:printJobId", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "print.read");
+    await throttleAccount(request, admin.sessionId);
     const params = printJobParams.parse(request.params);
     // The device ledger is a deeper answer than the job's own state, so it is
     // the deeper capability. Everyone who may see the job still sees whether it
@@ -205,7 +231,7 @@ export function registerAdminObservabilityRoutes(
       params.printJobId,
       hasCapability(admin.role, "print.diagnostics.read")
     );
-    if (!detail) throw notFound();
+    if (!detail) throw adminNotFound();
     return sendNoStore(reply, adminPrintJobDetailResponseSchema.parse(detail));
   });
 
@@ -215,6 +241,7 @@ export function registerAdminObservabilityRoutes(
 
   app.get("/v1/admin/payments", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "payment.read");
+    await throttleAccount(request, admin.sessionId);
     const query = paymentsQuerySchema.parse(request.query ?? {});
     const payments = await dependencies.observability.payments(scopeForAdmin(admin), {
       ...query,
@@ -235,6 +262,7 @@ export function registerAdminObservabilityRoutes(
    */
   app.get("/v1/admin/refunds", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "refund.obligation.read");
+    await throttleAccount(request, admin.sessionId);
     const query = refundsQuerySchema.parse(request.query ?? {});
     const refunds = await dependencies.observability.refunds(scopeForAdmin(admin), {
       unsettledOnly: query.unsettledOnly === "true",
@@ -256,6 +284,7 @@ export function registerAdminObservabilityRoutes(
    */
   app.get("/v1/admin/retention", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "document.retention.read");
+    await throttleAccount(request, admin.sessionId);
     const query = retentionQuerySchema.parse(request.query ?? {});
     const retention = await dependencies.observability.retention(scopeForAdmin(admin), {
       problemsOnly: query.problemsOnly === "true",
@@ -270,6 +299,7 @@ export function registerAdminObservabilityRoutes(
 
   app.get("/v1/admin/errors", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "error.read");
+    await throttleAccount(request, admin.sessionId);
     const query = errorsQuerySchema.parse(request.query ?? {});
     const errors = await dependencies.observability.errors(scopeForAdmin(admin), query.windowHours);
     return sendNoStore(reply, adminErrorsResponseSchema.parse(errors));
@@ -286,6 +316,7 @@ export function registerAdminObservabilityRoutes(
    */
   app.get("/v1/admin/audit", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "audit.read.self");
+    await throttleAccount(request, admin.sessionId);
     const query = auditQuerySchema.parse(request.query ?? {});
     const audit = await dependencies.observability.audit(scopeForAdmin(admin), {
       selfActorId: hasCapability(admin.role, "audit.read") ? null : admin.adminUserId,
@@ -296,14 +327,4 @@ export function registerAdminObservabilityRoutes(
     });
     return sendNoStore(reply, adminAuditResponseSchema.parse(audit));
   });
-}
-
-/**
- * One refusal for "does not exist" and "not yours".
- *
- * The two must be indistinguishable, so the message is written for the case
- * where the record is genuinely absent and used for both.
- */
-function notFound(): ApiError {
-  return new ApiError(404, "ADMIN_NOT_FOUND", "No such record.");
 }

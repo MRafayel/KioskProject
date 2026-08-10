@@ -394,6 +394,7 @@ function overview() {
       open: 1,
       overdue: 0,
       recoveryRequired: 0,
+      recoveryUnresolved: 0,
       failedRecently: 0,
       unconfirmedRecently: 0
     },

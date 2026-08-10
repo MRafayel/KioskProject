@@ -75,6 +75,114 @@ export async function assertAdminReadClientIsReadOnly(client: PrismaClient): Pro
   }
 }
 
+/**
+ * Startup options pinned onto the connection the control plane writes through.
+ *
+ * Not read-only — this is the pool that appends an operator's observation and
+ * the audit event beside it. Everything else is tighter than the read pool
+ * rather than looser: an admin action is one short transaction over a handful
+ * of rows, so a statement running longer than two seconds is a fault, and a
+ * lock held against the print path is the fault that matters most.
+ *
+ * `scripts/admin-writer.mjs` pins the same settings onto the writer role.
+ */
+const ADMIN_WRITE_CONNECTION_OPTIONS = [
+  "-c statement_timeout=2000",
+  "-c idle_in_transaction_session_timeout=5000",
+  "-c lock_timeout=1000"
+].join(" ");
+
+/**
+ * The pool the admin control plane's few operator actions write through.
+ *
+ * A third pool, deliberately. It is not the read pool, which cannot write at
+ * all, and it is not the application pool, which can write everything: an admin
+ * action must not inherit the print path's authority just because it happens to
+ * run in the same process.
+ *
+ * In production this points at `printing_kiosk_admin_writer`, which holds
+ * INSERT on two tables and no UPDATE or DELETE anywhere. That is what makes
+ * "an Operator cannot move money" and "nobody can rewrite what a device
+ * reported" properties of the database rather than of this repository.
+ */
+export function createAdminWriteClient(connectionString: string): PrismaClient {
+  const adapter = new PrismaPg({
+    connectionString,
+    options: ADMIN_WRITE_CONNECTION_OPTIONS,
+    // Admin actions are rare and deliberate. Two connections is generous.
+    max: 2
+  });
+  return new PrismaClient({ adapter });
+}
+
+/**
+ * The privileges the admin write pool must not hold, checked at boot.
+ *
+ * Each entry is a way the control plane could cause harm that no capability in
+ * the model authorises: paying money out, rewriting what a printer reported,
+ * reopening a settled session, issuing work to a device, or erasing the log of
+ * having done any of it.
+ */
+const FORBIDDEN_ADMIN_WRITE_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.refunds", "INSERT"],
+  ["public.refunds", "UPDATE"],
+  ["public.refunds", "DELETE"],
+  ["public.payments", "INSERT"],
+  ["public.payments", "UPDATE"],
+  ["public.print_jobs", "UPDATE"],
+  ["public.print_jobs", "DELETE"],
+  ["public.print_sessions", "UPDATE"],
+  ["public.agent_commands", "INSERT"],
+  ["public.uploaded_files", "UPDATE"],
+  ["public.audit_events", "UPDATE"],
+  ["public.audit_events", "DELETE"],
+  ["public.print_job_recovery_resolutions", "UPDATE"],
+  ["public.print_job_recovery_resolutions", "DELETE"]
+];
+
+/** The two grants without which no admin action can complete. */
+const REQUIRED_ADMIN_WRITE_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.print_job_recovery_resolutions", "INSERT"],
+  ["public.audit_events", "INSERT"]
+];
+
+/**
+ * Prove the admin write pool is as small as it claims before serving anything.
+ *
+ * `pnpm db:admin-writer verify` checks the same thing far more thoroughly, but
+ * it checks a database an operator ran it against. This checks the connection
+ * this process actually opened, which is the one that matters: a deployment
+ * pointed at the wrong URL passes every offline check and fails here.
+ *
+ * Only called when a dedicated write role is configured. A development
+ * environment sharing the application role would fail every assertion below,
+ * and refusing to start over that would be an outage in exchange for nothing.
+ */
+export async function assertAdminWriteClientIsAppendOnly(client: PrismaClient): Promise<void> {
+  const held = async (table: string, privilege: string): Promise<boolean> => {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_table_privilege(${table}, ${privilege}) AS held`;
+    return rows[0]?.held === true;
+  };
+
+  const violations: string[] = [];
+  for (const [table, privilege] of FORBIDDEN_ADMIN_WRITE_PRIVILEGES) {
+    if (await held(table, privilege)) violations.push(`holds ${privilege} on ${table}`);
+  }
+  for (const [table, privilege] of REQUIRED_ADMIN_WRITE_PRIVILEGES) {
+    if (!(await held(table, privilege))) violations.push(`lacks ${privilege} on ${table}`);
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      "The admin write connection does not match the control plane's privilege policy. " +
+        `Refusing to start: ${violations.join("; ")}. ` +
+        "Check ADMIN_WRITE_DATABASE_URL and rerun `pnpm db:admin-writer verify`."
+    );
+  }
+}
+
 export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };
 export { invalidateSessionPricing } from "./session-pricing.js";

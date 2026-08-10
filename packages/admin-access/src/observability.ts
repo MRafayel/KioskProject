@@ -205,6 +205,13 @@ export const adminOverviewResponseSchema = z.object({
     recoveryRequired: z.number().int().nonnegative()
   }),
   printing: z.object({
+    /**
+     * Print jobs waiting for a person, and how many of those nobody has
+     * answered yet. The worklist counts the second one: an operator who
+     * records what they saw should watch the number they are working through
+     * go down, or they will stop believing it.
+     */
+    recoveryUnresolved: z.number().int().nonnegative(),
     open: z.number().int().nonnegative(),
     overdue: z.number().int().nonnegative(),
     recoveryRequired: z.number().int().nonnegative(),
@@ -434,7 +441,16 @@ export const adminPrintJobSchema = z.object({
   failedAt: isoTimestamp.nullable(),
   /** When the per-document manifest was replaced by a count. */
   manifestRedactedAt: isoTimestamp.nullable(),
-  overdue: z.boolean()
+  overdue: z.boolean(),
+  /**
+   * Whether a person has already said what happened to this print.
+   *
+   * On the list rather than only on the detail, because the question an
+   * operator is answering when they open this screen is "which of these still
+   * needs me", and making them click into each one to find out is how a
+   * worklist stops being used.
+   */
+  recoveryResolved: z.boolean()
 });
 
 export const adminPrintJobsResponseSchema = z.object({
@@ -465,11 +481,58 @@ export const adminAgentCommandSchema = z.object({
   completedAt: isoTimestamp.nullable()
 });
 
+/**
+ * What a person can report having seen at the tray.
+ *
+ * `RECOVERY_REQUIRED` exists because the device could not prove whether paper
+ * came out. These are the four honest answers to that question, and the fourth
+ * matters as much as the others: an operator who cannot tell must be able to
+ * say so, because the alternative is that they guess, and a recorded guess is
+ * worse than a recorded uncertainty.
+ *
+ * Deliberately absent: anything that would mark the print a success. What the
+ * device reported stays as reported — `print_jobs` triggers refuse to rewrite
+ * it, and the role that writes an observation holds no UPDATE on that table.
+ */
+export const RECOVERY_OUTCOMES = [
+  /** The customer has usable pages. Nothing is owed. */
+  "DELIVERED",
+  /** Some usable pages, not the whole job. An Admin decides what is owed. */
+  "PARTIALLY_DELIVERED",
+  /** Nothing usable came out. Money looks owed. */
+  "NOT_DELIVERED",
+  /** Nobody could establish what happened. Recorded as exactly that. */
+  "UNRESOLVABLE"
+] as const;
+
+export type RecoveryOutcome = (typeof RECOVERY_OUTCOMES)[number];
+
+/**
+ * One operator's account of a print the system would not settle.
+ *
+ * Append-only and one per job, so this is the whole of what any person has
+ * said about it. `refundSuggested` is a note for whoever holds
+ * `refund.authorize`; nothing here has moved any money.
+ */
+export const adminRecoveryResolutionSchema = z.object({
+  printJobId: z.string().uuid(),
+  outcome: z.enum(RECOVERY_OUTCOMES),
+  reason: z.string().max(280),
+  refundSuggested: z.boolean(),
+  observedSheets: z.number().int().nullable(),
+  resolvedByAdminUserId: z.string().uuid(),
+  resolvedByDisplayName: z.string().max(120).nullable(),
+  resolvedByRole: z.string().max(24),
+  resolvedAt: isoTimestamp
+});
+
 export const adminPrintJobDetailResponseSchema = z.object({
   job: adminPrintJobSchema,
   /** Present only for a caller holding `print.diagnostics.read`. */
   ledger: z.array(adminPrintJobEventSchema).nullable(),
-  command: adminAgentCommandSchema.nullable()
+  command: adminAgentCommandSchema.nullable(),
+  /** What a person recorded seeing, if anybody has yet. */
+  resolution: adminRecoveryResolutionSchema.nullable()
 });
 
 // ---------------------------------------------------------------------------
@@ -600,7 +663,21 @@ export const adminErrorGroupSchema = z.object({
   code: operationalCode,
   kioskId: z.string().max(64).nullable(),
   count: z.number().int().positive(),
-  lastSeenAt: isoTimestamp
+  lastSeenAt: isoTimestamp,
+  /**
+   * Who most recently said they were looking at this, if anybody.
+   *
+   * Deliberately not a resolution: acknowledging changes nothing and clears
+   * nothing. It exists so two operators do not both walk to the same kiosk, and
+   * it ages out with the window it was made in.
+   */
+  acknowledgedAt: isoTimestamp.nullable(),
+  acknowledgedBy: z.string().max(120).nullable(),
+  /**
+   * True when the failure has happened again since it was acknowledged, which
+   * is the case where "somebody is on it" stops being reassuring.
+   */
+  recurredSinceAcknowledgement: z.boolean()
 });
 
 export const adminErrorsResponseSchema = z.object({
@@ -659,6 +736,7 @@ export type AdminTimelineResponse = z.infer<typeof adminTimelineResponseSchema>;
 export type AdminDocumentsResponse = z.infer<typeof adminDocumentsResponseSchema>;
 export type AdminPrintJobsResponse = z.infer<typeof adminPrintJobsResponseSchema>;
 export type AdminPrintJobDetailResponse = z.infer<typeof adminPrintJobDetailResponseSchema>;
+export type AdminRecoveryResolution = z.infer<typeof adminRecoveryResolutionSchema>;
 export type AdminPaymentsResponse = z.infer<typeof adminPaymentsResponseSchema>;
 export type AdminRefundsResponse = z.infer<typeof adminRefundsResponseSchema>;
 export type AdminRetentionResponse = z.infer<typeof adminRetentionResponseSchema>;

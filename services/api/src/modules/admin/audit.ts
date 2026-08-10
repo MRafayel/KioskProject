@@ -44,7 +44,23 @@ const ALLOWED_METADATA_KEYS = new Set([
   "failureCode",
   "previousState",
   "resultingState",
-  "stepUpFresh"
+  "stepUpFresh",
+  // Operator actions. The device's own numbers are recorded beside the human's
+  // on purpose: the gap between what a printer reported and what a person
+  // counted at the tray is the whole reason a recovery observation exists, and
+  // an audit row that carried only one of them would settle nothing later.
+  "printJobId",
+  // Not "outcome": an audit row already has an `outcome` column meaning
+  // SUCCESS or DENIED, and two fields of that name on one screen is how a log
+  // gets misread during the incident it was kept for.
+  "recoveryOutcome",
+  "refundSuggested",
+  "observedSheets",
+  "sheetsProduced",
+  "confidence",
+  // Acknowledging a group in the error centre.
+  "subsystem",
+  "incidentCode"
 ]);
 
 export type AdminAuditMetadataValue = string | number | boolean | null;
@@ -60,10 +76,21 @@ export interface WriteAdminAuditEventInput {
   metadata?: Readonly<Record<string, AdminAuditMetadataValue>> | undefined;
 }
 
-type TransactionClient = PrismaClient | Prisma.TransactionClient;
+/**
+ * Anything that can append one audit row.
+ *
+ * Structural rather than the full client, because the callers are deliberately
+ * narrow types: an admin action's connection exposes two tables and the `create`
+ * method, and requiring a `PrismaClient` here would have forced it to widen the
+ * one place where being narrow is the point.
+ */
+export type AuditEventWriter =
+  | PrismaClient
+  | Prisma.TransactionClient
+  | { auditEvent: Pick<PrismaClient["auditEvent"], "create"> };
 
 export async function writeAdminAuditEvent(
-  client: TransactionClient,
+  client: AuditEventWriter,
   input: WriteAdminAuditEventInput
 ): Promise<void> {
   await client.auditEvent.create({

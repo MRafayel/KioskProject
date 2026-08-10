@@ -72,6 +72,7 @@ export {
   KIOSK_DEGRADED_WINDOW_MILLISECONDS,
   KIOSK_LIVENESS,
   KIOSK_ONLINE_WINDOW_MILLISECONDS,
+  RECOVERY_OUTCOMES,
   adminAgentCommandSchema,
   adminAttentionItemSchema,
   adminAuditEntrySchema,
@@ -89,6 +90,7 @@ export {
   adminPrintJobEventSchema,
   adminPrintJobSchema,
   adminPrintJobsResponseSchema,
+  adminRecoveryResolutionSchema,
   adminRefundSchema,
   adminRefundsResponseSchema,
   adminRetentionResponseSchema,
@@ -123,7 +125,25 @@ export {
   type AdminRetentionResponse,
   type AdminSessionDetailResponse,
   type AdminSessionSummary,
+  type AdminRecoveryResolution,
   type AdminSessionsResponse,
   type AdminTimelineResponse,
-  type KioskLiveness
+  type KioskLiveness,
+  type RecoveryOutcome
 } from "./observability.js";
+
+export {
+  acknowledgeIncidentBodySchema,
+  acknowledgeIncidentResponseSchema,
+  adminIncidentAcknowledgementSchema,
+  incidentKey,
+  recoveryReasonSchema,
+  resolveRecoveryBodySchema,
+  resolveRecoveryResponseSchema,
+  suggestsRefund,
+  type AcknowledgeIncidentBody,
+  type AcknowledgeIncidentResponse,
+  type AdminIncidentAcknowledgement,
+  type ResolveRecoveryBody,
+  type ResolveRecoveryResponse
+} from "./operations.js";

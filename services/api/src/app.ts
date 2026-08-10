@@ -10,7 +10,9 @@ import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 import {
   assertAdminReadClientIsReadOnly,
+  assertAdminWriteClientIsAppendOnly,
   createAdminReadClient,
+  createAdminWriteClient,
   createDatabaseClient,
   type PrismaClient
 } from "@printing-kiosk/database";
@@ -19,9 +21,12 @@ import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
 import { AdminObservabilityService } from "./modules/admin/observability.js";
 import { registerAdminObservabilityRoutes } from "./modules/admin/observability-routes.js";
+import { AdminOperationsService } from "./modules/admin/operations.js";
+import { registerAdminOperationsRoutes } from "./modules/admin/operations-routes.js";
 import { asAdminReadDatabase } from "./modules/admin/read-database.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { AdminService } from "./modules/admin/service.js";
+import { asAdminWriteDatabase } from "./modules/admin/write-database.js";
 import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
 import { registerDocumentPreviewRoutes } from "./modules/files/previews.js";
@@ -71,6 +76,12 @@ export interface BuildAppOptions {
    * prove the privilege matrix is what actually stops a query.
    */
   adminReadDatabase?: PrismaClient;
+  /**
+   * The control plane's write pool. Supplied only by a test that wants to point
+   * it somewhere specific — for instance at the least-privilege writer role, to
+   * prove that the absence of a grant is what stops a refund, not the code.
+   */
+  adminWriteDatabase?: PrismaClient;
   clock?: Clock;
   random?: RandomSource;
   objectStore?: ObjectStore;
@@ -551,13 +562,60 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     });
   }
 
+  const observability = new AdminObservabilityService({
+    database: asAdminReadDatabase(adminReadDatabase),
+    clock
+  });
+
   registerAdminObservabilityRoutes(app, {
     admin: adminService,
     clock,
     stepUpTtlMilliseconds,
-    observability: new AdminObservabilityService({
-      database: asAdminReadDatabase(adminReadDatabase),
-      clock
+    observability
+  });
+
+  // A third pool, and the only one in this process that can write on an
+  // operator's behalf. In production it connects as a role holding INSERT on
+  // two tables and no UPDATE or DELETE on anything — which is what makes "an
+  // Operator cannot move money" and "nobody can rewrite what a device reported"
+  // properties of the database rather than of the code above it.
+  const adminWriteDatabase =
+    options.adminWriteDatabase ??
+    createAdminWriteClient(
+      options.environment.ADMIN_WRITE_DATABASE_URL ?? options.environment.DATABASE_URL
+    );
+  const ownsAdminWriteDatabase = !options.adminWriteDatabase;
+
+  // Only assert when a dedicated role is actually configured. A development
+  // environment sharing the application role would fail every check below, and
+  // refusing to start over that would be an outage in exchange for nothing —
+  // so it gets a warning it can act on instead. Production configuration
+  // requires the role, so production always asserts.
+  if (options.environment.ADMIN_WRITE_DATABASE_URL) {
+    await assertAdminWriteClientIsAppendOnly(adminWriteDatabase);
+  } else {
+    app.log.warn(
+      "ADMIN_WRITE_DATABASE_URL is not set: admin actions will run on the application role. " +
+        "The application still refuses everything it should, but the database is no longer " +
+        "the thing enforcing it. Provision the role with `pnpm db:admin-writer provision`."
+    );
+  }
+
+  if (ownsAdminWriteDatabase) {
+    app.addHook("onClose", async () => {
+      await adminWriteDatabase.$disconnect();
+    });
+  }
+
+  registerAdminOperationsRoutes(app, {
+    admin: adminService,
+    clock,
+    stepUpTtlMilliseconds,
+    operations: new AdminOperationsService({
+      database: asAdminWriteDatabase(adminWriteDatabase),
+      observability,
+      clock,
+      random
     })
   });
 

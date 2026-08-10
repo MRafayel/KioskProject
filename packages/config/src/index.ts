@@ -75,6 +75,19 @@ const environmentSchema = z
       .min(1)
       .refine(isPostgresUrl, "ADMIN_READ_DATABASE_URL must be a valid PostgreSQL URL")
       .optional(),
+    // The connection the control plane's few operator actions write through, as
+    // the least-privilege writer role provisioned by `pnpm db:admin-writer
+    // provision`. That role holds INSERT on two tables and no UPDATE or DELETE
+    // anywhere, which is what stops a compromised admin backend from issuing a
+    // refund or rewriting what a printer reported. Production requires it.
+    // Development may leave it unset and share the application role — the
+    // application's own checks still apply, but the database stops enforcing
+    // them, so the API says so at boot.
+    ADMIN_WRITE_DATABASE_URL: z
+      .string()
+      .min(1)
+      .refine(isPostgresUrl, "ADMIN_WRITE_DATABASE_URL must be a valid PostgreSQL URL")
+      .optional(),
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
     OBJECT_STORAGE_DRIVER: z.literal("s3").default("s3"),
     S3_ENDPOINT: z.string().url().default("http://localhost:9000"),
@@ -502,6 +515,17 @@ const environmentSchema = z
       });
     }
 
+    if (
+      environment.ADMIN_WRITE_DATABASE_URL !== undefined &&
+      !isPostgresConnectionUrl(environment.ADMIN_WRITE_DATABASE_URL)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_WRITE_DATABASE_URL"],
+        message: "ADMIN_WRITE_DATABASE_URL must be a postgresql:// or postgres:// URL"
+      });
+    }
+
     if (environment.NODE_ENV !== "production") return;
 
     // Sharing the application role would give the control plane every grant the
@@ -517,6 +541,26 @@ const environmentSchema = z
         message:
           "ADMIN_READ_DATABASE_URL must be set in production and must not equal DATABASE_URL. " +
           "Provision the reader role with `pnpm db:admin-reader provision`."
+      });
+    }
+
+    // Three connections, three different sets of grants. The write role must
+    // differ from the application role for the obvious reason, and from the
+    // read role for a less obvious one: the read role cannot write at all, so
+    // pointing the write pool at it would fail every operator action at
+    // runtime rather than at deploy time.
+    if (
+      environment.ADMIN_WRITE_DATABASE_URL === undefined ||
+      environment.ADMIN_WRITE_DATABASE_URL === environment.DATABASE_URL ||
+      environment.ADMIN_WRITE_DATABASE_URL === environment.ADMIN_READ_DATABASE_URL
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_WRITE_DATABASE_URL"],
+        message:
+          "ADMIN_WRITE_DATABASE_URL must be set in production and must differ from both " +
+          "DATABASE_URL and ADMIN_READ_DATABASE_URL. " +
+          "Provision the writer role with `pnpm db:admin-writer provision`."
       });
     }
 
@@ -679,7 +723,11 @@ const environmentSchema = z
 
     // The control plane's connection carries the same data over the same
     // network, so it is held to the same transport rule as the application's.
-    for (const name of ["DATABASE_URL", "ADMIN_READ_DATABASE_URL"] as const) {
+    for (const name of [
+      "DATABASE_URL",
+      "ADMIN_READ_DATABASE_URL",
+      "ADMIN_WRITE_DATABASE_URL"
+    ] as const) {
       const value = environment[name];
       if (value === undefined) continue;
       const url = new URL(value);
@@ -762,9 +810,11 @@ const ADMIN_ENVIRONMENT_KEYS = [
   "ADMIN_STEP_UP_TTL_SECONDS",
   "ADMIN_CHALLENGE_TTL_SECONDS",
   "ADMIN_BREAK_GLASS_TTL_HOURS",
-  // A second database password. A worker or kiosk process has no admin panel
-  // to serve and therefore no reason to hold it.
-  "ADMIN_READ_DATABASE_URL"
+  // Two more database passwords. A worker or kiosk process has no admin panel
+  // to serve and therefore no reason to hold either — and the write one is the
+  // only credential in this system that can append to the audit log.
+  "ADMIN_READ_DATABASE_URL",
+  "ADMIN_WRITE_DATABASE_URL"
 ] as const;
 type AdminEnvironmentKey = (typeof ADMIN_ENVIRONMENT_KEYS)[number];
 const ADMIN_ENVIRONMENT_KEY_SET: ReadonlySet<string> = new Set(ADMIN_ENVIRONMENT_KEYS);
@@ -841,8 +891,11 @@ export function loadNonAdminEnvironment(
     ADMIN_CHALLENGE_TTL_SECONDS: "180",
     ADMIN_BREAK_GLASS_TTL_HOURS: "2160",
     // Loopback so the production transport rule does not demand TLS settings
-    // for a connection this process will never open.
-    ADMIN_READ_DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api"
+    // for connections this process will never open, and distinct from each
+    // other because production requires the three roles to differ.
+    ADMIN_READ_DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api",
+    ADMIN_WRITE_DATABASE_URL:
+      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-write"
   });
   return Object.fromEntries(
     Object.entries(parsed).filter(([name]) => !ADMIN_ENVIRONMENT_KEY_SET.has(name))

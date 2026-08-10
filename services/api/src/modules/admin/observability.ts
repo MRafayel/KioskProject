@@ -4,6 +4,7 @@ import {
   decodeAdminCursor,
   deriveAttention,
   encodeAdminCursor,
+  incidentKey,
   type AdminAttentionCode,
   type AdminAuditResponse,
   type AdminDocumentsResponse,
@@ -13,6 +14,7 @@ import {
   type AdminPaymentsResponse,
   type AdminPrintJobDetailResponse,
   type AdminPrintJobsResponse,
+  type AdminRecoveryResolution,
   type AdminRefundsResponse,
   type AdminRetentionResponse,
   type AdminSessionDetailResponse,
@@ -84,6 +86,12 @@ const RETENTION_OVERDUE_GRACE_MILLISECONDS = 900_000;
 const DEFAULT_ERROR_WINDOW_HOURS = 24;
 /** Enough distinct failures to see a pattern; not enough to be a data dump. */
 const MAX_ERROR_GROUPS = 60;
+/**
+ * A ceiling on the acknowledgements read back to annotate those groups. Well
+ * above the number of distinct groups, so the newest acknowledgement of every
+ * group that can be displayed is always among them.
+ */
+const MAX_ACKNOWLEDGEMENTS = 400;
 /** Distinct operator scopes are few; this only stops the map growing forever. */
 const MAX_CACHED_OVERVIEWS = 32;
 
@@ -91,6 +99,8 @@ const LIVE_SESSION_STATES = SESSION_STATES.filter((state) => !isTerminalSessionS
 const OPEN_PRINT_STATUSES = ["QUEUED", "DISPATCHED", "PRINTING"] as const;
 const OPEN_PAYMENT_STATUSES = ["PENDING", "AUTHORIZED"] as const;
 const ACTIVE_CLEANUP_STATUSES = ["PENDING", "IN_PROGRESS", "DEAD_LETTER"] as const;
+/** Agent command states that mean something went wrong, rather than finished. */
+const FAILED_COMMAND_STATUSES = ["FAILED", "EXPIRED"] as const;
 
 interface CachedOverview {
   computedAt: number;
@@ -149,7 +159,9 @@ export class AdminObservabilityService {
       overdueRetention,
       paymentStatuses,
       expiredPayments,
-      unsettledRefunds
+      unsettledRefunds,
+      recoveryJobs,
+      unresolvedRecoveryJobs
     ] = await Promise.all([
       // Few rows and every field is needed to classify liveness, so this is one
       // query rather than five counts.
@@ -240,6 +252,16 @@ export class AdminObservabilityService {
           ...viaSession,
           completedAt: null
         }
+      }),
+      this.options.database.printJob.count({
+        where: { ...kioskScope, status: "RECOVERY_REQUIRED" }
+      }),
+      // The worklist counts this one rather than the total. An operator who
+      // records what they saw has to watch the number they are working through
+      // go down, or they stop believing it — and a queue that never shrinks is
+      // one people learn to scroll past.
+      this.options.database.printJob.count({
+        where: { ...kioskScope, status: "RECOVERY_REQUIRED", recoveryResolution: { is: null } }
       })
     ]);
 
@@ -276,7 +298,7 @@ export class AdminObservabilityService {
     const attention: Partial<Record<AdminAttentionCode, number>> = {
       RETENTION_DEAD_LETTERED: deadLettered,
       RETENTION_OVERDUE: overdueRetention,
-      PRINT_RECOVERY_REQUIRED: recoveryRequired,
+      PRINT_RECOVERY_REQUIRED: unresolvedRecoveryJobs,
       REFUND_UNSETTLED: unsettledRefunds,
       PRINT_OVERDUE: overduePrints,
       DOCUMENT_PROCESSING_FAILED: failedDocuments,
@@ -298,7 +320,10 @@ export class AdminObservabilityService {
       printing: {
         open: openPrints,
         overdue: overduePrints,
-        recoveryRequired,
+        // Print jobs, not sessions. A session reaches RECOVERY_REQUIRED because
+        // its job did, but it is the job a person acts on.
+        recoveryRequired: recoveryJobs,
+        recoveryUnresolved: unresolvedRecoveryJobs,
         failedRecently: failedPrints,
         unconfirmedRecently: unconfirmedPrints
       },
@@ -773,7 +798,7 @@ export class AdminObservabilityService {
     });
     if (!job) return null;
 
-    const [ledger, command] = await Promise.all([
+    const [ledger, command, resolution] = await Promise.all([
       includeDiagnostics
         ? this.options.database.printJobEvent.findMany({
             where: { printJobId },
@@ -806,11 +831,42 @@ export class AdminObservabilityService {
           resultCode: true,
           completedAt: true
         }
+      }),
+      // What a person recorded seeing, and who they are. Available to everyone
+      // who can see the job: an observation is the answer to the question the
+      // job is asking, so withholding it would leave the screen looking
+      // unanswered while somebody had already answered it.
+      this.options.database.printJobRecoveryResolution.findUnique({
+        where: { printJobId },
+        select: {
+          printJobId: true,
+          outcome: true,
+          reason: true,
+          refundSuggested: true,
+          observedSheets: true,
+          resolvedByAdminId: true,
+          resolvedByRole: true,
+          createdAt: true,
+          resolvedBy: { select: { displayName: true } }
+        }
       })
     ]);
 
     return {
       job: toPrintJob(job, now),
+      resolution: resolution
+        ? {
+            printJobId: resolution.printJobId,
+            outcome: resolution.outcome as AdminRecoveryResolution["outcome"],
+            reason: resolution.reason,
+            refundSuggested: resolution.refundSuggested,
+            observedSheets: resolution.observedSheets,
+            resolvedByAdminUserId: resolution.resolvedByAdminId,
+            resolvedByDisplayName: resolution.resolvedBy?.displayName ?? null,
+            resolvedByRole: resolution.resolvedByRole,
+            resolvedAt: resolution.createdAt.toISOString()
+          }
+        : null,
       ledger:
         ledger?.map((event) => ({
           sequence: event.sequence,
@@ -1109,9 +1165,19 @@ export class AdminObservabilityService {
           _count: true,
           _max: { updatedAt: true }
         }),
+        // A settled command records `failureCode ?? status` as its result, so a
+        // command that simply worked carries the result code `COMPLETED`.
+        // Without the status filter the error centre lists every successful
+        // print as a failure — which is noise on its own, and becomes worse
+        // once an operator can acknowledge a group as an incident.
         this.options.database.agentCommand.groupBy({
           by: ["kioskId", "resultCode"],
-          where: { ...direct, resultCode: { not: null }, updatedAt: { gte: since } },
+          where: {
+            ...direct,
+            status: { in: [...FAILED_COMMAND_STATUSES] },
+            resultCode: { not: null },
+            updatedAt: { gte: since }
+          },
           _count: true,
           _max: { updatedAt: true }
         }),
@@ -1129,7 +1195,7 @@ export class AdminObservabilityService {
         })
       ]);
 
-    const groups: AdminErrorsResponse["groups"] = [
+    const groups: UnacknowledgedErrorGroup[] = [
       ...toErrorGroups("UPLOAD", rejections, "rejectionCode", "updatedAt"),
       ...toErrorGroups("DOCUMENT_PROCESSING", processing, "processingErrorCode", "updatedAt"),
       ...toErrorGroups("PAYMENT", payments, "failureCode", "updatedAt"),
@@ -1141,12 +1207,73 @@ export class AdminObservabilityService {
       (left, right) => right.count - left.count || right.lastSeenAt.localeCompare(left.lastSeenAt)
     );
 
+    const shown = groups.slice(0, MAX_ERROR_GROUPS);
+    const acknowledgements = await this.acknowledgements(since);
+
     return {
       windowHours,
       scoped: scope.kioskIds !== null,
       truncated: groups.length > MAX_ERROR_GROUPS,
-      groups: groups.slice(0, MAX_ERROR_GROUPS)
+      groups: shown.map((group) => {
+        const acknowledgement = acknowledgements.get(incidentKey(group));
+        return {
+          ...group,
+          acknowledgedAt: acknowledgement?.at.toISOString() ?? null,
+          acknowledgedBy: acknowledgement?.by ?? null,
+          // The case where "somebody is on it" stops being reassuring: it has
+          // happened again since they said so.
+          recurredSinceAcknowledgement: acknowledgement
+            ? Date.parse(group.lastSeenAt) > acknowledgement.at.getTime()
+            : false
+        };
+      })
     };
+  }
+
+  /**
+   * The most recent acknowledgement of each failure group.
+   *
+   * Read from the audit log, because that is where an acknowledgement lives:
+   * it is a record that a named person saw something at a time, and there is no
+   * operational state behind it to keep in sync. Bounded by the same window as
+   * the groups themselves, so it cannot grow into an unbounded scan.
+   *
+   * Not scoped by kiosk. The groups it annotates are already scoped, and an
+   * acknowledgement carries no information beyond a colleague's name.
+   */
+  private async acknowledgements(since: Date): Promise<Map<string, { at: Date; by: string }>> {
+    const rows = await this.options.database.auditEvent.findMany({
+      where: {
+        action: "admin.incident.acknowledge",
+        outcome: "SUCCESS",
+        occurredAt: { gte: since }
+      },
+      orderBy: { occurredAt: "desc" },
+      take: MAX_ACKNOWLEDGEMENTS,
+      select: { occurredAt: true, actorId: true, kioskId: true, metadata: true }
+    });
+    if (rows.length === 0) return new Map();
+
+    const names = new Map<string, string>();
+    const people = await this.options.database.adminUser.findMany({
+      where: { id: { in: [...new Set(rows.map((row) => row.actorId))] } },
+      select: { id: true, displayName: true }
+    });
+    for (const person of people) names.set(person.id, person.displayName);
+
+    // Newest first, so the first entry for a key wins and later ones are the
+    // superseded acknowledgements of the same group.
+    const latest = new Map<string, { at: Date; by: string }>();
+    for (const row of rows) {
+      const { metadata } = projectAuditMetadata(row.metadata);
+      const subsystem = metadata.subsystem;
+      const code = metadata.incidentCode;
+      if (typeof subsystem !== "string" || typeof code !== "string") continue;
+      const key = incidentKey({ subsystem, code, kioskId: row.kioskId });
+      if (latest.has(key)) continue;
+      latest.set(key, { at: row.occurredAt, by: names.get(row.actorId) ?? row.actorId });
+    }
+    return latest;
   }
 
   // -------------------------------------------------------------------------
@@ -1267,7 +1394,10 @@ const PRINT_JOB_SELECT = {
   startedAt: true,
   completedAt: true,
   failedAt: true,
-  manifestRedactedAt: true
+  manifestRedactedAt: true,
+  // Presence only. The list needs to say "somebody has answered this" without
+  // pulling one person's free-text account of every job on the page.
+  recoveryResolution: { select: { printJobId: true } }
 } as const;
 
 interface PrintJobRow {
@@ -1289,6 +1419,7 @@ interface PrintJobRow {
   startedAt: Date | null;
   completedAt: Date | null;
   failedAt: Date | null;
+  recoveryResolution: { printJobId: string } | null;
   manifestRedactedAt: Date | null;
 }
 
@@ -1315,7 +1446,8 @@ function toPrintJob(job: PrintJobRow, now: Date): AdminPrintJobsResponse["items"
     manifestRedactedAt: job.manifestRedactedAt?.toISOString() ?? null,
     overdue:
       (OPEN_PRINT_STATUSES as readonly string[]).includes(job.status) &&
-      job.deadlineAt.getTime() < now.getTime()
+      job.deadlineAt.getTime() < now.getTime(),
+    recoveryResolved: job.recoveryResolution !== null
   };
 }
 
@@ -1409,8 +1541,8 @@ function toErrorGroups<TRow extends { _count: number }>(
   rows: readonly TRow[],
   codeField: string,
   timeField: string
-): AdminErrorsResponse["groups"] {
-  const groups: AdminErrorsResponse["groups"] = [];
+): UnacknowledgedErrorGroup[] {
+  const groups: UnacknowledgedErrorGroup[] = [];
   for (const row of rows) {
     const record = row as unknown as Record<string, unknown>;
     const code = record[codeField];
@@ -1427,3 +1559,9 @@ function toErrorGroups<TRow extends { _count: number }>(
   }
   return groups;
 }
+
+/** A group before anybody's acknowledgement has been matched to it. */
+type UnacknowledgedErrorGroup = Omit<
+  AdminErrorsResponse["groups"][number],
+  "acknowledgedAt" | "acknowledgedBy" | "recurredSinceAcknowledgement"
+>;

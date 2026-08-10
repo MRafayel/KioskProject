@@ -98,6 +98,7 @@ model PrintSession {
   outboxEvents            OutboxEvent[]
   sessionEvents           SessionEvent[]
   cleanupRun              CleanupRun?
+  recoveryResolutions     PrintJobRecoveryResolution[]
 
   @@index([kioskId, createdAt])
   @@index([state, idleExpiresAt])
@@ -409,12 +410,61 @@ model PrintJob {
   settings             PrintSettingRevision @relation(fields: [sessionId, settingsRevision], references: [sessionId, revision], onDelete: Restrict)
   events               PrintJobEvent[]
   commands             AgentCommand[]
+  recoveryResolution   PrintJobRecoveryResolution?
 
   @@unique([sessionId], map: "print_jobs_one_per_session_idx")
   @@index([status, availableAt])
   @@index([status, deadlineAt])
   @@index([kioskId, createdAt])
   @@map("print_jobs")
+}
+
+/// What a person saw at the tray for a job the system refused to guess about.
+///
+/// This is a new fact, not an edit. `print_jobs` records what the device
+/// reported and triggers refuse to rewrite it, so a human observation is stored
+/// beside that record rather than over it — which is also why an operator can
+/// never turn an ambiguous print into a success.
+///
+/// One per job, and append-only. A mistaken observation stays visible and is
+/// answered by a later decision with more authority, because an operator who
+/// could rewrite their own account of a paid print could hide one.
+///
+/// It cannot move money. `refundSuggested` is a note for whoever holds
+/// `refund.authorize`; the obligation itself lives in `refunds`, which the role
+/// that writes this table holds no privilege on at all.
+model PrintJobRecoveryResolution {
+  id                String       @id @db.Uuid
+  printJobId        String       @unique @map("print_job_id") @db.Uuid
+  /// Denormalized from the job and checked against it by a trigger. The read
+  /// side scopes an Operator by this column, so a wrong value here would be a
+  /// way to see another kiosk's work.
+  sessionId         String       @map("session_id") @db.Uuid
+  kioskId           String       @map("kiosk_id") @db.VarChar(64)
+  outcome           String       @db.VarChar(32)
+  /// Mandatory, operator-written, and bounded. It cannot name a document: the
+  /// people who write it are never shown a filename.
+  reason            String       @db.VarChar(280)
+  /// Derived from the outcome and pinned by a check constraint, so the two can
+  /// never disagree about whether a person thought money was owed.
+  refundSuggested   Boolean      @map("refund_suggested")
+  /// What the operator counted, when they could count. Null is a real answer.
+  observedSheets    Int?         @map("observed_sheets")
+  resolvedByAdminId String       @map("resolved_by_admin_id") @db.Uuid
+  /// The role held at the time. Roles change; evidence should not need a join
+  /// to a mutable row to be read years later.
+  resolvedByRole    String       @map("resolved_by_role") @db.VarChar(24)
+  /// Digest of the submitted outcome and reason. A repeat of the same request
+  /// replays the stored answer; a different one is refused rather than ignored.
+  requestDigest     String       @map("request_digest") @db.VarChar(64)
+  createdAt         DateTime     @default(now()) @map("created_at")
+  printJob          PrintJob     @relation(fields: [printJobId], references: [id], onDelete: Restrict)
+  session           PrintSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  resolvedBy        AdminUser    @relation(fields: [resolvedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([kioskId, createdAt])
+  @@index([refundSuggested, createdAt])
+  @@map("print_job_recovery_resolutions")
 }
 
 /// The operation ledger. Append-only: what the device said is evidence, and a
@@ -663,6 +713,7 @@ model AdminUser {
   kioskScopes    AdminKioskScope[]
   challenges     AdminWebAuthnChallenge[]
   breakGlass     AdminBreakGlassCredential[]
+  recoveryResolutions PrintJobRecoveryResolution[]
 
   @@index([status, role])
   @@map("admin_users")

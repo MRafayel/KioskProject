@@ -11,6 +11,7 @@ import {
   When
 } from "../features/observability/components.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
+import { RecordedResolution, RecoveryResolutionForm } from "./RecoveryResolutionForm.js";
 
 /**
  * Print jobs, and what the device actually said.
@@ -82,6 +83,16 @@ export function PrintingPanel() {
                 <td>
                   <StateBadge value={job.status} />
                   {job.overdue ? <span className="badge badge--bad">overdue</span> : null}
+                  {/* Which of these still needs a person is the question this
+                      screen exists to answer, so it is on the row rather than
+                      one click further in. */}
+                  {job.status === "RECOVERY_REQUIRED" ? (
+                    <span
+                      className={job.recoveryResolved ? "badge badge--good" : "badge badge--bad"}
+                    >
+                      {job.recoveryResolved ? "answered" : "needs a person"}
+                    </span>
+                  ) : null}
                 </td>
                 <td>
                   <StateBadge value={job.resultConfidence} />
@@ -106,6 +117,8 @@ export function PrintingPanel() {
         <PrintJobDetail
           printJobId={selected}
           canSeeDiagnostics={session.can("print.diagnostics.read")}
+          canResolveRecovery={session.can("print.recovery.resolve")}
+          onResolved={list.reload}
           onClose={() => setSelected(null)}
         />
       ) : null}
@@ -116,10 +129,14 @@ export function PrintingPanel() {
 function PrintJobDetail({
   printJobId,
   canSeeDiagnostics,
+  canResolveRecovery,
+  onResolved,
   onClose
 }: {
   printJobId: string;
   canSeeDiagnostics: boolean;
+  canResolveRecovery: boolean;
+  onResolved: () => void;
   onClose: () => void;
 }) {
   const load = useCallback(() => observabilityApi.printJob(printJobId), [printJobId]);
@@ -169,6 +186,30 @@ function PrintJobDetail({
               </dd>
             </div>
           </dl>
+
+          {detail.data.job.status === "RECOVERY_REQUIRED" || detail.data.resolution ? (
+            <>
+              <h3>Recovery</h3>
+              {detail.data.resolution ? (
+                <RecordedResolution resolution={detail.data.resolution} />
+              ) : canResolveRecovery ? (
+                <RecoveryResolutionForm
+                  printJobId={printJobId}
+                  deviceSheets={detail.data.job.sheetsProduced}
+                  paidSheets={detail.data.job.physicalSheets}
+                  onRecorded={() => {
+                    detail.reload();
+                    onResolved();
+                  }}
+                />
+              ) : (
+                <Empty>
+                  This print is waiting for somebody to say what happened at the tray. Recording
+                  that is an Operator capability your role does not hold.
+                </Empty>
+              )}
+            </>
+          ) : null}
 
           {detail.data.command ? (
             <>

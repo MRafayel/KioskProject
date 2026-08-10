@@ -689,6 +689,184 @@ code {
   cursor: help;
 }
 
+/* ---------------------------------------------------------------------------
+   Operator actions
+   ---------------------------------------------------------------------------
+   The only two places in the panel where somebody writes something down. Both
+   are styled as deliberate, slightly weighty things rather than as inline
+   controls: recording what happened to a paid print is permanent, attributed
+   and uneditable, and the form should feel like that before it is submitted
+   rather than only afterwards. */
+
+.resolve {
+  background: var(--card-soft);
+  border-radius: var(--radius-card);
+  padding: 1.25rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.resolve h3 {
+  margin: 0;
+}
+
+.resolve__device {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.resolve__outcomes {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.resolve__outcomes legend {
+  padding: 0;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* Every outcome is offered with the same visual weight, including "I cannot
+   tell". An option that looks like the lesser choice is one people stop
+   picking, and a guess recorded as an observation is worse than an honest
+   uncertainty. */
+.resolve__option {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
+}
+
+.resolve__option.is-chosen {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.resolve__option span {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.resolve__option small {
+  color: var(--ink-soft);
+}
+
+.resolve__field {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.resolve__field textarea,
+.resolve__field input {
+  font: inherit;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--ink);
+  resize: vertical;
+}
+
+.resolve__optional {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+/* The one thing an operator might otherwise assume. Stated where the choice is
+   made, not in a tooltip. */
+.resolve__money {
+  margin: 0;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-control);
+  padding: 0.7rem 0.9rem;
+  font-size: 0.9rem;
+}
+
+.resolve__error {
+  margin: 0;
+  color: var(--accent-strong);
+  font-size: 0.9rem;
+}
+
+.resolve__actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.resolution {
+  background: var(--card-soft);
+  border-radius: var(--radius-card);
+  padding: 1.1rem 1.25rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.resolution__outcome {
+  margin: 0;
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.resolution__reason {
+  margin: 0;
+  padding-left: 0.9rem;
+  border-left: 3px solid var(--line);
+  color: var(--ink);
+}
+
+.resolution__by {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.acknowledge {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.acknowledge input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--ink);
+  min-width: 14rem;
+}
+
+.acknowledge__by {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.acknowledge__error {
+  color: var(--accent-strong);
+  font-size: 0.85rem;
+}
+
 @media (max-width: 60rem) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
@@ -709,8 +887,13 @@ code {
 @media (max-width: 36rem) {
   .shell__header,
   .shell__alert,
-  .key-list__item {
+  .key-list__item,
+  .acknowledge {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .acknowledge input {
+    min-width: 0;
   }
 }

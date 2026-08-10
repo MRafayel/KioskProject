@@ -1,27 +1,26 @@
 #!/usr/bin/env node
 /**
- * Provision and verify the control plane's read-only database role.
+ * Provision and verify the control plane's write role.
  *
- * The admin panel reads production data. The guarantee that it can only read —
- * and only the columns an operator is meant to see — is worth more as a
- * property of the connection than as a property of the code, because code is
- * reviewed once and a role is enforced on every statement forever.
+ * The read role from Phase 2 answers "what can the dashboard see". This one
+ * answers the harder question: what can it *change*. The answer is two INSERTs
+ * and nothing else, and it is worth more as a property of the connection than
+ * as a property of the code, because code is reviewed once and a role is
+ * enforced on every statement forever.
  *
- * This is a command-line tool rather than a migration on purpose. Creating a
- * role needs privileges the application role does not have and should never
- * have; a managed PostgreSQL would fail the migration and block a deploy over a
+ * A command-line tool rather than a migration, for the same reason as its
+ * sibling: creating a role needs privileges the application role does not have
+ * and should never have, and a managed PostgreSQL would fail a deploy over a
  * grant. Provisioning a role is an operator action, like creating the database.
  *
  * Usage:
  *
- *   ADMIN_READ_DATABASE_PASSWORD=... node scripts/admin-reader.mjs provision
- *   node scripts/admin-reader.mjs verify
- *   node scripts/admin-reader.mjs disable
+ *   ADMIN_WRITE_DATABASE_PASSWORD=... node scripts/admin-writer.mjs provision
+ *   node scripts/admin-writer.mjs verify
+ *   node scripts/admin-writer.mjs disable
  *
- * Run `provision` again after every migration: a new table is denied by
- * default and a new column of a column-restricted table is invisible until it
- * is added to the matrix, which is the behaviour we want but only if somebody
- * notices. `verify` is what notices — run it in the deployment pipeline.
+ * Run `provision` again after every migration and `verify` in the deployment
+ * pipeline. A new table is forbidden by default and forces a decision here.
  */
 
 import { dirname } from "node:path";
@@ -33,22 +32,30 @@ import { config as loadDotenv } from "dotenv";
 import pg from "pg";
 
 import {
-  ADMIN_READER_ROLE,
-  DENIED_TABLES,
+  ADMIN_WRITER_ROLE,
+  FORBIDDEN_TABLES,
+  INSERTABLE_TABLES,
   READABLE_TABLES,
   ROLE_SETTINGS,
+  contradictoryTables,
   deniedColumnsFor,
   missingColumnsFor,
   staleTables,
   undecidedTables
-} from "./admin-reader-matrix.mjs";
+} from "./admin-writer-matrix.mjs";
 import { quoteIdentifier, quoteLiteral } from "./sql-identifiers.mjs";
 
 const packageDirectory = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const workspaceDirectory = dirname(dirname(packageDirectory));
 loadDotenv({ path: `${workspaceDirectory}/.env`, override: false, quiet: true });
 
-const WRITE_PRIVILEGES = ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"];
+/**
+ * The privileges that would let the control plane change or destroy something
+ * that already exists. INSERT is absent on purpose: it is the one this role is
+ * allowed to hold, and only on the two tables named by the matrix.
+ */
+const MUTATING_PRIVILEGES = ["UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"];
+const ALL_PRIVILEGES = ["SELECT", "INSERT", ...MUTATING_PRIVILEGES];
 
 const { positionals } = parseArgs({ allowPositionals: true, options: {} });
 const command = positionals[0];
@@ -73,7 +80,7 @@ try {
       await disable();
       break;
     default:
-      fail("Usage: admin-reader.mjs <provision|verify|disable>");
+      fail("Usage: admin-writer.mjs <provision|verify|disable>");
   }
 } finally {
   await client.end();
@@ -84,15 +91,15 @@ if (failures > 0) process.exit(1);
 /**
  * Create or update the role so that it matches the matrix exactly.
  *
- * Every grant is revoked first. That makes the operation a synchronisation
- * rather than an accumulation: a column removed from the allow-list actually
- * loses its grant instead of lingering because nobody thought to revoke it.
+ * Everything is revoked first, so this is a synchronisation rather than an
+ * accumulation: a grant removed from the matrix actually goes away instead of
+ * lingering because nobody thought to revoke it.
  */
 async function provision() {
-  const password = process.env.ADMIN_READ_DATABASE_PASSWORD;
+  const password = process.env.ADMIN_WRITE_DATABASE_PASSWORD;
   if (!password || password.length < 24) {
     fail(
-      "ADMIN_READ_DATABASE_PASSWORD must be set to at least 24 characters.\n" +
+      "ADMIN_WRITE_DATABASE_PASSWORD must be set to at least 24 characters.\n" +
         "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\""
     );
   }
@@ -101,12 +108,12 @@ async function provision() {
   assertPolicyMatchesSchema(existingTables);
 
   const databaseName = (await client.query("SELECT current_database() AS name")).rows[0].name;
-  const roleLiteral = quoteIdentifier(ADMIN_READER_ROLE);
+  const roleLiteral = quoteIdentifier(ADMIN_WRITER_ROLE);
 
   await client.query("BEGIN");
   try {
     const exists = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
-      ADMIN_READER_ROLE
+      ADMIN_WRITER_ROLE
     ]);
     if (exists.rowCount === 0) {
       await client.query(
@@ -123,8 +130,6 @@ async function provision() {
       );
     }
 
-    // Start from nothing every time, so this command is a statement of the
-    // whole policy rather than a patch on top of whatever ran before it.
     await client.query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${roleLiteral}`);
     await client.query(`REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${roleLiteral}`);
     await client.query(`REVOKE ALL ON SCHEMA public FROM ${roleLiteral}`);
@@ -148,6 +153,11 @@ async function provision() {
       }
     }
 
+    for (const table of Object.keys(INSERTABLE_TABLES)) {
+      if (!existingTables.includes(table)) continue;
+      await client.query(`GRANT INSERT ON public.${quoteIdentifier(table)} TO ${roleLiteral}`);
+    }
+
     // A table added by a future migration must not inherit a grant. Default
     // privileges are the one place PostgreSQL would hand one out silently.
     await client.query(
@@ -157,21 +167,21 @@ async function provision() {
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
-    fail(error instanceof Error ? error.message : "Could not provision the reader role.");
+    fail(error instanceof Error ? error.message : "Could not provision the writer role.");
   }
 
-  const readable = Object.keys(READABLE_TABLES).length;
-  const restricted = Object.values(READABLE_TABLES).filter((value) => value !== "*").length;
   process.stdout.write(
     [
-      `Provisioned ${ADMIN_READER_ROLE}.`,
-      `  readable tables : ${readable} (${restricted} column-restricted)`,
-      `  denied tables   : ${Object.keys(DENIED_TABLES).length}`,
+      `Provisioned ${ADMIN_WRITER_ROLE}.`,
+      `  may INSERT into : ${Object.keys(INSERTABLE_TABLES).join(", ")}`,
+      `  may SELECT from : ${Object.keys(READABLE_TABLES).length} tables`,
+      "  may UPDATE      : nothing",
+      "  may DELETE      : nothing",
       "",
-      "Point the API at it with ADMIN_READ_DATABASE_URL, using this role and",
-      "password. Do not reuse the application role's connection string.",
+      "Point the API at it with ADMIN_WRITE_DATABASE_URL, using this role and",
+      "password. Do not reuse the application or reader connection string.",
       "",
-      "Then confirm the result with: pnpm db:admin-reader verify",
+      "Then confirm the result with: pnpm db:admin-writer verify",
       ""
     ].join("\n")
   );
@@ -180,19 +190,46 @@ async function provision() {
 /**
  * Check the live database against the matrix.
  *
- * This is the gate. It answers "can the control plane read a customer's
- * filename" by asking PostgreSQL rather than by reading the application.
+ * This is the gate. It answers "can a compromised admin backend issue a refund"
+ * by asking PostgreSQL rather than by reading the application.
  */
 async function verify() {
   const exists = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
-    ADMIN_READER_ROLE
+    ADMIN_WRITER_ROLE
   ]);
   if (exists.rowCount === 0) {
-    fail(`Role ${ADMIN_READER_ROLE} does not exist. Run: pnpm db:admin-reader provision`);
+    fail(`Role ${ADMIN_WRITER_ROLE} does not exist. Run: pnpm db:admin-writer provision`);
   }
 
   const existingTables = await listTables();
   assertPolicyMatchesSchema(existingTables);
+
+  // The property that defines this role: no privilege that changes or destroys
+  // an existing row, anywhere in the database, whatever the matrix says.
+  for (const table of existingTables) {
+    for (const privilege of MUTATING_PRIVILEGES) {
+      if (await hasTablePrivilege(table, privilege)) {
+        report(`${table}: role holds ${privilege}; the control plane may only append`);
+      }
+    }
+  }
+
+  for (const table of Object.keys(INSERTABLE_TABLES)) {
+    if (!existingTables.includes(table)) continue;
+    if (!(await hasTablePrivilege(table, "INSERT"))) {
+      report(`${table}: expected INSERT, role has none`);
+    }
+  }
+
+  // INSERT anywhere else is the failure this list is really about: a row
+  // appearing in a table nobody authorised the control plane to append to.
+  const insertable = new Set(Object.keys(INSERTABLE_TABLES));
+  for (const table of existingTables) {
+    if (insertable.has(table)) continue;
+    if (await hasTablePrivilege(table, "INSERT")) {
+      report(`${table}: role holds INSERT on a table it must not write to`);
+    }
+  }
 
   for (const [table, columns] of Object.entries(READABLE_TABLES)) {
     if (!existingTables.includes(table)) continue;
@@ -202,37 +239,32 @@ async function verify() {
       if (!(await hasTablePrivilege(table, "SELECT"))) {
         report(`${table}: expected SELECT, role has none`);
       }
-    } else {
-      for (const column of columns) {
-        if (!(await hasColumnPrivilege(table, column, "SELECT"))) {
-          report(`${table}.${column}: expected SELECT, role has none`);
-        }
-      }
-      for (const column of deniedColumnsFor(table, existingColumns)) {
-        if (await hasColumnPrivilege(table, column, "SELECT")) {
-          report(`${table}.${column}: MUST NOT be readable but the role can SELECT it`);
-        }
-      }
+      continue;
     }
 
-    for (const privilege of WRITE_PRIVILEGES) {
-      if (await hasTablePrivilege(table, privilege)) {
-        report(`${table}: role holds ${privilege}; the control plane must never write`);
+    for (const column of columns) {
+      if (!(await hasColumnPrivilege(table, column, "SELECT"))) {
+        report(`${table}.${column}: expected SELECT, role has none`);
+      }
+    }
+    for (const column of deniedColumnsFor(table, existingColumns)) {
+      if (await hasColumnPrivilege(table, column, "SELECT")) {
+        report(`${table}.${column}: MUST NOT be readable but the role can SELECT it`);
       }
     }
   }
 
-  for (const table of Object.keys(DENIED_TABLES)) {
+  for (const [table, reason] of Object.entries(FORBIDDEN_TABLES)) {
     if (!existingTables.includes(table)) continue;
-    for (const privilege of ["SELECT", ...WRITE_PRIVILEGES]) {
+    for (const privilege of ALL_PRIVILEGES) {
       if (await hasTablePrivilege(table, privilege)) {
-        report(`${table}: role holds ${privilege} on a denied table — ${DENIED_TABLES[table]}`);
+        report(`${table}: role holds ${privilege} on a forbidden table — ${reason}`);
       }
     }
   }
 
   const settings = await client.query("SELECT rolconfig FROM pg_roles WHERE rolname = $1", [
-    ADMIN_READER_ROLE
+    ADMIN_WRITER_ROLE
   ]);
   const configured = new Set(settings.rows[0].rolconfig ?? []);
   for (const [setting, value] of Object.entries(ROLE_SETTINGS)) {
@@ -243,7 +275,7 @@ async function verify() {
 
   const attributes = await client.query(
     "SELECT rolsuper, rolcreaterole, rolcreatedb, rolbypassrls FROM pg_roles WHERE rolname = $1",
-    [ADMIN_READER_ROLE]
+    [ADMIN_WRITER_ROLE]
   );
   for (const [attribute, held] of Object.entries(attributes.rows[0])) {
     if (held) report(`role holds ${attribute}`);
@@ -251,7 +283,7 @@ async function verify() {
 
   process.stdout.write(
     failures === 0
-      ? `${ADMIN_READER_ROLE}: privilege matrix verified.\n`
+      ? `${ADMIN_WRITER_ROLE}: privilege matrix verified. Two INSERTs, no UPDATE, no DELETE.\n`
       : `\n${failures} privilege problem(s). The control plane is not safe to point at this role.\n`
   );
 }
@@ -259,42 +291,54 @@ async function verify() {
 /** Take the role's login away without dropping it or losing the grants. */
 async function disable() {
   const exists = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
-    ADMIN_READER_ROLE
+    ADMIN_WRITER_ROLE
   ]);
   if (exists.rowCount === 0) {
-    process.stdout.write(`Role ${ADMIN_READER_ROLE} does not exist.\n`);
+    process.stdout.write(`Role ${ADMIN_WRITER_ROLE} does not exist.\n`);
     return;
   }
-  await client.query(`ALTER ROLE ${quoteIdentifier(ADMIN_READER_ROLE)} NOLOGIN`);
+  await client.query(`ALTER ROLE ${quoteIdentifier(ADMIN_WRITER_ROLE)} NOLOGIN`);
   process.stdout.write(
-    `${ADMIN_READER_ROLE} can no longer connect. Existing connections are unaffected;\n` +
-      "terminate them with pg_terminate_backend if this is an incident response.\n"
+    `${ADMIN_WRITER_ROLE} can no longer connect. The panel's reads are unaffected;\n` +
+      "operator actions will fail until it is provisioned again.\n"
   );
 }
 
 /**
- * Refuse to act on a schema the policy does not describe.
+ * Refuse to act on a schema or a policy the tool cannot trust.
  *
- * A table nobody has decided about is the failure mode this whole file exists
- * to prevent, so it stops the command rather than producing a partial grant.
+ * A table nobody has decided about, and a table claimed by both lists, are both
+ * failures rather than warnings: they stop the command instead of producing a
+ * partial grant.
  */
 function assertPolicyMatchesSchema(existingTables) {
+  const contradictory = contradictoryTables();
+  if (contradictory.length > 0) {
+    fail(
+      "These tables are listed as both insertable and forbidden:\n" +
+        contradictory.map((table) => `  - ${table}`).join("\n") +
+        "\n\nResolve the contradiction in scripts/admin-writer-matrix.mjs before" +
+        " provisioning.\nA table claimed by both lists is treated as forbidden."
+    );
+  }
+
   const undecided = undecidedTables(existingTables);
   if (undecided.length > 0) {
     fail(
-      "These tables exist but the admin read policy does not mention them:\n" +
+      "These tables exist but the admin write policy does not mention them:\n" +
         undecided.map((table) => `  - ${table}`).join("\n") +
-        "\n\nAdd each one to READABLE_TABLES or DENIED_TABLES in" +
-        " scripts/admin-reader-matrix.mjs.\nA table is denied until somebody decides otherwise."
+        "\n\nAdd each one to READABLE_TABLES, INSERTABLE_TABLES or FORBIDDEN_TABLES" +
+        " in\nscripts/admin-writer-matrix.mjs. A table is forbidden until somebody" +
+        " decides otherwise."
     );
   }
 
   const stale = staleTables(existingTables);
   if (stale.length > 0) {
     fail(
-      "The admin read policy names tables that no longer exist:\n" +
+      "The admin write policy names tables that no longer exist:\n" +
         stale.map((table) => `  - ${table}`).join("\n") +
-        "\n\nRemove them from scripts/admin-reader-matrix.mjs."
+        "\n\nRemove them from scripts/admin-writer-matrix.mjs."
     );
   }
 }
@@ -323,7 +367,7 @@ async function listColumns(table) {
 
 async function hasTablePrivilege(table, privilege) {
   const result = await client.query("SELECT has_table_privilege($1, $2, $3) AS held", [
-    ADMIN_READER_ROLE,
+    ADMIN_WRITER_ROLE,
     `public.${table}`,
     privilege
   ]);
@@ -332,7 +376,7 @@ async function hasTablePrivilege(table, privilege) {
 
 async function hasColumnPrivilege(table, column, privilege) {
   const result = await client.query("SELECT has_column_privilege($1, $2, $3, $4) AS held", [
-    ADMIN_READER_ROLE,
+    ADMIN_WRITER_ROLE,
     `public.${table}`,
     column,
     privilege

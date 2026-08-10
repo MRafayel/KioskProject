@@ -39,6 +39,8 @@ export interface AdminReadDatabase {
   refund: ReadOnly<PrismaClient["refund"]>;
   printJob: ReadOnly<PrismaClient["printJob"]>;
   printJobEvent: ReadOnly<PrismaClient["printJobEvent"]>;
+  /** One operator's account of a print the system would not settle. */
+  printJobRecoveryResolution: ReadOnly<PrismaClient["printJobRecoveryResolution"]>;
   agentCommand: ReadOnly<PrismaClient["agentCommand"]>;
   outboxEvent: ReadOnly<PrismaClient["outboxEvent"]>;
   auditEvent: ReadOnly<PrismaClient["auditEvent"]>;

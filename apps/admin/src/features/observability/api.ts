@@ -1,4 +1,6 @@
 import type {
+  AcknowledgeIncidentBody,
+  AcknowledgeIncidentResponse,
   AdminAuditResponse,
   AdminDocumentsResponse,
   AdminErrorsResponse,
@@ -11,17 +13,22 @@ import type {
   AdminRetentionResponse,
   AdminSessionDetailResponse,
   AdminSessionsResponse,
-  AdminTimelineResponse
+  AdminTimelineResponse,
+  ResolveRecoveryBody,
+  ResolveRecoveryResponse
 } from "@printing-kiosk/admin-access";
 
 import { adminRequest } from "../auth/api.js";
 
 /**
- * The operational reads.
+ * The operational reads, and the two things an operator can do.
  *
- * Every one is a GET. There is no mutating call in this file and, for Phase 2,
- * none anywhere in the panel — the acceptance gate is that the control plane
- * can look and cannot touch.
+ * The mutating calls are at the bottom and there are exactly two of them. Both
+ * go through the same `adminRequest`, so both carry the CSRF token and both
+ * surface "touch your key again" the same way every other call does.
+ *
+ * There is no call here that moves money. `refund.authorize` has no endpoint to
+ * reach yet, and this file would be the wrong place to discover otherwise.
  */
 
 function query(parameters: Readonly<Record<string, string | number | boolean | undefined>>) {
@@ -88,5 +95,22 @@ export const observabilityApi = {
     adminRequest<AdminErrorsResponse>("GET", `/v1/admin/errors${query({ windowHours })}`),
 
   audit: (filters: { sessionId?: string; cursor?: string } = {}) =>
-    adminRequest<AdminAuditResponse>("GET", `/v1/admin/audit${query(filters)}`)
+    adminRequest<AdminAuditResponse>("GET", `/v1/admin/audit${query(filters)}`),
+
+  /**
+   * Record what a person saw at the tray.
+   *
+   * The job identifier is the idempotency key, so a double-clicked button
+   * cannot record two conflicting accounts of the same print. The server
+   * replays an identical repeat and refuses a contradictory one.
+   */
+  resolveRecovery: (printJobId: string, body: ResolveRecoveryBody) =>
+    adminRequest<ResolveRecoveryResponse>(
+      "POST",
+      `/v1/admin/print-jobs/${encodeURIComponent(printJobId)}/recovery-resolution`,
+      body
+    ),
+
+  acknowledgeIncident: (body: AcknowledgeIncidentBody) =>
+    adminRequest<AcknowledgeIncidentResponse>("POST", "/v1/admin/incidents/acknowledge", body)
 };
