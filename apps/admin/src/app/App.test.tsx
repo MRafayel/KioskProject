@@ -13,6 +13,7 @@ import type {
 
 import { App } from "./App.js";
 import { AdminApiError, adminApi } from "../features/auth/api.js";
+import { observabilityApi } from "../features/observability/api.js";
 
 vi.mock("@simplewebauthn/browser", () => ({
   startAuthentication: vi.fn(),
@@ -26,10 +27,7 @@ beforeEach(() => {
   vi.mocked(startAuthentication).mockResolvedValue(authenticationCredential as never);
   vi.mocked(startRegistration).mockResolvedValue(registrationCredential as never);
   vi.spyOn(adminApi, "me").mockResolvedValue(identity());
-  vi.spyOn(adminApi, "health").mockResolvedValue({
-    role: "ADMIN",
-    timestamp: new Date().toISOString()
-  });
+  vi.spyOn(observabilityApi, "overview").mockResolvedValue(overview());
   vi.spyOn(adminApi, "authenticators").mockResolvedValue(authenticatorListing());
   vi.spyOn(adminApi, "logout").mockResolvedValue(undefined);
   vi.spyOn(adminApi, "beginEnrolment").mockResolvedValue(
@@ -55,6 +53,14 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * The security keys panel is one section among several now. Every test that
+ * manages a key has to get there first, exactly as an operator does.
+ */
+async function openSecurityKeys(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Security keys" }));
+}
+
 describe("admin Phase 1 workflows", () => {
   it("offers a session-check retry after a transient bootstrap failure", async () => {
     vi.mocked(adminApi.me)
@@ -69,7 +75,7 @@ describe("admin Phase 1 workflows", () => {
     );
     await user.click(screen.getByRole("button", { name: "Retry session check" }));
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
     expect(adminApi.me).toHaveBeenCalledTimes(2);
   });
 
@@ -78,7 +84,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Overview" });
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Your session may still be active");
@@ -87,12 +93,12 @@ describe("admin Phase 1 workflows", () => {
   });
 
   it("returns to sign-in when a child request discovers an expired session", async () => {
-    vi.mocked(adminApi.authenticators).mockRejectedValue(authenticationRequired());
+    vi.mocked(observabilityApi.overview).mockRejectedValue(authenticationRequired());
 
     render(<App />);
 
     expect(await screen.findByRole("button", { name: "Use security key" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Overview", level: 1 })).not.toBeInTheDocument();
   });
 
   it("does not report enrolment success when the required step-up is cancelled", async () => {
@@ -103,6 +109,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
+    await openSecurityKeys(user);
     await screen.findByText("Desk key");
     await user.type(screen.getByLabelText("Name a new key"), "Replacement key");
     await user.click(screen.getByRole("button", { name: "Enrol security key" }));
@@ -122,6 +129,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
+    await openSecurityKeys(user);
     await screen.findByText("Desk key");
     await user.type(screen.getByLabelText("Name a new key"), "Replacement key");
     await user.click(screen.getByRole("button", { name: "Enrol security key" }));
@@ -146,6 +154,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
+    await openSecurityKeys(user);
     await screen.findByText("Desk key");
     await user.type(screen.getByLabelText("Name a new key"), "Replacement key");
     await user.click(screen.getByRole("button", { name: "Enrol security key" }));
@@ -166,6 +175,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
+    await openSecurityKeys(user);
     await screen.findByText("Desk key");
     await user.type(screen.getByLabelText("Name a new key"), "Slow hardware key");
     await user.click(screen.getByRole("button", { name: "Enrol security key" }));
@@ -192,6 +202,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
+    await openSecurityKeys(user);
     const retireButton = await screen.findByRole("button", {
       name: /Retire Desk key, enrolled/
     });
@@ -219,6 +230,7 @@ describe("admin Phase 1 workflows", () => {
     const user = userEvent.setup();
 
     render(<App />);
+    await openSecurityKeys(user);
     await user.click(
       await screen.findByRole("button", {
         name: /Retire Desk key, enrolled/
@@ -294,7 +306,7 @@ describe("admin Phase 1 workflows", () => {
 
     expect(adminApi.beginSignIn).toHaveBeenCalledOnce();
     resolveBegin?.(ceremony("sign-in"));
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
   });
 });
 
@@ -311,6 +323,83 @@ function identity(steppedUp = false): AdminIdentityResponse {
       hardExpiresAt: new Date(now + 4 * 60 * 60_000).toISOString(),
       stepUpFreshUntil: steppedUp ? new Date(now + 5 * 60_000).toISOString() : null
     }
+  };
+}
+
+describe("admin Phase 2 operational sections", () => {
+  it("puts the worklist first and names what each number means", async () => {
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+    // A count with no explanation is a number nobody acts on.
+    const entry = screen.getByText("Document deletions that gave up").closest("li");
+    expect(entry).toHaveTextContent("2");
+    expect(entry).toHaveClass("attention__item--critical");
+  });
+
+  it("says so plainly when nothing is waiting on a person", async () => {
+    vi.mocked(observabilityApi.overview).mockResolvedValue({ ...overview(), attention: [] });
+
+    render(<App />);
+
+    expect(await screen.findByText(/Nothing is waiting on a person/)).toBeVisible();
+  });
+
+  it("hides a section the signed-in role has no capability for", async () => {
+    // Visibility only — the server refuses the request regardless, which is
+    // covered by the API's own boundary tests.
+    vi.mocked(adminApi.me).mockResolvedValue({
+      ...identity(),
+      role: "OPERATOR",
+      capabilities: ["dashboard.read", "kiosk.read", "audit.read.self", "authenticator.manage.self"]
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Kiosks" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retention" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Money" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Printing" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed panel recoverable without losing the session", async () => {
+    vi.mocked(observabilityApi.overview).mockRejectedValueOnce(new TypeError("offline"));
+    vi.mocked(observabilityApi.overview).mockResolvedValue(overview());
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not reach the control plane."
+    );
+    // Still signed in: a panel failing is not a session failing.
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Document deletions that gave up")).toBeVisible();
+  });
+});
+
+function overview() {
+  return {
+    generatedAt: new Date().toISOString(),
+    snapshotAgeMilliseconds: 0,
+    scoped: false,
+    attention: [
+      { code: "RETENTION_DEAD_LETTERED" as const, severity: "CRITICAL" as const, count: 2 }
+    ],
+    kiosks: { total: 3, online: 2, degraded: 0, offline: 1, notActive: 0 },
+    sessions: { live: 4, awaitingPayment: 1, printing: 1, recoveryRequired: 0 },
+    printing: {
+      open: 1,
+      overdue: 0,
+      recoveryRequired: 0,
+      failedRecently: 0,
+      unconfirmedRecently: 0
+    },
+    documents: { processing: 0, failed: 0, awaitingScan: 0 },
+    retention: { pending: 1, overdue: 0, deadLettered: 2 },
+    money: { openPayments: 1, expiredPayments: 0, unsettledRefunds: 0 }
   };
 }
 

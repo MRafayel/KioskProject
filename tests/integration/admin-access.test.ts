@@ -1019,15 +1019,24 @@ describe("audit integrity", () => {
   });
 });
 
-describe("the admin plane reads nothing operational in Phase 1", () => {
-  it("exposes no route returning session, document, payment or print data", async () => {
+describe("the admin plane never serves a document", () => {
+  /**
+   * Phase 2 gave the control plane operational reads, and those are bounded by
+   * their own suite (`admin-observability.test.ts`). What stays true at every
+   * phase, and is asserted here because it is an identity-level guarantee
+   * rather than an observability one, is that no admin route returns a
+   * customer's document, a rendered page, a storage URL or a print manifest —
+   * at any role, however fresh their step-up.
+   */
+  it("exposes no route returning document bytes, a preview or a storage URL", async () => {
     const session = await seedAdminWithSession("TECHNICAL_ADMIN", { steppedUpAgo: 1_000 });
     for (const url of [
-      "/v1/admin/sessions",
-      "/v1/admin/print-jobs",
-      "/v1/admin/payments",
       "/v1/admin/documents",
-      "/v1/admin/kiosks"
+      "/v1/admin/documents/download",
+      "/v1/admin/files",
+      "/v1/admin/previews",
+      "/v1/admin/storage",
+      "/v1/admin/kiosk-credentials"
     ]) {
       const response = await app.inject({
         method: "GET",

@@ -19,6 +19,7 @@
     "test": "vitest run src"
   },
   "dependencies": {
+    "@printing-kiosk/domain": "workspace:*",
     "zod": "4.4.3"
   }
 }

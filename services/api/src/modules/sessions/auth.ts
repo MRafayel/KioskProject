@@ -57,13 +57,28 @@ export async function authenticateKioskCredential(
 
   // Polling routes authenticate frequently. Persisting this heartbeat at most
   // once per minute avoids a database write for every status poll.
-  await database.kioskCredential.updateMany({
+  const heartbeat = await database.kioskCredential.updateMany({
     where: {
       id: credential.id,
       OR: [{ lastUsedAt: null }, { lastUsedAt: { lte: new Date(now.getTime() - 60_000) } }]
     },
     data: { lastUsedAt: now }
   });
+
+  // The same beat, recorded on the kiosk itself. Without this the `last_seen_at`
+  // column and its index exist but are never written, and "is that kiosk alive"
+  // — the first question an operator asks — has no answer anywhere in the
+  // system. Riding on the throttle above rather than adding a second one keeps
+  // the cost at zero for the polls that did not qualify for a write.
+  if (heartbeat.count > 0) {
+    await database.kiosk.updateMany({
+      where: {
+        id: credential.kioskId,
+        OR: [{ lastSeenAt: null }, { lastSeenAt: { lt: now } }]
+      },
+      data: { lastSeenAt: now }
+    });
+  }
 
   return { kioskId: credential.kioskId, credentialId: credential.credentialId };
 }

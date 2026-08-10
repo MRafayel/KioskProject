@@ -8,10 +8,18 @@ import { ZodError } from "zod";
 
 import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
-import { createDatabaseClient, type PrismaClient } from "@printing-kiosk/database";
+import {
+  assertAdminReadClientIsReadOnly,
+  createAdminReadClient,
+  createDatabaseClient,
+  type PrismaClient
+} from "@printing-kiosk/database";
 import type { RetentionPolicy } from "@printing-kiosk/domain";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { AdminObservabilityService } from "./modules/admin/observability.js";
+import { registerAdminObservabilityRoutes } from "./modules/admin/observability-routes.js";
+import { asAdminReadDatabase } from "./modules/admin/read-database.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { AdminService } from "./modules/admin/service.js";
 import { FileJanitor } from "./modules/files/janitor.js";
@@ -57,6 +65,12 @@ export interface BuildAppOptions {
   logger?: boolean;
   readinessCheck?: () => Record<string, "ok" | "failed"> | Promise<Record<string, "ok" | "failed">>;
   database?: PrismaClient;
+  /**
+   * The control plane's read pool. Supplied only by a test that wants to point
+   * it somewhere specific — for instance at the least-privilege reader role, to
+   * prove the privilege matrix is what actually stops a query.
+   */
+  adminReadDatabase?: PrismaClient;
   clock?: Clock;
   random?: RandomSource;
   objectStore?: ObjectStore;
@@ -516,6 +530,35 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     clock,
     stepUpTtlMilliseconds,
     adminOrigin: new URL(options.environment.ADMIN_ORIGIN).origin
+  });
+
+  // A pool of its own, opened read-only and — in production — connecting as a
+  // role that holds no write grant and cannot select a filename, an object key
+  // or a credential digest. A dashboard must not be able to write to
+  // production, and it must not be able to take the connections the print path
+  // needs. Both are properties of this connection rather than of the code above
+  // it, and the assertion below refuses to serve the panel if either lapses.
+  const adminReadDatabase =
+    options.adminReadDatabase ??
+    createAdminReadClient(
+      options.environment.ADMIN_READ_DATABASE_URL ?? options.environment.DATABASE_URL
+    );
+  const ownsAdminReadDatabase = !options.adminReadDatabase;
+  await assertAdminReadClientIsReadOnly(adminReadDatabase);
+  if (ownsAdminReadDatabase) {
+    app.addHook("onClose", async () => {
+      await adminReadDatabase.$disconnect();
+    });
+  }
+
+  registerAdminObservabilityRoutes(app, {
+    admin: adminService,
+    clock,
+    stepUpTtlMilliseconds,
+    observability: new AdminObservabilityService({
+      database: asAdminReadDatabase(adminReadDatabase),
+      clock
+    })
   });
 
   return app;

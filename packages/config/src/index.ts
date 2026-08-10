@@ -64,6 +64,17 @@ const environmentSchema = z
       .min(1)
       .refine(isPostgresUrl, "DATABASE_URL must be a valid PostgreSQL URL")
       .default("postgresql://printing_kiosk:development-only@localhost:5432/printing_kiosk"),
+    // The control plane's own connection, as the least-privilege reader role
+    // provisioned by `pnpm db:admin-reader provision`. Production requires it:
+    // that role's grants are what stop an admin read path from reaching a
+    // customer's filename or a credential digest, and they only apply if the
+    // panel actually connects as it. Development may leave it unset and share
+    // the application role, which is still opened read-only.
+    ADMIN_READ_DATABASE_URL: z
+      .string()
+      .min(1)
+      .refine(isPostgresUrl, "ADMIN_READ_DATABASE_URL must be a valid PostgreSQL URL")
+      .optional(),
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
     OBJECT_STORAGE_DRIVER: z.literal("s3").default("s3"),
     S3_ENDPOINT: z.string().url().default("http://localhost:9000"),
@@ -480,7 +491,34 @@ const environmentSchema = z
       });
     }
 
+    if (
+      environment.ADMIN_READ_DATABASE_URL !== undefined &&
+      !isPostgresConnectionUrl(environment.ADMIN_READ_DATABASE_URL)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_READ_DATABASE_URL"],
+        message: "ADMIN_READ_DATABASE_URL must be a postgresql:// or postgres:// URL"
+      });
+    }
+
     if (environment.NODE_ENV !== "production") return;
+
+    // Sharing the application role would give the control plane every grant the
+    // print path holds, including the columns that name and locate a customer's
+    // documents. In production the panel connects as its own role or not at all.
+    if (
+      environment.ADMIN_READ_DATABASE_URL === undefined ||
+      environment.ADMIN_READ_DATABASE_URL === environment.DATABASE_URL
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_READ_DATABASE_URL"],
+        message:
+          "ADMIN_READ_DATABASE_URL must be set in production and must not equal DATABASE_URL. " +
+          "Provision the reader role with `pnpm db:admin-reader provision`."
+      });
+    }
 
     // A route that dictates payment outcomes is a way to print money. It does
     // not exist in production, whatever else the environment says.
@@ -639,17 +677,19 @@ const environmentSchema = z
       });
     }
 
-    const databaseUrl = new URL(environment.DATABASE_URL);
-    if (
-      !isLoopbackHostname(databaseUrl.hostname) &&
-      databaseUrl.searchParams.get("sslmode") !== "verify-full"
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["DATABASE_URL"],
-        message:
-          "Remote production DATABASE_URL must use sslmode=verify-full for certificate and hostname verification"
-      });
+    // The control plane's connection carries the same data over the same
+    // network, so it is held to the same transport rule as the application's.
+    for (const name of ["DATABASE_URL", "ADMIN_READ_DATABASE_URL"] as const) {
+      const value = environment[name];
+      if (value === undefined) continue;
+      const url = new URL(value);
+      if (!isLoopbackHostname(url.hostname) && url.searchParams.get("sslmode") !== "verify-full") {
+        context.addIssue({
+          code: "custom",
+          path: [name],
+          message: `Remote production ${name} must use sslmode=verify-full for certificate and hostname verification`
+        });
+      }
     }
   });
 
@@ -721,7 +761,10 @@ const ADMIN_ENVIRONMENT_KEYS = [
   "ADMIN_SESSION_ABSOLUTE_MINUTES",
   "ADMIN_STEP_UP_TTL_SECONDS",
   "ADMIN_CHALLENGE_TTL_SECONDS",
-  "ADMIN_BREAK_GLASS_TTL_HOURS"
+  "ADMIN_BREAK_GLASS_TTL_HOURS",
+  // A second database password. A worker or kiosk process has no admin panel
+  // to serve and therefore no reason to hold it.
+  "ADMIN_READ_DATABASE_URL"
 ] as const;
 type AdminEnvironmentKey = (typeof ADMIN_ENVIRONMENT_KEYS)[number];
 const ADMIN_ENVIRONMENT_KEY_SET: ReadonlySet<string> = new Set(ADMIN_ENVIRONMENT_KEYS);
@@ -796,7 +839,10 @@ export function loadNonAdminEnvironment(
     ADMIN_SESSION_ABSOLUTE_MINUTES: "240",
     ADMIN_STEP_UP_TTL_SECONDS: "300",
     ADMIN_CHALLENGE_TTL_SECONDS: "180",
-    ADMIN_BREAK_GLASS_TTL_HOURS: "2160"
+    ADMIN_BREAK_GLASS_TTL_HOURS: "2160",
+    // Loopback so the production transport rule does not demand TLS settings
+    // for a connection this process will never open.
+    ADMIN_READ_DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api"
   });
   return Object.fromEntries(
     Object.entries(parsed).filter(([name]) => !ADMIN_ENVIRONMENT_KEY_SET.has(name))

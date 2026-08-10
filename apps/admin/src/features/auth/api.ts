@@ -57,6 +57,18 @@ function readCsrfToken(): string {
   }
 }
 
+/**
+ * The single request path for the whole control plane.
+ *
+ * Exported so the operational panels use exactly this one — same CSRF handling,
+ * same timeout, same two refusals recognised the same way. A second fetch
+ * wrapper would eventually disagree with this one about what "your session is
+ * gone" looks like.
+ */
+export async function adminRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return call<T>(method, path, body);
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const isMutation = method !== "GET" && method !== "HEAD";
   const response = await fetch(path, {

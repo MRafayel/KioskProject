@@ -178,6 +178,9 @@ describe("session route authentication", () => {
             ),
           updateMany: () => Promise.resolve({ count: 1 })
         },
+        // The same heartbeat, recorded on the kiosk row so the control plane
+        // can answer whether the device is alive.
+        kiosk: { updateMany: () => Promise.resolve({ count: 1 }) },
         // Authenticated, but this kiosk owns no such session.
         printSession: { findFirst: () => Promise.resolve(null) }
       } as unknown as NonNullable<Parameters<typeof buildApp>[0]["database"]>

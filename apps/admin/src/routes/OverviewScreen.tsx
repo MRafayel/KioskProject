@@ -1,91 +1,152 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 
 import { useSession } from "../features/auth/SessionProvider.js";
-import { adminApi } from "../features/auth/api.js";
+import { observabilityApi } from "../features/observability/api.js";
+import { Counters, Panel } from "../features/observability/components.js";
+import { useAdminData } from "../features/observability/useAdminData.js";
 
 /**
- * The Phase 1 overview.
+ * What needs a person, and what the system is doing.
  *
- * It deliberately shows nothing about kiosks, sessions, documents, payments or
- * printing: none of that is readable yet, and a panel full of placeholder
- * numbers would be worse than an honest empty state. What it does show is the
- * authorization boundary itself, which is the thing Phase 1 actually built.
+ * The worklist comes first and everything else is context. Each entry names a
+ * state the system deliberately refuses to resolve on its own — an undeleted
+ * document, an unconfirmed print, an unsettled refund — because those are the
+ * only numbers on this page that are actually somebody's job.
  */
+
+const ATTENTION_LABELS: Record<string, string> = {
+  RETENTION_DEAD_LETTERED: "Document deletions that gave up",
+  RETENTION_OVERDUE: "Sessions past their deletion deadline",
+  PRINT_RECOVERY_REQUIRED: "Paid prints awaiting a human decision",
+  REFUND_UNSETTLED: "Refunds owed and not yet returned",
+  PRINT_OVERDUE: "Print jobs past their deadline",
+  DOCUMENT_PROCESSING_FAILED: "Uploads that failed processing",
+  KIOSK_OFFLINE: "Kiosks not heard from",
+  PAYMENT_EXPIRED_UNRESOLVED: "Expired payment intents"
+};
+
 export function OverviewScreen() {
+  const load = useCallback(() => observabilityApi.overview(), []);
+  const state = useAdminData(load, { refreshMilliseconds: 15_000 });
+  const overview = state.data;
   const session = useSession();
-  const [reachable, setReachable] = useState<"checking" | "ok" | "failed">("checking");
-  const checkInFlight = useRef<Promise<void> | null>(null);
-
-  const check = useCallback((): Promise<void> => {
-    if (checkInFlight.current) return checkInFlight.current;
-    setReachable("checking");
-
-    const attempt = adminApi
-      .health()
-      .then(() => setReachable("ok"))
-      .catch((error: unknown) => {
-        if (!session.handleAuthenticationError(error)) setReachable("failed");
-      })
-      .finally(() => {
-        checkInFlight.current = null;
-      });
-    checkInFlight.current = attempt;
-    return attempt;
-  }, [session.handleAuthenticationError]);
-
-  useEffect(() => {
-    void check();
-  }, [check]);
-
-  const identity = session.identity;
-  if (!identity) return null;
 
   return (
-    <section className="panel">
-      <h2>Overview</h2>
-
-      <p className="panel__status" role="status">
-        {reachable === "checking"
-          ? "Checking the control plane…"
-          : reachable === "ok"
-            ? "Control plane reachable. Authorization is enforced on every request."
-            : "Control plane unreachable."}
-      </p>
-      {reachable === "failed" ? (
-        <button type="button" onClick={() => void check()}>
-          Try again
+    <Panel
+      title="Overview"
+      state={state}
+      actions={
+        <button type="button" onClick={state.reload} disabled={state.loading}>
+          Refresh
         </button>
-      ) : null}
-
-      <h3>What your role can do</h3>
-      <p className="panel__hint">
-        These are enforced on the server. Hiding a control here is a convenience, never the
-        boundary.
-      </p>
-      <ul className="capability-list">
-        {identity.capabilities.map((capability) => (
-          <li key={capability}>
-            <code>{capability}</code>
-          </li>
-        ))}
-      </ul>
-
-      {identity.kioskScopes.length > 0 ? (
+      }
+      hint={
+        overview?.scoped ? "Counts cover the kiosks assigned to you." : "Counts cover every kiosk."
+      }
+    >
+      {overview ? (
         <>
-          <h3>Kiosks you may act on</h3>
-          <ul className="capability-list">
-            {identity.kioskScopes.map((kioskId) => (
-              <li key={kioskId}>
-                <code>{kioskId}</code>
-              </li>
-            ))}
-          </ul>
+          <h3>Needs attention</h3>
+          {overview.attention.length === 0 ? (
+            <p className="panel__status">
+              Nothing is waiting on a person. Documents are being deleted on time, no paid print is
+              unresolved, and no refund is outstanding.
+            </p>
+          ) : (
+            <ul className="attention">
+              {overview.attention.map((item) => (
+                <li
+                  key={item.code}
+                  className={`attention__item attention__item--${item.severity.toLowerCase()}`}
+                >
+                  <span className="attention__count">{item.count}</span>
+                  <span>{ATTENTION_LABELS[item.code] ?? item.code}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <h3>Kiosks</h3>
+          <Counters
+            items={[
+              { label: "Online", value: overview.kiosks.online },
+              { label: "Degraded", value: overview.kiosks.degraded, alarming: true },
+              { label: "Offline", value: overview.kiosks.offline, alarming: true },
+              { label: "Not active", value: overview.kiosks.notActive },
+              { label: "Total", value: overview.kiosks.total }
+            ]}
+          />
+
+          <h3>Sessions</h3>
+          <Counters
+            items={[
+              { label: "Live", value: overview.sessions.live },
+              { label: "Awaiting payment", value: overview.sessions.awaitingPayment },
+              { label: "Printing", value: overview.sessions.printing },
+              {
+                label: "Recovery required",
+                value: overview.sessions.recoveryRequired,
+                alarming: true
+              }
+            ]}
+          />
+
+          <h3>Printing</h3>
+          <Counters
+            items={[
+              { label: "Open", value: overview.printing.open },
+              { label: "Overdue", value: overview.printing.overdue, alarming: true },
+              { label: "Failed (24h)", value: overview.printing.failedRecently, alarming: true },
+              {
+                label: "Unconfirmed (24h)",
+                value: overview.printing.unconfirmedRecently,
+                alarming: true
+              }
+            ]}
+          />
+
+          <h3>Documents and retention</h3>
+          <Counters
+            items={[
+              { label: "Processing", value: overview.documents.processing },
+              { label: "Awaiting scan", value: overview.documents.awaitingScan },
+              { label: "Failed", value: overview.documents.failed, alarming: true },
+              { label: "Deletion pending", value: overview.retention.pending },
+              { label: "Deletion overdue", value: overview.retention.overdue, alarming: true },
+              { label: "Deletion gave up", value: overview.retention.deadLettered, alarming: true }
+            ]}
+          />
+
+          <h3>Money</h3>
+          <Counters
+            items={[
+              { label: "Open payments", value: overview.money.openPayments },
+              { label: "Expired intents", value: overview.money.expiredPayments },
+              {
+                label: "Unsettled refunds",
+                value: overview.money.unsettledRefunds,
+                alarming: true
+              }
+            ]}
+          />
+
+          <p className="panel__hint">
+            Snapshot taken {new Date(overview.generatedAt).toLocaleTimeString()}
+            {overview.snapshotAgeMilliseconds > 0
+              ? `, ${Math.round(overview.snapshotAgeMilliseconds / 1000)}s ago`
+              : ""}
+            . Counts are cached for a few seconds so that a wall of open dashboards cannot compete
+            with printing for the database.
+          </p>
+
+          {session.identity && session.identity.kioskScopes.length === 0 && overview.scoped ? (
+            <p className="panel__hint">
+              You have no kiosk assigned, so there is nothing for you to see yet. Ask an
+              administrator to assign one.
+            </p>
+          ) : null}
         </>
       ) : null}
-
-      <p className="panel__hint">
-        Operational views — kiosks, sessions, printing, payments, retention — arrive in Phase 2.
-      </p>
-    </section>
+    </Panel>
   );
 }

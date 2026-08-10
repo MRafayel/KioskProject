@@ -1,6 +1,4 @@
-import { createHash } from "node:crypto";
-
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import {
@@ -18,6 +16,7 @@ import {
 } from "@printing-kiosk/admin-access";
 
 import { ApiError } from "../sessions/errors.js";
+import { adminRateKey, sendNoStore } from "./http.js";
 import {
   ADMIN_CSRF_COOKIE,
   ADMIN_SESSION_COOKIE,
@@ -423,17 +422,4 @@ function clearSessionCookies(reply: FastifyReply): void {
       expires: new Date(0)
     });
   }
-}
-
-function sendNoStore(reply: FastifyReply, payload: unknown) {
-  return reply.header("cache-control", "no-store").send(payload);
-}
-
-/**
- * Buckets by source address. Admin routes run before a session exists on the
- * login path, so there is no account to bucket by, and hashing keeps the raw
- * address out of the limiter's key space.
- */
-function adminRateKey(request: FastifyRequest): string {
-  return `admin:${createHash("sha256").update(request.ip).digest("hex").slice(0, 32)}`;
 }

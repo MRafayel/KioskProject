@@ -1,0 +1,1429 @@
+import {
+  ADMIN_PAGE_SIZE,
+  classifyKioskLiveness,
+  decodeAdminCursor,
+  deriveAttention,
+  encodeAdminCursor,
+  type AdminAttentionCode,
+  type AdminAuditResponse,
+  type AdminDocumentsResponse,
+  type AdminErrorsResponse,
+  type AdminKiosksResponse,
+  type AdminOverviewResponse,
+  type AdminPaymentsResponse,
+  type AdminPrintJobDetailResponse,
+  type AdminPrintJobsResponse,
+  type AdminRefundsResponse,
+  type AdminRetentionResponse,
+  type AdminSessionDetailResponse,
+  type AdminSessionsResponse,
+  type AdminTimelineResponse
+} from "@printing-kiosk/admin-access";
+import { isTerminalSessionState, SESSION_STATES, type SessionState } from "@printing-kiosk/domain";
+
+import type { Clock } from "../sessions/crypto.js";
+import { ADMIN_ACTOR_TYPE, projectAuditMetadata } from "./audit.js";
+import type { AdminReadDatabase } from "./read-database.js";
+
+/**
+ * Everything the control plane can see about the printing system.
+ *
+ * Three rules run through every method here.
+ *
+ * It only reads. The database handle is typed so that no write method exists
+ * (`read-database.ts`), the pool it comes from is opened read-only, and in
+ * production it connects as a role that holds no write grant. Phase 2's gate is
+ * "no mutations exist" and it is asserted three ways rather than promised once.
+ *
+ * It never returns document content. Not the customer's filename, not a content
+ * digest, not an object key, not a print manifest, not a rendered page. Those
+ * columns are not granted to the reader role and not present in the response
+ * schemas, so a query written in a hurry cannot produce one.
+ *
+ * It never outruns the print path. Every list is keyset-paged with a fixed
+ * ceiling, every aggregate is bounded by an index this schema already has, the
+ * overview is cached for a few seconds so a wall of open dashboards costs one
+ * query rather than one per person, and the connection cancels anything slow.
+ * A dashboard being a few seconds stale is not a problem; a dashboard competing
+ * with a paid print job for a connection is.
+ */
+
+export interface AdminObservabilityOptions {
+  database: AdminReadDatabase;
+  clock: Clock;
+  /**
+   * How long an overview snapshot is reused. Short enough that an operator
+   * refreshing after an incident sees the change, long enough that a dozen
+   * dashboards do not multiply into a dozen times the query load.
+   */
+  overviewCacheMilliseconds?: number;
+}
+
+/**
+ * Which kiosks the caller may see.
+ *
+ * `null` means unrestricted. An Operator is restricted to their assigned
+ * kiosks, and an Operator with no assignment sees nothing — the safe default
+ * for a newly created account, and the reason this is a list rather than a
+ * flag.
+ */
+export interface AdminReadScope {
+  kioskIds: readonly string[] | null;
+}
+
+export function scopeForAdmin(admin: {
+  role: string;
+  kioskScopes: readonly string[];
+}): AdminReadScope {
+  return admin.role === "OPERATOR" ? { kioskIds: admin.kioskScopes } : { kioskIds: null };
+}
+
+/** A stuck cleanup, distinguished from one the worker simply has not reached. */
+const RETENTION_OVERDUE_GRACE_MILLISECONDS = 900_000;
+/** The window "recently" means on the overview and in the error centre. */
+const DEFAULT_ERROR_WINDOW_HOURS = 24;
+/** Enough distinct failures to see a pattern; not enough to be a data dump. */
+const MAX_ERROR_GROUPS = 60;
+/** Distinct operator scopes are few; this only stops the map growing forever. */
+const MAX_CACHED_OVERVIEWS = 32;
+
+const LIVE_SESSION_STATES = SESSION_STATES.filter((state) => !isTerminalSessionState(state));
+const OPEN_PRINT_STATUSES = ["QUEUED", "DISPATCHED", "PRINTING"] as const;
+const OPEN_PAYMENT_STATUSES = ["PENDING", "AUTHORIZED"] as const;
+const ACTIVE_CLEANUP_STATUSES = ["PENDING", "IN_PROGRESS", "DEAD_LETTER"] as const;
+
+interface CachedOverview {
+  computedAt: number;
+  value: Omit<AdminOverviewResponse, "snapshotAgeMilliseconds">;
+}
+
+export class AdminObservabilityService {
+  private readonly overviewCache = new Map<string, CachedOverview>();
+
+  public constructor(private readonly options: AdminObservabilityOptions) {}
+
+  // -------------------------------------------------------------------------
+  // Overview
+  // -------------------------------------------------------------------------
+
+  public async overview(scope: AdminReadScope): Promise<AdminOverviewResponse> {
+    const now = this.options.clock.now();
+    const key = scopeKey(scope);
+    const ttl = this.options.overviewCacheMilliseconds ?? 5_000;
+    const cached = this.overviewCache.get(key);
+
+    if (cached && now.getTime() - cached.computedAt < ttl) {
+      return { ...cached.value, snapshotAgeMilliseconds: now.getTime() - cached.computedAt };
+    }
+
+    const value = await this.computeOverview(scope, now);
+    if (this.overviewCache.size >= MAX_CACHED_OVERVIEWS) {
+      const oldest = this.overviewCache.keys().next();
+      if (!oldest.done) this.overviewCache.delete(oldest.value);
+    }
+    this.overviewCache.set(key, { computedAt: now.getTime(), value });
+    return { ...value, snapshotAgeMilliseconds: 0 };
+  }
+
+  private async computeOverview(
+    scope: AdminReadScope,
+    now: Date
+  ): Promise<Omit<AdminOverviewResponse, "snapshotAgeMilliseconds">> {
+    const since = new Date(now.getTime() - DEFAULT_ERROR_WINDOW_HOURS * 3_600_000);
+    const retentionCutoff = new Date(now.getTime() - RETENTION_OVERDUE_GRACE_MILLISECONDS);
+    const kioskWhere = scopedKioskIdFilter(scope);
+    const kioskScope = scopedKioskFilter(scope);
+    const viaSession = scopedViaSessionFilter(scope);
+
+    const [
+      kiosks,
+      sessionStates,
+      printStatuses,
+      overduePrints,
+      failedPrints,
+      unconfirmedPrints,
+      documentStatuses,
+      failedDocuments,
+      awaitingScan,
+      cleanupStatuses,
+      overdueRetention,
+      paymentStatuses,
+      expiredPayments,
+      unsettledRefunds
+    ] = await Promise.all([
+      // Few rows and every field is needed to classify liveness, so this is one
+      // query rather than five counts.
+      this.options.database.kiosk.findMany({
+        where: kioskWhere,
+        select: { status: true, lastSeenAt: true }
+      }),
+      this.options.database.printSession.groupBy({
+        by: ["state"],
+        where: { ...kioskScope, state: { in: [...LIVE_SESSION_STATES, "RECOVERY_REQUIRED"] } },
+        _count: true
+      }),
+      this.options.database.printJob.groupBy({
+        by: ["status"],
+        where: { ...kioskScope, status: { in: [...OPEN_PRINT_STATUSES] } },
+        _count: true
+      }),
+      this.options.database.printJob.count({
+        where: {
+          ...kioskScope,
+          status: { in: [...OPEN_PRINT_STATUSES] },
+          deadlineAt: { lt: now }
+        }
+      }),
+      this.options.database.printJob.count({
+        where: {
+          ...kioskScope,
+          status: "FAILED",
+          createdAt: { gte: since }
+        }
+      }),
+      this.options.database.printJob.count({
+        where: {
+          ...kioskScope,
+          resultConfidence: "UNCONFIRMED",
+          createdAt: { gte: since }
+        }
+      }),
+      this.options.database.uploadedFile.groupBy({
+        by: ["status"],
+        where: { ...viaSession, deletedAt: null },
+        _count: true
+      }),
+      // A processing failure has no status of its own — the row stays
+      // QUARANTINED and grows an error code — so it is counted by the code
+      // rather than inferred from a state that never appears.
+      this.options.database.uploadedFile.count({
+        where: { ...viaSession, processingErrorCode: { not: null }, deletedAt: null }
+      }),
+      this.options.database.uploadedFile.count({
+        where: {
+          ...viaSession,
+          malwareScanStatus: { in: ["PENDING", "SCANNING"] },
+          deletedAt: null
+        }
+      }),
+      this.options.database.printSession.groupBy({
+        by: ["cleanupStatus"],
+        where: { ...kioskScope, cleanupStatus: { in: [...ACTIVE_CLEANUP_STATUSES] } },
+        _count: true
+      }),
+      // The privacy alarm: past its deadline and not proven destroyed.
+      this.options.database.printSession.count({
+        where: {
+          ...kioskScope,
+          cleanupStatus: { in: [...ACTIVE_CLEANUP_STATUSES] },
+          cleanupDueAt: { lt: retentionCutoff },
+          filesDeletedAt: null
+        }
+      }),
+      this.options.database.payment.groupBy({
+        by: ["status"],
+        where: {
+          ...viaSession,
+          status: { in: [...OPEN_PAYMENT_STATUSES] }
+        },
+        _count: true
+      }),
+      this.options.database.payment.count({
+        where: {
+          ...viaSession,
+          status: { in: [...OPEN_PAYMENT_STATUSES] },
+          expiresAt: { lt: now }
+        }
+      }),
+      this.options.database.refund.count({
+        where: {
+          ...viaSession,
+          completedAt: null
+        }
+      })
+    ]);
+
+    const liveness = { online: 0, degraded: 0, offline: 0, notActive: 0 };
+    for (const kiosk of kiosks) {
+      if (kiosk.status !== "ACTIVE") {
+        liveness.notActive += 1;
+        continue;
+      }
+      const state = classifyKioskLiveness(kiosk.lastSeenAt, now);
+      if (state === "ONLINE") liveness.online += 1;
+      else if (state === "DEGRADED") liveness.degraded += 1;
+      else liveness.offline += 1;
+    }
+
+    const sessionCounts = countsByKey(sessionStates, "state");
+    const cleanupCounts = countsByKey(cleanupStatuses, "cleanupStatus");
+    const documentCounts = countsByKey(documentStatuses, "status");
+
+    const live = LIVE_SESSION_STATES.reduce(
+      (total, state) => total + (sessionCounts[state] ?? 0),
+      0
+    );
+    const recoveryRequired = sessionCounts.RECOVERY_REQUIRED ?? 0;
+    const openPrints = sumValues(countsByKey(printStatuses, "status"));
+    const pendingRetention = (cleanupCounts.PENDING ?? 0) + (cleanupCounts.IN_PROGRESS ?? 0);
+    const deadLettered = cleanupCounts.DEAD_LETTER ?? 0;
+    const openPayments = sumValues(countsByKey(paymentStatuses, "status"));
+    const processingDocuments =
+      (documentCounts.QUARANTINED ?? 0) +
+      (documentCounts.VALIDATING ?? 0) +
+      (documentCounts.UPLOADING ?? 0);
+
+    const attention: Partial<Record<AdminAttentionCode, number>> = {
+      RETENTION_DEAD_LETTERED: deadLettered,
+      RETENTION_OVERDUE: overdueRetention,
+      PRINT_RECOVERY_REQUIRED: recoveryRequired,
+      REFUND_UNSETTLED: unsettledRefunds,
+      PRINT_OVERDUE: overduePrints,
+      DOCUMENT_PROCESSING_FAILED: failedDocuments,
+      KIOSK_OFFLINE: liveness.offline,
+      PAYMENT_EXPIRED_UNRESOLVED: expiredPayments
+    };
+
+    return {
+      generatedAt: now.toISOString(),
+      scoped: scope.kioskIds !== null,
+      attention: deriveAttention(attention),
+      kiosks: { total: kiosks.length, ...liveness },
+      sessions: {
+        live,
+        awaitingPayment: sessionCounts.AWAITING_PAYMENT ?? 0,
+        printing: sessionCounts.PRINTING ?? 0,
+        recoveryRequired
+      },
+      printing: {
+        open: openPrints,
+        overdue: overduePrints,
+        recoveryRequired,
+        failedRecently: failedPrints,
+        unconfirmedRecently: unconfirmedPrints
+      },
+      documents: {
+        processing: processingDocuments,
+        failed: failedDocuments,
+        awaitingScan
+      },
+      retention: { pending: pendingRetention, overdue: overdueRetention, deadLettered },
+      money: { openPayments, expiredPayments, unsettledRefunds }
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Kiosks
+  // -------------------------------------------------------------------------
+
+  public async kiosks(scope: AdminReadScope): Promise<AdminKiosksResponse> {
+    const now = this.options.clock.now();
+    const where = scopedKioskIdFilter(scope);
+
+    // A deployment has tens of kiosks, not thousands. Reading them all and
+    // counting alongside is cheaper and simpler than paging, and the ceiling
+    // keeps that assumption from silently becoming false.
+    const kiosks = await this.options.database.kiosk.findMany({
+      where,
+      orderBy: { name: "asc" },
+      take: 200,
+      select: {
+        id: true,
+        publicCode: true,
+        name: true,
+        status: true,
+        timezone: true,
+        lastSeenAt: true
+      }
+    });
+
+    const kioskIds = kiosks.map((kiosk) => kiosk.id);
+    const [liveSessions, openJobs, recoveryJobs] = await Promise.all([
+      this.options.database.printSession.groupBy({
+        by: ["kioskId"],
+        where: { kioskId: { in: kioskIds }, state: { in: [...LIVE_SESSION_STATES] } },
+        _count: true
+      }),
+      this.options.database.printJob.groupBy({
+        by: ["kioskId"],
+        where: { kioskId: { in: kioskIds }, status: { in: [...OPEN_PRINT_STATUSES] } },
+        _count: true
+      }),
+      this.options.database.printJob.groupBy({
+        by: ["kioskId"],
+        where: { kioskId: { in: kioskIds }, status: "RECOVERY_REQUIRED" },
+        _count: true
+      })
+    ]);
+
+    const live = countsByKey(liveSessions, "kioskId");
+    const open = countsByKey(openJobs, "kioskId");
+    const recovery = countsByKey(recoveryJobs, "kioskId");
+
+    return {
+      scoped: scope.kioskIds !== null,
+      items: kiosks.map((kiosk) => ({
+        id: kiosk.id,
+        publicCode: kiosk.publicCode,
+        name: kiosk.name,
+        status: kiosk.status,
+        timezone: kiosk.timezone,
+        lastSeenAt: kiosk.lastSeenAt?.toISOString() ?? null,
+        liveness: classifyKioskLiveness(kiosk.lastSeenAt, now),
+        liveSessions: live[kiosk.id] ?? 0,
+        openPrintJobs: open[kiosk.id] ?? 0,
+        recoveryRequiredJobs: recovery[kiosk.id] ?? 0
+      }))
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Sessions
+  // -------------------------------------------------------------------------
+
+  public async sessions(
+    scope: AdminReadScope,
+    filters: {
+      kioskId?: string | undefined;
+      state?: SessionState | undefined;
+      cursor?: string | undefined;
+    }
+  ): Promise<AdminSessionsResponse> {
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+
+    const rows = await this.options.database.printSession.findMany({
+      where: {
+        ...scopedKioskFilter(scope, filters.kioskId),
+        ...(filters.state ? { state: filters.state } : {}),
+        ...keysetWhere("createdAt", cursor)
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: ADMIN_PAGE_SIZE + 1,
+      select: {
+        id: true,
+        publicId: true,
+        kioskId: true,
+        state: true,
+        createdAt: true,
+        updatedAt: true,
+        idleExpiresAt: true,
+        hardExpiresAt: true,
+        terminalReason: true,
+        cleanupStatus: true,
+        cleanupDueAt: true,
+        filesDeletedAt: true,
+        _count: { select: { uploadedFiles: true } },
+        printJobs: { select: { status: true }, take: 1 },
+        payments: { select: { status: true }, orderBy: { createdAt: "desc" }, take: 1 }
+      }
+    });
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    return {
+      scoped: scope.kioskIds !== null,
+      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.createdAt, id: row.id })),
+      items: page.map((row) => ({
+        id: row.id,
+        publicId: row.publicId,
+        kioskId: row.kioskId,
+        state: row.state as SessionState,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+        idleExpiresAt: row.idleExpiresAt.toISOString(),
+        hardExpiresAt: row.hardExpiresAt.toISOString(),
+        terminalReason: row.terminalReason,
+        cleanupStatus: row.cleanupStatus,
+        cleanupDueAt: row.cleanupDueAt?.toISOString() ?? null,
+        filesDeletedAt: row.filesDeletedAt?.toISOString() ?? null,
+        documentCount: row._count.uploadedFiles,
+        printJobStatus: row.printJobs[0]?.status ?? null,
+        paymentStatus: row.payments[0]?.status ?? null
+      }))
+    };
+  }
+
+  /**
+   * One session in full.
+   *
+   * Returns null rather than throwing when the session is outside the caller's
+   * kiosks, so the route can answer 404. A 403 would confirm the identifier
+   * names something real, which is the whole of an enumeration attack.
+   */
+  public async session(
+    scope: AdminReadScope,
+    sessionId: string
+  ): Promise<AdminSessionDetailResponse | null> {
+    const session = await this.options.database.printSession.findFirst({
+      where: { id: sessionId, ...scopedKioskFilter(scope) },
+      select: {
+        id: true,
+        publicId: true,
+        kioskId: true,
+        state: true,
+        createdAt: true,
+        updatedAt: true,
+        idleExpiresAt: true,
+        hardExpiresAt: true,
+        terminalReason: true,
+        cleanupStatus: true,
+        cleanupDueAt: true,
+        filesDeletedAt: true,
+        currentSettingsRevision: true,
+        activeQuoteId: true
+      }
+    });
+    if (!session) return null;
+
+    const [documents, settings, quote, payment, refund, printJob] = await Promise.all([
+      this.options.database.uploadedFile.findMany({
+        where: { sessionId },
+        select: { status: true, sizeBytes: true, pageCount: true, deletedAt: true }
+      }),
+      session.currentSettingsRevision === null
+        ? null
+        : this.options.database.printSettingRevision.findFirst({
+            where: { sessionId, revision: session.currentSettingsRevision },
+            select: {
+              revision: true,
+              copies: true,
+              duplex: true,
+              paperSize: true,
+              orientation: true,
+              scaling: true,
+              collate: true,
+              colorMode: true,
+              selectedPages: true,
+              printedSides: true,
+              physicalSheets: true,
+              selectionsRedactedAt: true
+            }
+          }),
+      this.options.database.priceQuote.findFirst({
+        where: session.activeQuoteId ? { id: session.activeQuoteId } : { sessionId },
+        orderBy: { createdAt: "desc" },
+        select: {
+          status: true,
+          currency: true,
+          currencyExponent: true,
+          totalMinor: true
+        }
+      }),
+      this.options.database.payment.findFirst({
+        where: { sessionId },
+        orderBy: { createdAt: "desc" },
+        select: { status: true, appliedToSession: true }
+      }),
+      this.options.database.refund.findFirst({
+        where: { sessionId },
+        orderBy: { createdAt: "desc" },
+        select: { status: true, amountMinor: true }
+      }),
+      this.options.database.printJob.findFirst({
+        where: { sessionId },
+        select: {
+          id: true,
+          status: true,
+          resultConfidence: true,
+          failureCode: true,
+          warningCode: true
+        }
+      })
+    ]);
+
+    const documentTotals = documents.reduce(
+      (totals, file) => ({
+        total: totals.total + 1,
+        ready: totals.ready + (file.status === "READY" ? 1 : 0),
+        rejected: totals.rejected + (file.status === "REJECTED" ? 1 : 0),
+        deleted: totals.deleted + (file.deletedAt ? 1 : 0),
+        totalBytes: totals.totalBytes + (file.sizeBytes ?? 0),
+        totalPages: totals.totalPages + (file.pageCount ?? 0)
+      }),
+      { total: 0, ready: 0, rejected: 0, deleted: 0, totalBytes: 0, totalPages: 0 }
+    );
+
+    return {
+      session: {
+        id: session.id,
+        publicId: session.publicId,
+        kioskId: session.kioskId,
+        state: session.state as SessionState,
+        createdAt: session.createdAt.toISOString(),
+        updatedAt: session.updatedAt.toISOString(),
+        idleExpiresAt: session.idleExpiresAt.toISOString(),
+        hardExpiresAt: session.hardExpiresAt.toISOString(),
+        terminalReason: session.terminalReason,
+        cleanupStatus: session.cleanupStatus,
+        cleanupDueAt: session.cleanupDueAt?.toISOString() ?? null,
+        filesDeletedAt: session.filesDeletedAt?.toISOString() ?? null,
+        documentCount: documentTotals.total,
+        printJobStatus: printJob?.status ?? null,
+        paymentStatus: payment?.status ?? null
+      },
+      settings: settings
+        ? {
+            revision: settings.revision,
+            copies: settings.copies,
+            duplex: settings.duplex,
+            paperSize: settings.paperSize,
+            orientation: settings.orientation,
+            scaling: settings.scaling,
+            collate: settings.collate,
+            colorMode: settings.colorMode,
+            selectedPages: settings.selectedPages,
+            printedSides: settings.printedSides,
+            physicalSheets: settings.physicalSheets,
+            selectionsRedactedAt: settings.selectionsRedactedAt?.toISOString() ?? null
+          }
+        : null,
+      money: quote
+        ? {
+            currency: quote.currency,
+            currencyExponent: quote.currencyExponent,
+            totalMinor: quote.totalMinor,
+            quoteStatus: quote.status,
+            paymentStatus: payment?.status ?? null,
+            paymentAppliedToSession: payment?.appliedToSession ?? null,
+            refundStatus: refund?.status ?? null,
+            refundAmountMinor: refund?.amountMinor ?? null
+          }
+        : null,
+      documents: documentTotals,
+      printJob: printJob
+        ? {
+            id: printJob.id,
+            status: printJob.status,
+            resultConfidence: printJob.resultConfidence,
+            failureCode: printJob.failureCode,
+            warningCode: printJob.warningCode
+          }
+        : null
+    };
+  }
+
+  /**
+   * The workflow as an ordered list.
+   *
+   * Type and timing only. The stored payload is not selected, not granted to
+   * the reader role, and has no field in the response schema — see the contract
+   * for why a passthrough JSON column has no place in a viewer.
+   */
+  public async timeline(
+    scope: AdminReadScope,
+    sessionId: string,
+    cursor: string | undefined
+  ): Promise<AdminTimelineResponse | null> {
+    const session = await this.options.database.printSession.findFirst({
+      where: { id: sessionId, ...scopedKioskFilter(scope) },
+      select: { id: true }
+    });
+    if (!session) return null;
+
+    const after = cursor ? decodeAdminCursor(cursor) : null;
+    const rows = await this.options.database.sessionEvent.findMany({
+      where: {
+        sessionId,
+        ...(after ? { sequence: { gt: Number(after.id) } } : {})
+      },
+      orderBy: { sequence: "asc" },
+      take: ADMIN_PAGE_SIZE + 1,
+      select: { sequence: true, type: true, occurredAt: true }
+    });
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    let previous: Date | null = null;
+    const items = page.map((row) => {
+      const since = previous ? row.occurredAt.getTime() - previous.getTime() : null;
+      previous = row.occurredAt;
+      return {
+        sequence: row.sequence,
+        type: row.type,
+        occurredAt: row.occurredAt.toISOString(),
+        // Clamped at zero: two events can share a timestamp, and a negative
+        // gap would read as time running backwards rather than as "instant".
+        sincePreviousMilliseconds: since === null ? null : Math.max(0, since)
+      };
+    });
+
+    const last = page.at(-1);
+    return {
+      sessionId,
+      items,
+      nextCursor:
+        rows.length > ADMIN_PAGE_SIZE && last
+          ? encodeAdminCursor({ at: last.occurredAt, id: String(last.sequence) })
+          : null
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Documents
+  // -------------------------------------------------------------------------
+
+  public async documents(
+    scope: AdminReadScope,
+    sessionId: string
+  ): Promise<AdminDocumentsResponse | null> {
+    const session = await this.options.database.printSession.findFirst({
+      where: { id: sessionId, ...scopedKioskFilter(scope) },
+      select: { id: true, filesDeletedAt: true }
+    });
+    if (!session) return null;
+
+    const files = await this.options.database.uploadedFile.findMany({
+      where: { sessionId },
+      orderBy: { ordinal: "asc" },
+      take: ADMIN_PAGE_SIZE,
+      // Every field named here is a fact about the upload, not about its
+      // contents. `display_name`, `content_sha256` and `quarantine_object_key`
+      // are absent here and ungranted at the database.
+      select: {
+        id: true,
+        ordinal: true,
+        status: true,
+        kind: true,
+        declaredMime: true,
+        detectedMime: true,
+        extension: true,
+        sizeBytes: true,
+        pageCount: true,
+        malwareScanStatus: true,
+        rejectionCode: true,
+        processingErrorCode: true,
+        processingAttempts: true,
+        createdAt: true,
+        readyAt: true,
+        deleteRequestedAt: true,
+        deletedAt: true,
+        cleanupDueAt: true,
+        cleanupErrorCode: true
+      }
+    });
+
+    return {
+      sessionId,
+      filesDeletedAt: session.filesDeletedAt?.toISOString() ?? null,
+      items: files.map((file) => ({
+        id: file.id,
+        ordinal: file.ordinal,
+        status: file.status,
+        kind: file.kind,
+        declaredMime: file.declaredMime,
+        detectedMime: file.detectedMime,
+        extension: file.extension,
+        sizeBytes: file.sizeBytes,
+        pageCount: file.pageCount,
+        malwareScanStatus: file.malwareScanStatus,
+        rejectionCode: file.rejectionCode,
+        processingErrorCode: file.processingErrorCode,
+        processingAttempts: file.processingAttempts,
+        createdAt: file.createdAt.toISOString(),
+        readyAt: file.readyAt?.toISOString() ?? null,
+        deleteRequestedAt: file.deleteRequestedAt?.toISOString() ?? null,
+        deletedAt: file.deletedAt?.toISOString() ?? null,
+        cleanupDueAt: file.cleanupDueAt?.toISOString() ?? null,
+        cleanupErrorCode: file.cleanupErrorCode
+      }))
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Printing
+  // -------------------------------------------------------------------------
+
+  public async printJobs(
+    scope: AdminReadScope,
+    filters: {
+      kioskId?: string | undefined;
+      status?: string | undefined;
+      cursor?: string | undefined;
+    }
+  ): Promise<AdminPrintJobsResponse> {
+    const now = this.options.clock.now();
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+
+    const rows = await this.options.database.printJob.findMany({
+      where: {
+        ...scopedKioskFilter(scope, filters.kioskId),
+        ...(filters.status ? { status: filters.status } : {}),
+        ...keysetWhere("createdAt", cursor)
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: ADMIN_PAGE_SIZE + 1,
+      select: PRINT_JOB_SELECT
+    });
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    return {
+      scoped: scope.kioskIds !== null,
+      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.createdAt, id: row.id })),
+      items: page.map((row) => toPrintJob(row, now))
+    };
+  }
+
+  public async printJob(
+    scope: AdminReadScope,
+    printJobId: string,
+    includeDiagnostics: boolean
+  ): Promise<AdminPrintJobDetailResponse | null> {
+    const now = this.options.clock.now();
+    const job = await this.options.database.printJob.findFirst({
+      where: { id: printJobId, ...scopedKioskFilter(scope) },
+      select: PRINT_JOB_SELECT
+    });
+    if (!job) return null;
+
+    const [ledger, command] = await Promise.all([
+      includeDiagnostics
+        ? this.options.database.printJobEvent.findMany({
+            where: { printJobId },
+            orderBy: { sequence: "asc" },
+            take: ADMIN_PAGE_SIZE,
+            // `detail` is deliberately absent: it is free-form JSON and the
+            // reader role holds no grant on it.
+            select: {
+              sequence: true,
+              type: true,
+              status: true,
+              confidence: true,
+              failureCode: true,
+              warningCode: true,
+              createdAt: true
+            }
+          })
+        : null,
+      this.options.database.agentCommand.findFirst({
+        where: { printJobId },
+        // `payload` names the documents the kiosk is to fetch. Not selected,
+        // not granted.
+        select: {
+          type: true,
+          status: true,
+          attempts: true,
+          claimedAt: true,
+          leaseExpiresAt: true,
+          expiresAt: true,
+          resultCode: true,
+          completedAt: true
+        }
+      })
+    ]);
+
+    return {
+      job: toPrintJob(job, now),
+      ledger:
+        ledger?.map((event) => ({
+          sequence: event.sequence,
+          type: event.type,
+          status: event.status,
+          confidence: event.confidence,
+          failureCode: event.failureCode,
+          warningCode: event.warningCode,
+          createdAt: event.createdAt.toISOString()
+        })) ?? null,
+      command: command
+        ? {
+            type: command.type,
+            status: command.status,
+            attempts: command.attempts,
+            claimedAt: command.claimedAt?.toISOString() ?? null,
+            leaseExpiresAt: command.leaseExpiresAt?.toISOString() ?? null,
+            expiresAt: command.expiresAt.toISOString(),
+            resultCode: command.resultCode,
+            completedAt: command.completedAt?.toISOString() ?? null
+          }
+        : null
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Money
+  // -------------------------------------------------------------------------
+
+  public async payments(
+    scope: AdminReadScope,
+    filters: {
+      kioskId?: string | undefined;
+      status?: string | undefined;
+      cursor?: string | undefined;
+      /** `payment.reconcile.read`. Without it the provider reference is withheld. */
+      includeProviderReference: boolean;
+    }
+  ): Promise<AdminPaymentsResponse> {
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+
+    const rows = await this.options.database.payment.findMany({
+      where: {
+        ...scopedViaSessionFilter(scope, filters.kioskId),
+        ...(filters.status ? { status: filters.status } : {}),
+        ...keysetWhere("createdAt", cursor)
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: ADMIN_PAGE_SIZE + 1,
+      select: {
+        id: true,
+        sessionId: true,
+        provider: true,
+        providerIntentId: true,
+        status: true,
+        appliedToSession: true,
+        amountMinor: true,
+        currency: true,
+        currencyExponent: true,
+        failureCode: true,
+        expiresAt: true,
+        createdAt: true,
+        authorizedAt: true,
+        capturedAt: true,
+        failedAt: true,
+        session: { select: { kioskId: true } },
+        _count: { select: { attempts: true } }
+      }
+    });
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    return {
+      scoped: scope.kioskIds !== null,
+      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.createdAt, id: row.id })),
+      items: page.map((row) => ({
+        id: row.id,
+        sessionId: row.sessionId,
+        kioskId: row.session.kioskId,
+        provider: row.provider,
+        providerIntentId: filters.includeProviderReference ? row.providerIntentId : null,
+        status: row.status,
+        appliedToSession: row.appliedToSession,
+        amountMinor: row.amountMinor,
+        currency: row.currency,
+        currencyExponent: row.currencyExponent,
+        failureCode: row.failureCode,
+        attempts: row._count.attempts,
+        expiresAt: row.expiresAt.toISOString(),
+        createdAt: row.createdAt.toISOString(),
+        authorizedAt: row.authorizedAt?.toISOString() ?? null,
+        capturedAt: row.capturedAt?.toISOString() ?? null,
+        failedAt: row.failedAt?.toISOString() ?? null
+      }))
+    };
+  }
+
+  public async refunds(
+    scope: AdminReadScope,
+    filters: { unsettledOnly: boolean; cursor?: string | undefined }
+  ): Promise<AdminRefundsResponse> {
+    const now = this.options.clock.now();
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+    const scopeWhere = scopedViaSessionFilter(scope);
+
+    const [rows, unsettledCount] = await Promise.all([
+      this.options.database.refund.findMany({
+        where: {
+          ...scopeWhere,
+          ...(filters.unsettledOnly ? { completedAt: null } : {}),
+          ...keysetWhere("createdAt", cursor)
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: ADMIN_PAGE_SIZE + 1,
+        select: {
+          id: true,
+          paymentId: true,
+          sessionId: true,
+          provider: true,
+          reason: true,
+          status: true,
+          amountMinor: true,
+          currency: true,
+          currencyExponent: true,
+          createdAt: true,
+          completedAt: true
+        }
+      }),
+      this.options.database.refund.count({ where: { ...scopeWhere, completedAt: null } })
+    ]);
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    return {
+      unsettledCount,
+      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.createdAt, id: row.id })),
+      items: page.map((row) => ({
+        id: row.id,
+        paymentId: row.paymentId,
+        sessionId: row.sessionId,
+        provider: row.provider,
+        reason: row.reason,
+        status: row.status,
+        amountMinor: row.amountMinor,
+        currency: row.currency,
+        currencyExponent: row.currencyExponent,
+        createdAt: row.createdAt.toISOString(),
+        completedAt: row.completedAt?.toISOString() ?? null,
+        outstandingHours: row.completedAt
+          ? null
+          : Math.max(0, Math.floor((now.getTime() - row.createdAt.getTime()) / 3_600_000))
+      }))
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Retention
+  // -------------------------------------------------------------------------
+
+  public async retention(
+    scope: AdminReadScope,
+    filters: { problemsOnly: boolean; cursor?: string | undefined }
+  ): Promise<AdminRetentionResponse> {
+    const now = this.options.clock.now();
+    const overdueCutoff = new Date(now.getTime() - RETENTION_OVERDUE_GRACE_MILLISECONDS);
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+    const kioskScope = scopedKioskFilter(scope);
+    const scopeWhere = scopedViaSessionFilter(scope);
+
+    const [rows, pending, deadLettered, overdue] = await Promise.all([
+      this.options.database.cleanupRun.findMany({
+        where: {
+          ...scopeWhere,
+          ...(filters.problemsOnly
+            ? {
+                OR: [
+                  { deadLetteredAt: { not: null } },
+                  { completedAt: null, session: { cleanupDueAt: { lt: overdueCutoff } } }
+                ]
+              }
+            : {}),
+          ...keysetWhere("createdAt", cursor)
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: ADMIN_PAGE_SIZE + 1,
+        select: {
+          id: true,
+          sessionId: true,
+          reason: true,
+          status: true,
+          checkpoint: true,
+          attempts: true,
+          lastErrorCode: true,
+          objectsDeleted: true,
+          orphanObjectsDeleted: true,
+          availableAt: true,
+          createdAt: true,
+          updatedAt: true,
+          completedAt: true,
+          deadLetteredAt: true,
+          session: {
+            select: { kioskId: true, state: true, cleanupDueAt: true, filesDeletedAt: true }
+          }
+        }
+      }),
+      this.options.database.printSession.count({
+        where: { ...kioskScope, cleanupStatus: { in: ["PENDING", "IN_PROGRESS"] } }
+      }),
+      this.options.database.printSession.count({
+        where: { ...kioskScope, cleanupStatus: "DEAD_LETTER" }
+      }),
+      this.options.database.printSession.count({
+        where: {
+          ...kioskScope,
+          cleanupStatus: { in: [...ACTIVE_CLEANUP_STATUSES] },
+          cleanupDueAt: { lt: overdueCutoff },
+          filesDeletedAt: null
+        }
+      })
+    ]);
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    return {
+      scoped: scope.kioskIds !== null,
+      totals: { pending, overdue, deadLettered },
+      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.createdAt, id: row.id })),
+      items: page.map((row) => ({
+        sessionId: row.sessionId,
+        kioskId: row.session.kioskId,
+        sessionState: row.session.state as SessionState,
+        reason: row.reason,
+        status: row.status,
+        checkpoint: row.checkpoint,
+        attempts: row.attempts,
+        lastErrorCode: row.lastErrorCode,
+        objectsDeleted: row.objectsDeleted,
+        orphanObjectsDeleted: row.orphanObjectsDeleted,
+        availableAt: row.availableAt.toISOString(),
+        dueAt: row.session.cleanupDueAt?.toISOString() ?? null,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+        completedAt: row.completedAt?.toISOString() ?? null,
+        deadLetteredAt: row.deadLetteredAt?.toISOString() ?? null,
+        overdue:
+          row.session.filesDeletedAt === null &&
+          row.session.cleanupDueAt !== null &&
+          row.session.cleanupDueAt.getTime() < overdueCutoff.getTime()
+      }))
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Errors
+  // -------------------------------------------------------------------------
+
+  /**
+   * Failures grouped by subsystem and code.
+   *
+   * Grouping rather than listing is what keeps this bounded and what makes it
+   * useful: thirty rows of one code from one kiosk is one problem, and a list
+   * makes it look like thirty.
+   *
+   * Two subsystems report a null kiosk. Upload, payment, retention and event
+   * failures hang off a session rather than a kiosk, and grouping by a kiosk
+   * they only reach through a join would cost more than the answer is worth.
+   * The scope filter still traverses that relation, so an Operator sees only
+   * their own kiosks' failures even where the group cannot name one.
+   */
+  public async errors(scope: AdminReadScope, windowHours: number): Promise<AdminErrorsResponse> {
+    const now = this.options.clock.now();
+    const since = new Date(now.getTime() - windowHours * 3_600_000);
+    const viaSession = scopedViaSessionFilter(scope);
+    const direct = scopedKioskFilter(scope);
+
+    const [rejections, processing, payments, prints, commands, cleanups, outbox] =
+      await Promise.all([
+        this.options.database.uploadedFile.groupBy({
+          by: ["rejectionCode"],
+          where: { ...viaSession, rejectionCode: { not: null }, updatedAt: { gte: since } },
+          _count: true,
+          _max: { updatedAt: true }
+        }),
+        this.options.database.uploadedFile.groupBy({
+          by: ["processingErrorCode"],
+          where: { ...viaSession, processingErrorCode: { not: null }, updatedAt: { gte: since } },
+          _count: true,
+          _max: { updatedAt: true }
+        }),
+        this.options.database.payment.groupBy({
+          by: ["failureCode"],
+          where: { ...viaSession, failureCode: { not: null }, updatedAt: { gte: since } },
+          _count: true,
+          _max: { updatedAt: true }
+        }),
+        this.options.database.printJob.groupBy({
+          by: ["kioskId", "failureCode"],
+          where: { ...direct, failureCode: { not: null }, updatedAt: { gte: since } },
+          _count: true,
+          _max: { updatedAt: true }
+        }),
+        this.options.database.agentCommand.groupBy({
+          by: ["kioskId", "resultCode"],
+          where: { ...direct, resultCode: { not: null }, updatedAt: { gte: since } },
+          _count: true,
+          _max: { updatedAt: true }
+        }),
+        this.options.database.cleanupRun.groupBy({
+          by: ["lastErrorCode"],
+          where: { ...viaSession, lastErrorCode: { not: null }, updatedAt: { gte: since } },
+          _count: true,
+          _max: { updatedAt: true }
+        }),
+        this.options.database.outboxEvent.groupBy({
+          by: ["lastErrorCode"],
+          where: { ...viaSession, lastErrorCode: { not: null }, createdAt: { gte: since } },
+          _count: true,
+          _max: { createdAt: true }
+        })
+      ]);
+
+    const groups: AdminErrorsResponse["groups"] = [
+      ...toErrorGroups("UPLOAD", rejections, "rejectionCode", "updatedAt"),
+      ...toErrorGroups("DOCUMENT_PROCESSING", processing, "processingErrorCode", "updatedAt"),
+      ...toErrorGroups("PAYMENT", payments, "failureCode", "updatedAt"),
+      ...toErrorGroups("PRINTING", prints, "failureCode", "updatedAt"),
+      ...toErrorGroups("KIOSK_AGENT", commands, "resultCode", "updatedAt"),
+      ...toErrorGroups("RETENTION", cleanups, "lastErrorCode", "updatedAt"),
+      ...toErrorGroups("EVENT_PUBLISHING", outbox, "lastErrorCode", "createdAt")
+    ].sort(
+      (left, right) => right.count - left.count || right.lastSeenAt.localeCompare(left.lastSeenAt)
+    );
+
+    return {
+      windowHours,
+      scoped: scope.kioskIds !== null,
+      truncated: groups.length > MAX_ERROR_GROUPS,
+      groups: groups.slice(0, MAX_ERROR_GROUPS)
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Audit
+  // -------------------------------------------------------------------------
+
+  /**
+   * The append-only log, filtered.
+   *
+   * `selfActorId` is set for a role trusted to review its own actions but not
+   * everybody's. It is applied as a query filter rather than as a post-filter,
+   * so a page never silently shrinks and a total never counts rows the caller
+   * cannot see.
+   */
+  public async audit(
+    scope: AdminReadScope,
+    filters: {
+      selfActorId: string | null;
+      sessionId?: string | undefined;
+      kioskId?: string | undefined;
+      action?: string | undefined;
+      cursor?: string | undefined;
+    }
+  ): Promise<AdminAuditResponse> {
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+    const kioskScope = scopedKioskFilter(scope, filters.kioskId);
+
+    const rows = await this.options.database.auditEvent.findMany({
+      where: {
+        ...(filters.selfActorId
+          ? { actorType: ADMIN_ACTOR_TYPE, actorId: filters.selfActorId }
+          : {}),
+        // A scoped caller sees kiosk-attributed events for their kiosks. Events
+        // with no kiosk — account management, their own sign-ins — stay visible
+        // because withholding an operator's own history helps nobody.
+        ...(kioskScope.kioskId === undefined
+          ? {}
+          : filters.kioskId
+            ? { kioskId: kioskScope.kioskId }
+            : { OR: [{ kioskId: kioskScope.kioskId }, { kioskId: null }] }),
+        ...(filters.sessionId ? { sessionId: filters.sessionId } : {}),
+        ...(filters.action ? { action: filters.action } : {}),
+        ...keysetWhere("occurredAt", cursor)
+      },
+      orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+      take: ADMIN_PAGE_SIZE + 1,
+      select: {
+        id: true,
+        occurredAt: true,
+        actorType: true,
+        actorId: true,
+        kioskId: true,
+        sessionId: true,
+        action: true,
+        outcome: true,
+        requestId: true,
+        metadata: true
+      }
+    });
+
+    const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    const adminActorIds = [
+      ...new Set(page.filter((row) => row.actorType === ADMIN_ACTOR_TYPE).map((row) => row.actorId))
+    ];
+    const names = new Map<string, string>();
+    if (adminActorIds.length > 0) {
+      const people = await this.options.database.adminUser.findMany({
+        where: { id: { in: adminActorIds } },
+        select: { id: true, displayName: true }
+      });
+      for (const person of people) names.set(person.id, person.displayName);
+    }
+
+    return {
+      scope: filters.selfActorId ? "SELF" : "ALL",
+      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.occurredAt, id: row.id })),
+      items: page.map((row) => {
+        const projected = projectAuditMetadata(row.metadata);
+        return {
+          id: row.id,
+          occurredAt: row.occurredAt.toISOString(),
+          actorType: row.actorType,
+          actorId: row.actorId,
+          actorDisplayName: names.get(row.actorId) ?? null,
+          kioskId: row.kioskId,
+          sessionId: row.sessionId,
+          action: row.action,
+          outcome: row.outcome,
+          requestId: row.requestId,
+          metadata: projected.metadata,
+          redactedKeys: projected.redactedKeys
+        };
+      })
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared query shaping
+// ---------------------------------------------------------------------------
+
+const PRINT_JOB_SELECT = {
+  id: true,
+  sessionId: true,
+  kioskId: true,
+  status: true,
+  resultConfidence: true,
+  failureCode: true,
+  warningCode: true,
+  copies: true,
+  printedSides: true,
+  physicalSheets: true,
+  sheetsProduced: true,
+  dispatchAttempts: true,
+  deadlineAt: true,
+  createdAt: true,
+  dispatchedAt: true,
+  startedAt: true,
+  completedAt: true,
+  failedAt: true,
+  manifestRedactedAt: true
+} as const;
+
+interface PrintJobRow {
+  id: string;
+  sessionId: string;
+  kioskId: string;
+  status: string;
+  resultConfidence: string;
+  failureCode: string | null;
+  warningCode: string | null;
+  copies: number;
+  printedSides: number;
+  physicalSheets: number;
+  sheetsProduced: number | null;
+  dispatchAttempts: number;
+  deadlineAt: Date;
+  createdAt: Date;
+  dispatchedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failedAt: Date | null;
+  manifestRedactedAt: Date | null;
+}
+
+function toPrintJob(job: PrintJobRow, now: Date): AdminPrintJobsResponse["items"][number] {
+  return {
+    id: job.id,
+    sessionId: job.sessionId,
+    kioskId: job.kioskId,
+    status: job.status,
+    resultConfidence: job.resultConfidence,
+    failureCode: job.failureCode,
+    warningCode: job.warningCode,
+    copies: job.copies,
+    printedSides: job.printedSides,
+    physicalSheets: job.physicalSheets,
+    sheetsProduced: job.sheetsProduced,
+    dispatchAttempts: job.dispatchAttempts,
+    deadlineAt: job.deadlineAt.toISOString(),
+    createdAt: job.createdAt.toISOString(),
+    dispatchedAt: job.dispatchedAt?.toISOString() ?? null,
+    startedAt: job.startedAt?.toISOString() ?? null,
+    completedAt: job.completedAt?.toISOString() ?? null,
+    failedAt: job.failedAt?.toISOString() ?? null,
+    manifestRedactedAt: job.manifestRedactedAt?.toISOString() ?? null,
+    overdue:
+      (OPEN_PRINT_STATUSES as readonly string[]).includes(job.status) &&
+      job.deadlineAt.getTime() < now.getTime()
+  };
+}
+
+type KioskSelector = { in: string[] } | string;
+
+/**
+ * A kiosk filter for the kiosk table itself.
+ *
+ * Empty only when the caller is unrestricted and asked for no particular
+ * kiosk. A scoped caller who names a kiosk outside their scope gets the
+ * intersection, which is empty — asking for someone else's kiosk returns
+ * nothing rather than an error that would confirm it exists.
+ */
+function scopedKioskIdFilter(scope: AdminReadScope, requested?: string): { id?: KioskSelector } {
+  if (scope.kioskIds === null) return requested ? { id: requested } : {};
+  const allowed = requested
+    ? scope.kioskIds.filter((kioskId) => kioskId === requested)
+    : scope.kioskIds;
+  return { id: { in: [...allowed] } };
+}
+
+/** The same filter, for a table whose own rows carry `kiosk_id`. */
+function scopedKioskFilter(scope: AdminReadScope, requested?: string): { kioskId?: KioskSelector } {
+  const filter = scopedKioskIdFilter(scope, requested);
+  return filter.id === undefined ? {} : { kioskId: filter.id };
+}
+
+/**
+ * The same filter again, for a table that reaches a kiosk through its session.
+ *
+ * Traversing the relation costs a join, which is why the tables that carry
+ * `kiosk_id` themselves use the filter above. It matters that both exist: a
+ * scope that only worked on some tables would be a scope with holes in it.
+ */
+function scopedViaSessionFilter(
+  scope: AdminReadScope,
+  requested?: string
+): { session?: { kioskId: KioskSelector } } {
+  const filter = scopedKioskFilter(scope, requested);
+  return filter.kioskId === undefined ? {} : { session: { kioskId: filter.kioskId } };
+}
+
+function scopeKey(scope: AdminReadScope): string {
+  return scope.kioskIds === null ? "*" : [...scope.kioskIds].sort().join(",");
+}
+
+/**
+ * The keyset predicate: everything strictly after the cursor's position.
+ *
+ * The tie-break on `id` is what makes a page boundary safe. Two rows created in
+ * the same millisecond are common under load, and without it one of them would
+ * be returned twice or not at all.
+ */
+function keysetWhere(
+  field: "createdAt" | "occurredAt",
+  cursor: { at: Date; id: string } | null
+): Record<string, unknown> {
+  if (!cursor) return {};
+  return { OR: [{ [field]: { lt: cursor.at } }, { [field]: cursor.at, id: { lt: cursor.id } }] };
+}
+
+function nextCursorFrom<TRow>(
+  fetched: readonly TRow[],
+  page: readonly TRow[],
+  position: (row: TRow) => { at: Date; id: string }
+): string | null {
+  const last = page.at(-1);
+  if (fetched.length <= page.length || !last) return null;
+  return encodeAdminCursor(position(last));
+}
+
+function countsByKey<TKey extends string>(
+  groups: readonly ({ _count: number } & Record<TKey, string | null>)[],
+  key: TKey
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const group of groups) {
+    const value = group[key];
+    if (value === null) continue;
+    counts[value] = (counts[value] ?? 0) + group._count;
+  }
+  return counts;
+}
+
+function sumValues(counts: Record<string, number>): number {
+  return Object.values(counts).reduce((total, value) => total + value, 0);
+}
+
+function toErrorGroups<TRow extends { _count: number }>(
+  subsystem: AdminErrorsResponse["groups"][number]["subsystem"],
+  rows: readonly TRow[],
+  codeField: string,
+  timeField: string
+): AdminErrorsResponse["groups"] {
+  const groups: AdminErrorsResponse["groups"] = [];
+  for (const row of rows) {
+    const record = row as unknown as Record<string, unknown>;
+    const code = record[codeField];
+    if (typeof code !== "string") continue;
+    const maximum = record._max as Record<string, Date | null> | undefined;
+    const lastSeenAt = maximum?.[timeField];
+    groups.push({
+      subsystem,
+      code,
+      kioskId: typeof record.kioskId === "string" ? record.kioskId : null,
+      count: row._count,
+      lastSeenAt: (lastSeenAt ?? new Date(0)).toISOString()
+    });
+  }
+  return groups;
+}

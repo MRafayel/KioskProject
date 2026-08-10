@@ -97,3 +97,98 @@ export function sanitizeMetadata(
   }
   return safe;
 }
+
+/**
+ * Keys the audit viewer may display, for events written by any actor.
+ *
+ * The allow-list above governs what an admin action is permitted to *write*,
+ * and it did not exist when the kiosk, phone, worker and payment paths started
+ * writing to this table. Those callers are careful — they record identifiers,
+ * counts and states — but "careful when I last looked" is not a property a log
+ * viewer should depend on, and a viewer is exactly where an unnoticed filename
+ * would end up on a screen.
+ *
+ * So the read side has its own list. It is a superset of the write list because
+ * it covers other subsystems' vocabulary, and every entry is a field whose
+ * meaning was checked against what actually writes it.
+ */
+const READABLE_METADATA_KEYS = new Set([
+  ...ALLOWED_METADATA_KEYS,
+  // Upload and document processing.
+  "fileId",
+  "fileCount",
+  "kind",
+  "sizeBytes",
+  "pageCount",
+  "rejectionCode",
+  "previousStatus",
+  "processingRevision",
+  "attempt",
+  "attempts",
+  // Sessions and their lifecycle.
+  "state",
+  "terminalReason",
+  "settingsRevision",
+  "quoteId",
+  // Money. Amounts and states only; no provider secret has ever been written
+  // here and none may start being displayed if one is.
+  "paymentId",
+  "refundId",
+  "amountMinor",
+  "currency",
+  "provider",
+  "status",
+  // Printing.
+  "printJobId",
+  "operationId",
+  "confidence",
+  "sheetsProduced",
+  "warningCode",
+  // Retention.
+  "checkpoint",
+  "objectsDeleted",
+  "orphanObjectsDeleted",
+  "multipartUploadsAborted",
+  "deadLettered"
+]);
+
+export interface ProjectedAuditMetadata {
+  metadata: Record<string, string | number | boolean>;
+  /** Names of the keys that were withheld, so nothing is hidden silently. */
+  redactedKeys: string[];
+}
+
+/**
+ * Project a stored metadata blob into what the viewer may show.
+ *
+ * Unknown keys are reported by name rather than dropped invisibly: an operator
+ * chasing an incident should be able to see that a field exists and ask for it
+ * to be allow-listed, instead of concluding the system never recorded it.
+ * The name of a key is safe to show; the value it holds is what is not.
+ *
+ * Nested objects and arrays are refused whatever their key. A structured value
+ * is how an entire file record gets carried along by a caller that only meant
+ * to add context, and there is no operational question that needs one.
+ */
+export function projectAuditMetadata(stored: unknown): ProjectedAuditMetadata {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+    return { metadata: {}, redactedKeys: [] };
+  }
+
+  const metadata: Record<string, string | number | boolean> = {};
+  const redactedKeys: string[] = [];
+
+  for (const [key, value] of Object.entries(stored as Record<string, unknown>)) {
+    if (value === null || value === undefined) continue;
+    const displayable =
+      typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+    if (!READABLE_METADATA_KEYS.has(key) || !displayable) {
+      // Bound the key name too: it comes from stored JSON, not from this file.
+      redactedKeys.push(key.slice(0, 60));
+      continue;
+    }
+    metadata[key] = typeof value === "string" ? value.slice(0, 200) : value;
+  }
+
+  return { metadata, redactedKeys };
+}
