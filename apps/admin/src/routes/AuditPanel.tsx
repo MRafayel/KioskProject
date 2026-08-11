@@ -30,7 +30,7 @@ export function AuditPanel() {
 
   return (
     <Panel
-      title="Audit"
+      title="Recent activity"
       state={state}
       hint={
         state.data?.scope === "SELF"

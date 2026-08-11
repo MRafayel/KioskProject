@@ -21,9 +21,12 @@ import { RecordedResolution, RecoveryResolutionForm } from "./RecoveryResolution
  * decided otherwise would undo the one property that makes a paid print
  * trustworthy.
  */
-export function PrintingPanel() {
+export function PrintingPanel({ initialStatus }: { initialStatus?: string | undefined } = {}) {
   const session = useSession();
-  const [status, setStatus] = useState("");
+  // Opening state only. The shell remounts this panel when the reason for
+  // arriving changes, so a filter chosen on the overview shows up here without
+  // taking the control away from the person once they are looking at it.
+  const [status, setStatus] = useState(initialStatus ?? "");
   const [selected, setSelected] = useState<string | null>(null);
 
   const load = useCallback(
@@ -35,7 +38,7 @@ export function PrintingPanel() {
   return (
     <>
       <Panel
-        title="Printing"
+        title="Recent print jobs"
         state={list}
         hint={list.data?.scoped ? "Showing jobs on the kiosks assigned to you." : undefined}
         actions={

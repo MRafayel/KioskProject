@@ -20,8 +20,12 @@ import { useAdminData } from "../features/observability/useAdminData.js";
  * so on its own — the worker has stopped trying, and the row is waiting for a
  * person. That is why the failures are the default view rather than a filter.
  */
-export function RetentionPanel() {
-  const [problemsOnly, setProblemsOnly] = useState(true);
+export function RetentionPanel({
+  initialProblemsOnly
+}: { initialProblemsOnly?: boolean | undefined } = {}) {
+  // Failures remain the default. Arriving from "deletion pending" is the one
+  // case where somebody asked for the whole list instead.
+  const [problemsOnly, setProblemsOnly] = useState(initialProblemsOnly ?? true);
   const load = useCallback(() => observabilityApi.retention(problemsOnly), [problemsOnly]);
   const state = useAdminData(load, { refreshMilliseconds: 30_000 });
 

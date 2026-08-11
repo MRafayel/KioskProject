@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import react from "@vitejs/plugin-react";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin, type PreviewServer, type ViteDevServer } from "vite";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -63,6 +63,41 @@ export const PRODUCTION_STYLE_SOURCE = "'self'";
  */
 export const DEVELOPMENT_STYLE_SOURCE = "'self' 'unsafe-inline'";
 
+/**
+ * Send the headers on every response, including `304 Not Modified`.
+ *
+ * Vite's own `server.headers` option only reaches responses that carry a body.
+ * A conditional request that revalidates to 304 answers without them, and a
+ * 304 does not mean "nothing changed" to a cache — it means "reuse what you
+ * stored, amended by the headers I just sent" (RFC 9111 §4.3.4). Any header
+ * missing from the 304 is therefore taken from the *stored* response.
+ *
+ * For a security policy that is the wrong outcome, and it fails silently for as
+ * long as the cache entry lives. `index.html` is a fixed shell whose body
+ * rarely changes, so its ETag rarely changes either: a browser that once
+ * fetched this page under an older policy will revalidate to 304 forever and
+ * keep enforcing the policy it stored, surviving reloads and browser restarts.
+ * Tightening the policy would then apply to new visitors and to nobody else.
+ *
+ * Registering the headers as the first middleware fixes it at the source.
+ * `res.setHeader` before `writeHead` survives onto whatever status is chosen
+ * later, so the current policy travels with 200s and 304s alike.
+ */
+export function alwaysSendSecurityHeaders(headers: Readonly<Record<string, string>>): Plugin {
+  const apply = (server: ViteDevServer | PreviewServer) => {
+    server.middlewares.use((_request, response, next) => {
+      for (const [name, value] of Object.entries(headers)) response.setHeader(name, value);
+      next();
+    });
+  };
+
+  return {
+    name: "admin-security-headers",
+    configureServer: apply,
+    configurePreviewServer: apply
+  };
+}
+
 export default defineConfig(({ command, isPreview, mode }) => {
   const environment = loadEnv(mode, repositoryRoot, "");
   const keyPath = environment.DEV_HTTPS_KEY_PATH;
@@ -84,8 +119,12 @@ export default defineConfig(({ command, isPreview, mode }) => {
     };
   }
 
+  // `vite preview` serves the built bundle, so it rehearses the shipped policy;
+  // only the dev server needs the inline-style concession.
+  const styleSource = isDevelopmentServer ? DEVELOPMENT_STYLE_SOURCE : PRODUCTION_STYLE_SOURCE;
+
   return {
-    plugins: [react()],
+    plugins: [react(), alwaysSendSecurityHeaders(securityHeaders(styleSource))],
     server: {
       // Loopback only. The control plane is not a public surface, and in
       // development it should not be reachable from the local network.
@@ -96,7 +135,8 @@ export default defineConfig(({ command, isPreview, mode }) => {
       // development exercise the same strict script policy as production.
       hmr: false,
       ...(https ? { https } : {}),
-      headers: securityHeaders(DEVELOPMENT_STYLE_SOURCE),
+      // Headers come from the plugin above rather than `server.headers`, so
+      // that a 304 carries them too.
       // Same-origin proxy, so the admin session cookie is first-party and the
       // strict `connect-src 'self'` policy above holds.
       proxy: {
@@ -105,9 +145,6 @@ export default defineConfig(({ command, isPreview, mode }) => {
           changeOrigin: false
         }
       }
-    },
-    preview: {
-      headers: securityHeaders(PRODUCTION_STYLE_SOURCE)
     }
   };
 });

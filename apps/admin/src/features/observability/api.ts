@@ -1,24 +1,25 @@
-import type {
-  AcknowledgeIncidentBody,
-  AcknowledgeIncidentResponse,
-  AdminAuditResponse,
-  AdminDocumentsResponse,
-  AdminErrorsResponse,
-  AdminKiosksResponse,
-  AdminOverviewResponse,
-  AdminPaymentsResponse,
-  AdminPrintJobDetailResponse,
-  AdminPrintJobsResponse,
-  AdminRefundsResponse,
-  AdminRetentionResponse,
-  AdminSessionDetailResponse,
-  AdminSessionsResponse,
-  AdminTimelineResponse,
-  ResolveRecoveryBody,
-  ResolveRecoveryResponse
+import {
+  adminErrorsResponseSchema,
+  adminOverviewResponseSchema,
+  resolveRecoveryResponseSchema,
+  type AcknowledgeIncidentBody,
+  type AcknowledgeIncidentResponse,
+  type AdminAuditResponse,
+  type AdminDocumentsResponse,
+  type AdminKiosksResponse,
+  type AdminPaymentsResponse,
+  type AdminPrintJobDetailResponse,
+  type AdminPrintJobsResponse,
+  type AdminRefundsResponse,
+  type AdminRetentionResponse,
+  type AdminSessionDetailResponse,
+  type AdminSessionsResponse,
+  type AdminTimelineResponse,
+  type ResolveRecoveryBody,
+  type ResolveRecoveryResponse
 } from "@printing-kiosk/admin-access";
 
-import { adminRequest } from "../auth/api.js";
+import { adminRequest, adminRequestParsed } from "../auth/api.js";
 
 /**
  * The operational reads, and the two things an operator can do.
@@ -48,7 +49,10 @@ export interface ListFilters extends Record<string, string | undefined> {
 }
 
 export const observabilityApi = {
-  overview: () => adminRequest<AdminOverviewResponse>("GET", "/v1/admin/overview"),
+  // Parsed: every attention code on the overview is a link to somewhere, and a
+  // code this build has never heard of would otherwise be drawn as raw
+  // SCREAMING_SNAKE next to a button that goes nowhere useful.
+  overview: () => adminRequestParsed(adminOverviewResponseSchema, "GET", "/v1/admin/overview"),
   kiosks: () => adminRequest<AdminKiosksResponse>("GET", "/v1/admin/kiosks"),
 
   sessions: (filters: ListFilters = {}) =>
@@ -91,8 +95,14 @@ export const observabilityApi = {
       `/v1/admin/retention${query({ problemsOnly, cursor })}`
     ),
 
+  // Parsed: the acknowledgement flow keys on subsystem and code, so a group
+  // whose shape drifted would be acknowledged under a key nothing matches.
   errors: (windowHours: number) =>
-    adminRequest<AdminErrorsResponse>("GET", `/v1/admin/errors${query({ windowHours })}`),
+    adminRequestParsed(
+      adminErrorsResponseSchema,
+      "GET",
+      `/v1/admin/errors${query({ windowHours })}`
+    ),
 
   audit: (filters: { sessionId?: string; cursor?: string } = {}) =>
     adminRequest<AdminAuditResponse>("GET", `/v1/admin/audit${query(filters)}`),
@@ -105,7 +115,8 @@ export const observabilityApi = {
    * replays an identical repeat and refuses a contradictory one.
    */
   resolveRecovery: (printJobId: string, body: ResolveRecoveryBody) =>
-    adminRequest<ResolveRecoveryResponse>(
+    adminRequestParsed<ResolveRecoveryResponse>(
+      resolveRecoveryResponseSchema,
       "POST",
       `/v1/admin/print-jobs/${encodeURIComponent(printJobId)}/recovery-resolution`,
       body

@@ -90,23 +90,85 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="panel__status">{children}</p>;
 }
 
-export function Counters({
-  items
-}: {
-  items: readonly { label: string; value: number; alarming?: boolean }[];
-}) {
+export interface CounterItem {
+  label: string;
+  value: number;
+  alarming?: boolean;
+  /**
+   * Where the rows behind this number live. Omitted when there is no view that
+   * says more than the number already does — an unreachable count is better
+   * than a link that lands somewhere unrelated and teaches people not to click.
+   */
+  onOpen?: (() => void) | undefined;
+  /** Completes "…: 3." for a screen reader, e.g. "Show failed print jobs." */
+  openLabel?: string;
+}
+
+export function Counters({ items }: { items: readonly CounterItem[] }) {
   return (
     <dl className="counters">
       {items.map((item) => (
-        <div
-          key={item.label}
-          className={item.alarming && item.value > 0 ? "counter is-alarming" : "counter"}
-        >
-          <dt>{item.label}</dt>
-          <dd>{item.value}</dd>
-        </div>
+        <Counter key={item.label} item={item} />
       ))}
     </dl>
+  );
+}
+
+function Counter({ item }: { item: CounterItem }) {
+  const className = item.alarming && item.value > 0 ? "counter is-alarming" : "counter";
+  const body = (
+    <>
+      <dt>{item.label}</dt>
+      <dd>{item.value}</dd>
+    </>
+  );
+
+  if (!item.onOpen) return <div className={className}>{body}</div>;
+
+  // A real button, not a click handler on the tile. It has to be reachable by
+  // keyboard and announce itself as something that goes somewhere, and the
+  // definition list stays intact because the button sits inside the group
+  // rather than replacing it.
+  return (
+    <div className={`${className} is-navigable`}>
+      <button
+        type="button"
+        className="counter__open"
+        onClick={item.onOpen}
+        aria-label={`${item.label}: ${item.value}. ${item.openLabel ?? "View details."}`}
+      >
+        {body}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A named group of counters that steps out of the way when it has nothing.
+ *
+ * An operations dashboard that always draws the same thirty tiles teaches the
+ * eye to skim all thirty. Most of the time almost every number here is zero,
+ * and those zeros are genuinely good news — so they get one quiet line saying
+ * so, and the tiles are spent on the groups that actually have something in
+ * them.
+ */
+export function CounterGroup({
+  title,
+  items,
+  quiet
+}: {
+  title: string;
+  items: readonly CounterItem[];
+  /** The one line shown instead of the tiles, e.g. "nothing live right now". */
+  quiet: string;
+}) {
+  const empty = items.every((item) => item.value === 0);
+
+  return (
+    <section className="counter-group">
+      <h3>{title}</h3>
+      {empty ? <p className="counter-group__quiet">{quiet}</p> : <Counters items={items} />}
+    </section>
   );
 }
 

@@ -26,9 +26,10 @@ const SESSION_STATES = adminSessionStateSchema.options;
  * them — and offers no way to see one, because there is no such endpoint and
  * no grant behind it.
  */
-export function SessionsPanel() {
+export function SessionsPanel({ initialState }: { initialState?: string | undefined } = {}) {
   const session = useSession();
-  const [state, setState] = useState<string>("");
+  // Opening state only; see PrintingPanel for why this is not kept in sync.
+  const [state, setState] = useState<string>(initialState ?? "");
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -42,7 +43,7 @@ export function SessionsPanel() {
   return (
     <>
       <Panel
-        title="Sessions"
+        title="Recent sessions"
         state={list}
         hint={list.data?.scoped ? "Showing sessions on the kiosks assigned to you." : undefined}
         actions={

@@ -177,7 +177,11 @@ export function SignInScreen() {
               I understand this code is spent as soon as recovery starts.
             </label>
 
-            <button type="submit" disabled={recovering || !acknowledged}>
+            <button
+              type="submit"
+              className="recovery__submit"
+              disabled={recovering || !acknowledged}
+            >
               {recovering ? "Recovery in progress…" : "Consume code and enrol key"}
             </button>
           </form>

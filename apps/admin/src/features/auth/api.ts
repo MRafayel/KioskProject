@@ -1,7 +1,7 @@
-import type {
-  AdminAuthenticatorsResponse,
-  AdminBoundWebAuthnOptionsResponse,
-  AdminIdentityResponse
+import {
+  adminAuthenticatorsResponseSchema,
+  adminIdentityResponseSchema,
+  type AdminBoundWebAuthnOptionsResponse
 } from "@printing-kiosk/admin-access";
 
 /**
@@ -69,6 +69,68 @@ export async function adminRequest<T>(method: string, path: string, body?: unkno
   return call<T>(method, path, body);
 }
 
+/**
+ * Anything that can turn an unknown payload into a known one, or throw.
+ *
+ * Structural rather than a Zod type, so this file does not take a dependency on
+ * the validation library to state what it needs. The shared contracts satisfy
+ * it as they are.
+ */
+export interface AdminResponseSchema<T> {
+  parse: (value: unknown) => T;
+}
+
+/**
+ * The same request, with the response checked against the contract at runtime.
+ *
+ * A generic parameter is a compile-time claim about a server this code does not
+ * compile with. It is erased before the first request is ever sent, so an older
+ * page talking to a newer control plane will cast whatever arrives into the
+ * shape it expected and draw it — a role it does not recognise, a capability
+ * list that is now an object, an attention code with no label — silently, and
+ * looking authoritative while doing it.
+ *
+ * Not every response needs this. Long lists of rows are shown as they are and a
+ * wrong field is visible as a wrong field. It is worth the cost where being
+ * wrong is not obvious on screen: who you are, what you may do, how long your
+ * session lasts, and which states the operational counts claim to be in.
+ */
+export async function adminRequestParsed<T>(
+  schema: AdminResponseSchema<T>,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<T> {
+  const payload = await call<unknown>(method, path, body);
+  try {
+    return schema.parse(payload);
+  } catch (error) {
+    // The paths are useful and safe to print; the values are neither, and one
+    // of them could be a customer's data. Only the shape is reported, and only
+    // to the console — the operator gets the generic message below.
+    reportSchemaMismatch(path, error);
+    throw new AdminApiError(
+      200,
+      "INVALID_RESPONSE",
+      "The control plane returned something this page does not understand. It may be running a newer version — reload before relying on what is shown."
+    );
+  }
+}
+
+function reportSchemaMismatch(path: string, error: unknown): void {
+  const issues =
+    error && typeof error === "object" && "issues" in error && Array.isArray(error.issues)
+      ? error.issues
+          .slice(0, 8)
+          .map((issue: unknown) =>
+            issue && typeof issue === "object" && "path" in issue && Array.isArray(issue.path)
+              ? issue.path.join(".")
+              : "?"
+          )
+      : [];
+  console.error(`Admin response did not match its contract: ${path}`, { fields: issues });
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const isMutation = method !== "GET" && method !== "HEAD";
   const response = await fetch(path, {
@@ -133,26 +195,38 @@ export interface CeremonyResponse {
 }
 
 export const adminApi = {
-  me: () => call<AdminIdentityResponse>("GET", "/v1/admin/me"),
+  // Identity is parsed rather than cast wherever it arrives. Role, capability
+  // list and session windows all come from here, and every visibility decision
+  // this app makes is downstream of them.
+  me: () => adminRequestParsed(adminIdentityResponseSchema, "GET", "/v1/admin/me"),
   health: () => call<{ role: string; timestamp: string }>("GET", "/v1/admin/health"),
   logout: () => call<void>("POST", "/v1/admin/auth/logout"),
 
   beginSignIn: () => call<CeremonyResponse>("POST", "/v1/admin/auth/authentication/options"),
   completeSignIn: (ceremonyId: string, credential: unknown) =>
-    call<AdminIdentityResponse>("POST", "/v1/admin/auth/authentication/verify", {
-      ceremonyId,
-      credential
-    }),
+    adminRequestParsed(
+      adminIdentityResponseSchema,
+      "POST",
+      "/v1/admin/auth/authentication/verify",
+      {
+        ceremonyId,
+        credential
+      }
+    ),
 
   beginStepUp: () =>
     call<AdminBoundWebAuthnOptionsResponse>("POST", "/v1/admin/auth/step-up/options"),
+  // The step-up response is what tells this page a sensitive action is now
+  // authorised and for how long. Trusting an unread shape here would let a
+  // malformed reply present as a fresh assertion.
   completeStepUp: (ceremonyId: string, credential: unknown) =>
-    call<AdminIdentityResponse>("POST", "/v1/admin/auth/step-up/verify", {
+    adminRequestParsed(adminIdentityResponseSchema, "POST", "/v1/admin/auth/step-up/verify", {
       ceremonyId,
       credential
     }),
 
-  authenticators: () => call<AdminAuthenticatorsResponse>("GET", "/v1/admin/authenticators"),
+  authenticators: () =>
+    adminRequestParsed(adminAuthenticatorsResponseSchema, "GET", "/v1/admin/authenticators"),
   beginEnrolment: () =>
     call<AdminBoundWebAuthnOptionsResponse>(
       "POST",

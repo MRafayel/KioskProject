@@ -30,7 +30,7 @@ export function ErrorsPanel() {
 
   return (
     <Panel
-      title="Errors"
+      title="Failure groups"
       state={state}
       hint={state.data?.truncated ? "More distinct failures exist than are shown." : undefined}
       actions={

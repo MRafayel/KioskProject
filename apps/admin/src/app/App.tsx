@@ -1,8 +1,13 @@
-import { useState } from "react";
-
-import type { AdminCapability } from "@printing-kiosk/admin-access";
+import { useCallback, useState } from "react";
 
 import { SessionProvider, useSession } from "../features/auth/SessionProvider.js";
+import {
+  destinationKey,
+  NavigationContext,
+  SECTION_CAPABILITY,
+  type AdminDestination,
+  type AdminSectionId
+} from "../features/navigation.js";
 import { AuditPanel } from "../routes/AuditPanel.js";
 import { ErrorsPanel } from "../routes/ErrorsPanel.js";
 import { KiosksPanel } from "../routes/KiosksPanel.js";
@@ -23,42 +28,40 @@ import { SignInScreen } from "../routes/SignInScreen.js";
  */
 
 interface Section {
-  id: string;
+  id: AdminSectionId;
   label: string;
-  capability: AdminCapability;
-  render: () => React.ReactNode;
+  /** Draws the panel, given whatever brought the operator here. */
+  render: (destination: AdminDestination) => React.ReactNode;
 }
 
 const SECTIONS: readonly Section[] = [
-  {
-    id: "overview",
-    label: "Overview",
-    capability: "dashboard.read",
-    render: () => <OverviewScreen />
-  },
-  { id: "kiosks", label: "Kiosks", capability: "kiosk.read", render: () => <KiosksPanel /> },
+  { id: "overview", label: "Overview", render: () => <OverviewScreen /> },
+  { id: "kiosks", label: "Kiosks", render: () => <KiosksPanel /> },
   {
     id: "sessions",
     label: "Sessions",
-    capability: "session.read",
-    render: () => <SessionsPanel />
+    render: (destination) => <SessionsPanel initialState={destination.sessionState} />
   },
-  { id: "printing", label: "Printing", capability: "print.read", render: () => <PrintingPanel /> },
-  { id: "money", label: "Money", capability: "payment.read", render: () => <MoneyPanel /> },
+  {
+    id: "printing",
+    label: "Printing",
+    render: (destination) => <PrintingPanel initialStatus={destination.printStatus} />
+  },
+  {
+    id: "money",
+    label: "Money",
+    render: (destination) => <MoneyPanel focus={destination.moneyFocus} />
+  },
   {
     id: "retention",
     label: "Retention",
-    capability: "document.retention.read",
-    render: () => <RetentionPanel />
+    render: (destination) => (
+      <RetentionPanel initialProblemsOnly={destination.retentionProblemsOnly} />
+    )
   },
-  { id: "errors", label: "Errors", capability: "error.read", render: () => <ErrorsPanel /> },
-  { id: "audit", label: "Audit", capability: "audit.read.self", render: () => <AuditPanel /> },
-  {
-    id: "security-keys",
-    label: "Security keys",
-    capability: "authenticator.manage.self",
-    render: () => <SecurityKeysPanel />
-  }
+  { id: "errors", label: "Errors", render: () => <ErrorsPanel /> },
+  { id: "audit", label: "Audit", render: () => <AuditPanel /> },
+  { id: "security-keys", label: "Security keys", render: () => <SecurityKeysPanel /> }
 ];
 
 export function App() {
@@ -71,7 +74,21 @@ export function App() {
 
 function Shell() {
   const session = useSession();
-  const [active, setActive] = useState("overview");
+  const [destination, setDestination] = useState<AdminDestination>({ section: "overview" });
+
+  // Identity is settled before any of this renders, so `can` is safe to consult
+  // here; the guard below returns early while it is not.
+  const canOpen = session.can;
+  const navigate = useCallback(
+    (target: AdminDestination) => {
+      // A link the operator cannot follow should not move them somewhere they
+      // will only be refused. The overview already hides these, so reaching
+      // this means the capability changed under them mid-session.
+      if (!canOpen(SECTION_CAPABILITY[target.section])) return;
+      setDestination(target);
+    },
+    [canOpen]
+  );
 
   if (session.status === "loading") {
     return (
@@ -85,86 +102,112 @@ function Shell() {
     return <SignInScreen />;
   }
 
-  const visible = SECTIONS.filter((section) => session.can(section.capability));
-  const current = visible.find((section) => section.id === active) ?? visible[0];
+  const visible = SECTIONS.filter((section) => session.can(SECTION_CAPABILITY[section.id]));
+  const current = visible.find((section) => section.id === destination.section) ?? visible[0];
 
   return (
-    <div className="shell">
-      <nav className="shell__nav" aria-label="Sections">
-        <p className="shell__nav-title">Control plane</p>
-        {visible.map((section) => (
-          <button
-            key={section.id}
-            type="button"
-            className={section.id === current?.id ? "nav-tab is-active" : "nav-tab"}
-            aria-current={section.id === current?.id ? "page" : undefined}
-            onClick={() => setActive(section.id)}
-          >
-            {section.label}
-          </button>
-        ))}
-      </nav>
+    <NavigationContext value={navigate}>
+      <div className="shell">
+        {/* The rail owns navigation and the signed-in identity together. Who you
+          are is a property of the whole session rather than of the screen you
+          happen to be on, so repeating it above every panel spent the most
+          valuable strip of the page on something that never changes. */}
+        <div className="shell__rail">
+          <p className="shell__rail-title">Control plane</p>
 
-      <div className="shell__body">
-        <header className="shell__header">
-          <div>
-            <h1>{current?.label ?? "Control Plane"}</h1>
-            <p className="shell__identity">
-              {session.identity.displayName} · <RoleBadge role={session.identity.role} />
-            </p>
+          <nav className="shell__nav" aria-label="Sections">
+            {visible.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                className={section.id === current?.id ? "nav-tab is-active" : "nav-tab"}
+                aria-current={section.id === current?.id ? "page" : undefined}
+                onClick={() => setDestination({ section: section.id })}
+              >
+                {section.label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="shell__account">
+            <p className="shell__account-name">{session.identity.displayName}</p>
+            <p className="shell__account-role">{roleLabel(session.identity.role)}</p>
+            <button
+              type="button"
+              className="shell__signout"
+              disabled={session.activity === "signing-out"}
+              onClick={() => void session.signOut()}
+            >
+              {session.activity === "signing-out" ? "Signing out…" : "Sign out"}
+            </button>
           </div>
-          <button
-            type="button"
-            disabled={session.activity === "signing-out"}
-            onClick={() => void session.signOut()}
-          >
-            {session.activity === "signing-out" ? "Signing out…" : "Sign out"}
-          </button>
-        </header>
+        </div>
 
-        <main className="shell__main">
-          {session.error ? (
-            <div role="alert" className="shell__alert">
-              <span>{session.error}</span>
-              <div className="panel__actions">
-                {session.errorCanRetry ? (
-                  <button
-                    type="button"
-                    disabled={session.activity === "refreshing"}
-                    onClick={() => void session.refresh()}
-                  >
-                    Retry session check
+        <div className="shell__body">
+          <header className="shell__header">
+            <h1>{current?.label ?? "Control Plane"}</h1>
+          </header>
+
+          <main className="shell__main">
+            {session.error ? (
+              <div role="alert" className="shell__alert">
+                <span>{session.error}</span>
+                <div className="panel__actions">
+                  {session.errorCanRetry ? (
+                    <button
+                      type="button"
+                      disabled={session.activity === "refreshing"}
+                      onClick={() => void session.refresh()}
+                    >
+                      Retry session check
+                    </button>
+                  ) : null}
+                  <button type="button" onClick={session.clearError}>
+                    Dismiss
                   </button>
-                ) : null}
-                <button type="button" onClick={session.clearError}>
-                  Dismiss
-                </button>
+                </div>
               </div>
-            </div>
-          ) : null}
-          {current ? current.render() : <p>Your role has no sections available.</p>}
-        </main>
+            ) : null}
+            {/* Keyed by the destination so arriving at a panel for a new reason
+              re-opens it with that filter. Without the key, a second visit
+              would keep the first filter and show the wrong rows under a
+              heading that looked right. */}
+            {current ? (
+              <div key={destinationKey(destination)}>{current.render(destination)}</div>
+            ) : (
+              <p>Your role has no sections available.</p>
+            )}
+          </main>
 
-        <footer className="shell__footer">
-          <p>
-            Session ends{" "}
-            <time dateTime={session.identity.session.hardExpiresAt}>
-              {new Date(session.identity.session.hardExpiresAt).toLocaleTimeString()}
-            </time>{" "}
-            at the latest. This panel reads operational state; it cannot change anything, and it
-            holds no credential for document storage.
-          </p>
-        </footer>
+          <footer className="shell__footer">
+            <p>
+              Session ends{" "}
+              <time dateTime={session.identity.session.hardExpiresAt}>
+                {new Date(session.identity.session.hardExpiresAt).toLocaleTimeString()}
+              </time>{" "}
+              at the latest. This panel records observations and acknowledgements; it cannot move
+              money, change a kiosk, or reach document contents.
+            </p>
+          </footer>
+        </div>
       </div>
-    </div>
+    </NavigationContext>
   );
 }
 
-function RoleBadge({ role }: { role: string }) {
-  const label = {
-    OPERATOR: "Operator",
-    ADMIN: "Admin",
-    TECHNICAL_ADMIN: "Technical Admin"
-  }[role];
-  return <span className="role-badge">{label ?? role}</span>;
+/**
+ * On the rail this is plain text rather than a badge.
+ *
+ * The accent is reserved for "somebody has to do something", and a role is a
+ * standing fact, not a task. Tinting it would put a second orange next to the
+ * active section and teach the eye to stop trusting the colour.
+ */
+function roleLabel(role: string): string {
+  return (
+    {
+      OPERATOR: "Operator",
+      ADMIN: "Admin",
+      TECHNICAL_ADMIN: "Technical Admin"
+    }[role] ?? role
+  );
 }

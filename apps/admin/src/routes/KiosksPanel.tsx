@@ -17,7 +17,7 @@ export function KiosksPanel() {
 
   return (
     <Panel
-      title="Kiosks"
+      title="All kiosks"
       state={state}
       hint={state.data?.scoped ? "Showing the kiosks assigned to you." : undefined}
       actions={

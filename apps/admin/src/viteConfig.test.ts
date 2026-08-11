@@ -1,11 +1,50 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  alwaysSendSecurityHeaders,
   DEVELOPMENT_STYLE_SOURCE,
   PRODUCTION_STYLE_SOURCE,
   resolveAdminDevelopmentOrigin,
   securityHeaders
 } from "../vite.config.js";
+
+/**
+ * Capture what the plugin registers, without standing up a server.
+ *
+ * The behaviour under test is that the headers are applied by a middleware at
+ * all — `server.headers` would satisfy every assertion about their *content*
+ * while still omitting them from a 304, which is the failure this guards.
+ */
+type FakeResponse = { setHeader: (name: string, value: string) => void };
+type FakeMiddleware = (request: unknown, response: FakeResponse, next: () => void) => void;
+
+function applyPluginHeaders(headers: Readonly<Record<string, string>>) {
+  const plugin = alwaysSendSecurityHeaders(headers);
+  const registered: FakeMiddleware[] = [];
+  const server = { middlewares: { use: (handler: FakeMiddleware) => registered.push(handler) } };
+
+  // The hook is typed against Vite's own server objects. Its middleware stack
+  // is the only part this test touches, so it is handed a stand-in for that.
+  const configure = plugin.configureServer as unknown as (target: typeof server) => void;
+  configure(server);
+
+  const sent: Record<string, string> = {};
+  let nextCalled = false;
+  for (const middleware of registered) {
+    middleware(
+      {},
+      {
+        setHeader: (name, value) => {
+          sent[name] = value;
+        }
+      },
+      () => {
+        nextCalled = true;
+      }
+    );
+  }
+  return { sent, nextCalled, middlewareCount: registered.length };
+}
 
 describe("admin Vite origin alignment", () => {
   it("does not inherit phone-only HTTPS certificates for an HTTP admin origin", () => {
@@ -73,6 +112,19 @@ describe("admin content security policy", () => {
     expect(policy).toContain("object-src 'none'");
     expect(policy).not.toContain("unsafe-eval");
     expect(policy).not.toContain("script-src 'self' 'unsafe-inline'");
+  });
+
+  it("sets the headers from a middleware, so a 304 carries the current policy", () => {
+    const headers = securityHeaders(PRODUCTION_STYLE_SOURCE);
+    const { sent, nextCalled, middlewareCount } = applyPluginHeaders(headers);
+
+    expect(middlewareCount).toBe(1);
+    // `res.setHeader` before the status is chosen is what makes a bodyless
+    // response carry these. A cache treats a header missing from a 304 as
+    // unchanged and keeps the one it stored, so a policy that skips this path
+    // can never be tightened for anyone who already has the page.
+    expect(sent).toEqual({ ...headers });
+    expect(nextCalled).toBe(true);
   });
 
   it("keeps every non-CSP header identical in both modes", () => {
