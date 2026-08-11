@@ -4,8 +4,12 @@ import { z } from "zod";
 import {
   acknowledgeIncidentBodySchema,
   acknowledgeIncidentResponseSchema,
+  correctRecoveryBodySchema,
+  correctRecoveryResponseSchema,
   resolveRecoveryBodySchema,
-  resolveRecoveryResponseSchema
+  resolveRecoveryResponseSchema,
+  retryRetentionBodySchema,
+  retryRetentionResponseSchema
 } from "@printing-kiosk/admin-access";
 
 import { authorizeAdmin, type AdminAuthorizationDependencies } from "./authorize.js";
@@ -13,23 +17,26 @@ import { adminNamespacedRateKey, createAdminAccountThrottle, sendNoStore } from 
 import type { AdminOperationsService } from "./operations.js";
 
 /**
- * Everything the control plane can change.
+ * Everything the control plane can change that does not cost money.
  *
- * Two routes. That is the entire mutating surface of the admin panel, and
- * keeping it in one short file is deliberate: a reviewer should be able to see
- * the whole of what a dashboard account can do without reading anything else.
+ * Four routes, and none of them can cause a payout: they record what a person
+ * saw at a tray, correct such a record, ask retention to retry a run that gave
+ * up, and note that somebody is looking at a failure. The connection they run
+ * on holds no grant on `refunds` at all.
  *
- * Neither route moves money. `refund.authorize` has no endpoint at all — not a
- * disabled one, not a guarded one — because the phase that introduces it is the
- * phase that should be reviewed for it. An Operator can record that a print
- * appears to owe a refund; turning that into a payment is a different
- * capability, held by different people, and it does not exist here yet.
+ * `refund.authorize` is deliberately not here. It lives in `refund-routes.ts`,
+ * on its own pool as its own database role, because the Phase 4 gate is that
+ * the money path is structurally separate from the operator observation path —
+ * and a separation that amounts to two handlers in one file is not one. Both
+ * files are short for the same reason: a reviewer should be able to read the
+ * whole of what a dashboard account can do.
  *
  * Authorization, CSRF and step-up are all `authorizeAdmin`'s job, in that
  * order, and a route cannot perform three of the four checks because there is
- * no way to ask for a subset. `print.recovery.resolve` is R2, so a fresh
- * WebAuthn assertion is required before it will run; `incident.acknowledge` is
- * R1 and is not, because it changes nothing.
+ * no way to ask for a subset. The two R2 routes require a fresh WebAuthn
+ * assertion before they will run; the two R1 ones do not, because acknowledging
+ * a failure changes nothing and asking retention to retry changes nothing the
+ * worker was not already going to do.
  */
 
 const printJobParams = z.object({ printJobId: z.string().uuid() });
@@ -100,6 +107,58 @@ export function registerAdminOperationsRoutes(
       );
     }
   );
+
+  /**
+   * Correct an account of a print that turned out to be wrong.
+   *
+   * The record being superseded is named in the body rather than inferred from
+   * the job, so correcting a record somebody has already superseded is a
+   * conflict rather than a silent overwrite. `print.recovery.correct` is R2 and
+   * is held by nobody who records observations.
+   */
+  app.post(
+    "/v1/admin/print-jobs/:printJobId/recovery-correction",
+    actionRoute,
+    async (request, reply) => {
+      const admin = await authorizeAdmin(request, dependencies, "print.recovery.correct");
+      await throttleAccount(request, admin.sessionId);
+
+      const params = printJobParams.parse(request.params);
+      const body = correctRecoveryBodySchema.parse(request.body ?? {});
+      const result = await dependencies.operations.correctPrintRecovery(
+        admin,
+        params.printJobId,
+        body,
+        request.id
+      );
+
+      return sendNoStore(
+        reply.code(result.replayed ? 200 : 201),
+        correctRecoveryResponseSchema.parse(result)
+      );
+    }
+  );
+
+  /**
+   * Ask retention to try a dead-lettered cleanup run again.
+   *
+   * R1, and no step-up: a dead-lettered run means a customer's documents are
+   * still there after this system promised they would be gone, and putting an
+   * extra ceremony between a person and "try again" would be protecting the
+   * wrong thing. It appends a request; the worker re-arms its own run.
+   */
+  app.post("/v1/admin/retention/retry", actionRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "document.retention.retry");
+    await throttleAccount(request, admin.sessionId);
+
+    const body = retryRetentionBodySchema.parse(request.body ?? {});
+    const result = await dependencies.operations.retryRetention(admin, body, request.id);
+
+    return sendNoStore(
+      reply.code(result.replayed ? 200 : 201),
+      retryRetentionResponseSchema.parse(result)
+    );
+  });
 
   /**
    * Say that somebody is looking at a failure group.

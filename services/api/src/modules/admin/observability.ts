@@ -14,7 +14,10 @@ import {
   type AdminPaymentsResponse,
   type AdminPrintJobDetailResponse,
   type AdminPrintJobsResponse,
+  type AdminRecoveryCorrection,
   type AdminRecoveryResolution,
+  type AdminRefundQueueEntry,
+  type AdminRefundQueueResponse,
   type AdminRefundsResponse,
   type AdminRetentionResponse,
   type AdminSessionDetailResponse,
@@ -798,7 +801,7 @@ export class AdminObservabilityService {
     });
     if (!job) return null;
 
-    const [ledger, command, resolution] = await Promise.all([
+    const [ledger, command, resolution, corrections] = await Promise.all([
       includeDiagnostics
         ? this.options.database.printJobEvent.findMany({
             where: { printJobId },
@@ -839,6 +842,7 @@ export class AdminObservabilityService {
       this.options.database.printJobRecoveryResolution.findUnique({
         where: { printJobId },
         select: {
+          id: true,
           printJobId: true,
           outcome: true,
           reason: true,
@@ -849,13 +853,48 @@ export class AdminObservabilityService {
           createdAt: true,
           resolvedBy: { select: { displayName: true } }
         }
+      }),
+      // Every correction to that observation, oldest first. Shown in full
+      // rather than collapsed into a single current answer: a correction that
+      // hid what it corrected would be an edit wearing a different name, and
+      // the point of the chain is that both versions stay readable.
+      this.options.database.printJobRecoveryCorrection.findMany({
+        where: { printJobId },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          printJobId: true,
+          supersedesId: true,
+          outcome: true,
+          reason: true,
+          refundSuggested: true,
+          observedSheets: true,
+          correctedByAdminId: true,
+          correctedByRole: true,
+          createdAt: true,
+          correctedBy: { select: { displayName: true } }
+        }
       })
     ]);
 
     return {
       job: toPrintJob(job, now),
+      corrections: corrections.map((correction) => ({
+        id: correction.id,
+        printJobId: correction.printJobId,
+        supersedesId: correction.supersedesId,
+        outcome: correction.outcome as AdminRecoveryCorrection["outcome"],
+        reason: correction.reason,
+        refundSuggested: correction.refundSuggested,
+        observedSheets: correction.observedSheets,
+        correctedByAdminUserId: correction.correctedByAdminId,
+        correctedByDisplayName: correction.correctedBy?.displayName ?? null,
+        correctedByRole: correction.correctedByRole,
+        correctedAt: correction.createdAt.toISOString()
+      })),
       resolution: resolution
         ? {
+            id: resolution.id,
             printJobId: resolution.printJobId,
             outcome: resolution.outcome as AdminRecoveryResolution["outcome"],
             reason: resolution.reason,
@@ -963,6 +1002,141 @@ export class AdminObservabilityService {
     };
   }
 
+  /**
+   * The prints waiting for somebody who can decide about money.
+   *
+   * Phase 3 recorded observations and stopped. Two of its four outcomes mean a
+   * person thinks money is owed, and one — `UNRESOLVABLE` — meant nobody could
+   * tell, which suggested no refund and then appeared on no list at all. Both
+   * belong here: the first is "how much", the second is "somebody with more
+   * authority has to make a call", and neither is a closed case.
+   *
+   * A job leaves this queue when a refund has been authorized against it, not
+   * when somebody decides it owes nothing — deciding that a print owes nothing
+   * is a correction, and it leaves a record.
+   *
+   * The account each row shows is the *effective* one: the newest correction if
+   * there is one, otherwise the original observation. A queue that showed
+   * superseded evidence would be a queue that pays out on it.
+   */
+  public async refundQueue(
+    scope: AdminReadScope,
+    filters: { cursor?: string | undefined }
+  ): Promise<AdminRefundQueueResponse> {
+    const cursor = filters.cursor ? decodeAdminCursor(filters.cursor) : null;
+
+    // Oldest first: this is a worklist, and the print somebody has been waiting
+    // longest on is the one that should be answered next.
+    const candidates = await this.options.database.printJobRecoveryResolution.findMany({
+      where: {
+        ...scopedKioskFilter(scope),
+        ...keysetWhere("createdAt", cursor, "asc"),
+        printJob: {
+          status: "RECOVERY_REQUIRED",
+          // Authorizing a refund is what takes a print off this list.
+          refundAuthorization: { is: null },
+          payment: { status: "CAPTURED" }
+        }
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: ADMIN_PAGE_SIZE + 1,
+      select: REFUND_QUEUE_SELECT
+    });
+
+    const page = candidates.slice(0, ADMIN_PAGE_SIZE);
+    const decided = page
+      .map((row) => toRefundQueueCandidate(row))
+      .filter((entry) => entry !== null);
+
+    // What is already owed on each payment, from every reason combined, so the
+    // ceiling the server enforces is the ceiling the screen shows.
+    const refunded = await this.refundedByPayment(decided.map((entry) => entry.paymentId));
+
+    const items = decided.map((entry) => {
+      const alreadyRefunded = refunded.get(entry.paymentId) ?? 0;
+      return {
+        ...entry.presentation,
+        refundedAmountMinor: alreadyRefunded,
+        authorizableAmountMinor: Math.max(entry.capturedAmountMinor - alreadyRefunded, 0)
+      };
+    });
+
+    return {
+      items,
+      nextCursor: nextCursorFrom(candidates, page, (row) => ({ at: row.createdAt, id: row.id })),
+      totals: await this.refundQueueTotals(scope)
+    };
+  }
+
+  /**
+   * Exact counts for the two reasons a print is in the queue.
+   *
+   * Split in two because "the newest correction wins" is not expressible as a
+   * `where` clause. Prints nobody has corrected — very nearly all of them — are
+   * counted by the database. The handful that carry a correction are read and
+   * resolved here, bounded so this can never become an unbounded scan.
+   */
+  private async refundQueueTotals(
+    scope: AdminReadScope
+  ): Promise<{ suggested: number; unresolvable: number }> {
+    const uncorrected = {
+      ...scopedKioskFilter(scope),
+      printJob: {
+        status: "RECOVERY_REQUIRED",
+        refundAuthorization: { is: null },
+        payment: { status: "CAPTURED" },
+        recoveryCorrections: { none: {} }
+      }
+    } as const;
+
+    const [suggested, unresolvable, corrected] = await Promise.all([
+      this.options.database.printJobRecoveryResolution.count({
+        where: { ...uncorrected, refundSuggested: true }
+      }),
+      this.options.database.printJobRecoveryResolution.count({
+        where: { ...uncorrected, outcome: "UNRESOLVABLE" }
+      }),
+      this.options.database.printJobRecoveryResolution.findMany({
+        where: {
+          ...scopedKioskFilter(scope),
+          printJob: {
+            status: "RECOVERY_REQUIRED",
+            refundAuthorization: { is: null },
+            payment: { status: "CAPTURED" },
+            recoveryCorrections: { some: {} }
+          }
+        },
+        take: MAX_CORRECTED_QUEUE_ENTRIES,
+        select: REFUND_QUEUE_SELECT
+      })
+    ]);
+
+    let correctedSuggested = 0;
+    let correctedUnresolvable = 0;
+    for (const row of corrected) {
+      const entry = toRefundQueueCandidate(row);
+      if (!entry) continue;
+      if (entry.presentation.queueReason === "UNRESOLVABLE") correctedUnresolvable += 1;
+      else correctedSuggested += 1;
+    }
+
+    return {
+      suggested: suggested + correctedSuggested,
+      unresolvable: unresolvable + correctedUnresolvable
+    };
+  }
+
+  /** Everything already owed on each of these payments, by every reason. */
+  private async refundedByPayment(paymentIds: readonly string[]): Promise<Map<string, number>> {
+    if (paymentIds.length === 0) return new Map();
+    const sums = await this.options.database.refund.groupBy({
+      by: ["paymentId"],
+      where: { paymentId: { in: [...new Set(paymentIds)] } },
+      _sum: { amountMinor: true }
+    });
+    return new Map(sums.map((row) => [row.paymentId, row._sum.amountMinor ?? 0]));
+  }
+
   public async refunds(
     scope: AdminReadScope,
     filters: { unsettledOnly: boolean; cursor?: string | undefined }
@@ -991,7 +1165,16 @@ export class AdminObservabilityService {
           currency: true,
           currencyExponent: true,
           createdAt: true,
-          completedAt: true
+          completedAt: true,
+          // Null for an obligation the payment path raised on its own. "The
+          // system noticed" and "a named person decided" are different kinds of
+          // claim on the same ledger, and the screen should not merge them.
+          authorization: {
+            select: {
+              reason: true,
+              authorizedBy: { select: { displayName: true } }
+            }
+          }
         }
       }),
       this.options.database.refund.count({ where: { ...scopeWhere, completedAt: null } })
@@ -1015,7 +1198,9 @@ export class AdminObservabilityService {
         completedAt: row.completedAt?.toISOString() ?? null,
         outstandingHours: row.completedAt
           ? null
-          : Math.max(0, Math.floor((now.getTime() - row.createdAt.getTime()) / 3_600_000))
+          : Math.max(0, Math.floor((now.getTime() - row.createdAt.getTime()) / 3_600_000)),
+        authorizedByDisplayName: row.authorization?.authorizedBy?.displayName ?? null,
+        authorizationReason: row.authorization?.reason ?? null
       }))
     };
   }
@@ -1503,10 +1688,17 @@ function scopeKey(scope: AdminReadScope): string {
  */
 function keysetWhere(
   field: "createdAt" | "occurredAt",
-  cursor: { at: Date; id: string } | null
+  cursor: { at: Date; id: string } | null,
+  // Every list in the panel is newest-first except one: the refund queue is a
+  // worklist, and the print somebody has been waiting longest on is the one to
+  // answer next.
+  direction: "asc" | "desc" = "desc"
 ): Record<string, unknown> {
   if (!cursor) return {};
-  return { OR: [{ [field]: { lt: cursor.at } }, { [field]: cursor.at, id: { lt: cursor.id } }] };
+  const beyond = direction === "asc" ? "gt" : "lt";
+  return {
+    OR: [{ [field]: { [beyond]: cursor.at } }, { [field]: cursor.at, id: { [beyond]: cursor.id } }]
+  };
 }
 
 function nextCursorFrom<TRow>(
@@ -1517,6 +1709,160 @@ function nextCursorFrom<TRow>(
   const last = page.at(-1);
   if (fetched.length <= page.length || !last) return null;
   return encodeAdminCursor(position(last));
+}
+
+/**
+ * Everything one refund queue row is decided from.
+ *
+ * Written once and used by both the page and the totals, so the two can never
+ * disagree about which prints are waiting — a queue whose count and contents
+ * were computed differently is a queue somebody stops believing.
+ */
+const REFUND_QUEUE_SELECT = {
+  id: true,
+  printJobId: true,
+  sessionId: true,
+  kioskId: true,
+  outcome: true,
+  reason: true,
+  observedSheets: true,
+  createdAt: true,
+  resolvedBy: { select: { displayName: true } },
+  printJob: {
+    select: {
+      paymentId: true,
+      sheetsProduced: true,
+      physicalSheets: true,
+      payment: {
+        select: { amountMinor: true, currency: true, currencyExponent: true }
+      },
+      recoveryCorrections: {
+        orderBy: [{ createdAt: "asc" as const }, { id: "asc" as const }],
+        select: {
+          id: true,
+          supersedesId: true,
+          outcome: true,
+          reason: true,
+          observedSheets: true,
+          createdAt: true,
+          correctedBy: { select: { displayName: true } }
+        }
+      }
+    }
+  }
+};
+
+/**
+ * A ceiling on the corrected prints resolved in memory when counting the queue.
+ *
+ * Correcting an observation is meant to be rare. If this ever truncates, the
+ * count is low rather than wrong in an unbounded direction, and the queue is
+ * telling somebody that corrections have stopped being exceptional.
+ */
+const MAX_CORRECTED_QUEUE_ENTRIES = 500;
+
+type RefundQueueRow = {
+  id: string;
+  printJobId: string;
+  sessionId: string;
+  kioskId: string;
+  outcome: string;
+  reason: string;
+  observedSheets: number | null;
+  createdAt: Date;
+  resolvedBy: { displayName: string } | null;
+  printJob: {
+    paymentId: string;
+    sheetsProduced: number | null;
+    physicalSheets: number;
+    payment: { amountMinor: number; currency: string; currencyExponent: number } | null;
+    recoveryCorrections: readonly {
+      id: string;
+      supersedesId: string;
+      outcome: string;
+      reason: string;
+      observedSheets: number | null;
+      createdAt: Date;
+      correctedBy: { displayName: string } | null;
+    }[];
+  } | null;
+};
+
+/**
+ * Turn one observation and its corrections into a queue row, or into nothing.
+ *
+ * Nothing when the effective account says the customer got their pages: a
+ * correction to `DELIVERED` is how a print that never owed anything leaves this
+ * list, and it leaves by being answered rather than by being hidden.
+ */
+function toRefundQueueCandidate(row: RefundQueueRow): {
+  paymentId: string;
+  capturedAmountMinor: number;
+  presentation: Omit<
+    AdminRefundQueueEntry,
+    "refundedAmountMinor" | "authorizableAmountMinor" | "capturedAmountMinor"
+  > & { capturedAmountMinor: number };
+} | null {
+  const job = row.printJob;
+  const payment = job?.payment;
+  if (!job || !payment) return null;
+
+  // Follow the chain rather than taking the newest timestamp. They agree today,
+  // and the chain is the one that stays right if they ever stop agreeing.
+  const bySuperseded = new Map(job.recoveryCorrections.map((entry) => [entry.supersedesId, entry]));
+  let effective = {
+    id: row.id,
+    outcome: row.outcome,
+    reason: row.reason,
+    observedSheets: row.observedSheets,
+    at: row.createdAt,
+    byDisplayName: row.resolvedBy?.displayName ?? null,
+    corrected: false
+  };
+  for (let step = 0; step < job.recoveryCorrections.length; step += 1) {
+    const next = bySuperseded.get(effective.id);
+    if (!next) break;
+    effective = {
+      id: next.id,
+      outcome: next.outcome,
+      reason: next.reason,
+      observedSheets: next.observedSheets,
+      at: next.createdAt,
+      byDisplayName: next.correctedBy?.displayName ?? null,
+      corrected: true
+    };
+  }
+
+  const queueReason =
+    effective.outcome === "UNRESOLVABLE"
+      ? "UNRESOLVABLE"
+      : effective.outcome === "PARTIALLY_DELIVERED" || effective.outcome === "NOT_DELIVERED"
+        ? "REFUND_SUGGESTED"
+        : null;
+  if (!queueReason) return null;
+
+  return {
+    paymentId: job.paymentId,
+    capturedAmountMinor: payment.amountMinor,
+    presentation: {
+      printJobId: row.printJobId,
+      sessionId: row.sessionId,
+      kioskId: row.kioskId,
+      queueReason,
+      outcome: effective.outcome as AdminRefundQueueEntry["outcome"],
+      reason: effective.reason,
+      observedSheets: effective.observedSheets,
+      sheetsProduced: job.sheetsProduced,
+      physicalSheets: job.physicalSheets,
+      observedByDisplayName: effective.byDisplayName,
+      observedAt: effective.at.toISOString(),
+      corrected: effective.corrected,
+      paymentId: job.paymentId,
+      capturedAmountMinor: payment.amountMinor,
+      currency: payment.currency,
+      currencyExponent: payment.currencyExponent
+    }
+  };
 }
 
 function countsByKey<TKey extends string>(

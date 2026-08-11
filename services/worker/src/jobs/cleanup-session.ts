@@ -10,8 +10,10 @@ import {
   advanceCheckpoint,
   isCleanupDeadLettered,
   nextCleanupAttemptAt,
+  retentionGraceMilliseconds,
   sessionObjectPrefixes,
-  type CleanupCheckpoint
+  type CleanupCheckpoint,
+  type RetentionPolicy
 } from "@printing-kiosk/domain";
 
 import type { RetentionStore } from "../storage/document-store.js";
@@ -65,6 +67,12 @@ export interface SessionCleanupRunnerOptions {
   newId?: () => string;
   /** Injected so retry spread is deterministic under test. */
   jitter?: () => number;
+  /**
+   * The grace policy this runner shortens a resolved recovery down to. The API
+   * schedules from the same policy when a session ends, so the two must be
+   * given the same one or a resolution could move a deadline the other way.
+   */
+  retentionPolicy?: RetentionPolicy;
 }
 
 interface ClaimedRun {
@@ -136,6 +144,8 @@ export class SessionCleanupRunner {
     if (this.running) return 0;
     this.running = true;
     try {
+      await this.rearmRequestedRuns();
+      await this.shortenResolvedRecoveryGrace();
       await this.scheduleDueSessions();
 
       let processed = 0;
@@ -149,6 +159,153 @@ export class SessionCleanupRunner {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Pick up the runs a person asked to try again.
+   *
+   * The control plane cannot re-arm a run: it holds no privilege on
+   * `cleanup_runs` at all. What it can do is append a row saying "this specific
+   * dead-lettering should be retried", and this is the other half of that — the
+   * worker reading its own work queue and acting on it with its own authority.
+   *
+   * Nothing marks a request as consumed, and nothing needs to. Re-arming moves
+   * the run out of `DEAD_LETTER`, so the request stops matching; if the run
+   * exhausts its attempts again it records a new `dead_lettered_at`, and the old
+   * request does not match that either. A person has to look at the new failure
+   * and decide again, which is the correct amount of ceremony for "the thing
+   * that was going to delete a customer's documents has now failed twice".
+   *
+   * The attempt counter is reset because a person has intervened: the backoff
+   * exists to space out retries against a failing dependency, and somebody
+   * saying the dependency is back is better information than an exponent.
+   */
+  private async rearmRequestedRuns(): Promise<void> {
+    const now = this.now();
+
+    const requested = await this.options.database.$queryRaw<
+      Array<{ id: string; session_id: string; attempts: number }>
+    >`
+      UPDATE "cleanup_runs" AS "r"
+         SET "status" = 'PENDING',
+             "attempts" = 0,
+             "available_at" = ${now},
+             "lease_token" = NULL,
+             "lease_expires_at" = NULL,
+             "updated_at" = ${now}
+       WHERE "r"."id" IN (
+         SELECT "c"."id"
+           FROM "cleanup_runs" AS "c"
+           JOIN "cleanup_retry_requests" AS "q"
+             ON "q"."cleanup_run_id" = "c"."id"
+            AND "q"."dead_lettered_at" = "c"."dead_lettered_at"
+          WHERE "c"."status" = 'DEAD_LETTER'
+          ORDER BY "q"."created_at" ASC
+          LIMIT ${this.batchSize}
+          FOR UPDATE OF "c" SKIP LOCKED
+       )
+      RETURNING "r"."id", "r"."session_id", "r"."attempts"
+    `;
+
+    for (const run of requested) {
+      // The operator-facing mirror moves with the run, as it does everywhere
+      // else: a session saying DEAD_LETTER while its run is PENDING is a
+      // dashboard telling somebody to act on something already in hand.
+      await this.options.database.printSession.updateMany({
+        where: { id: run.session_id, cleanupStatus: "DEAD_LETTER" },
+        data: { cleanupStatus: "PENDING", updatedAt: now }
+      });
+
+      this.options.logger.info(
+        { cleanupRunId: run.id, sessionId: run.session_id },
+        "cleanup run re-armed at an operator's request"
+      );
+    }
+  }
+
+  /**
+   * Let a session out of its recovery grace once a person has answered it.
+   *
+   * `RECOVERY_REQUIRED` carries the longest retention window this system has,
+   * and the reason is that a device could not say whether paper came out, so
+   * somebody may still need to ask about it. Once an operator has recorded what
+   * they saw, that window has served its purpose — and the documents sitting
+   * behind it are a customer's, held longer than they need to be, which is the
+   * thing retention exists to prevent.
+   *
+   * Retention learns this by reading the observation rather than by being told.
+   * No signal table, no grant, no admin-side write: the resolution already
+   * exists, the worker already has the authority, and a mechanism that needs
+   * neither is a mechanism that cannot be pointed at the wrong session.
+   *
+   * The new deadline is the settled grace measured from the moment the person
+   * answered, and never later than the deadline the session already had — this
+   * only ever shortens. Files still being written keep their own barriers:
+   * `UPLOADING` and `VALIDATING` rows protect an in-flight PUT that may outlive
+   * a resolution recorded seconds after the session ended, and pulling those
+   * forward could let a sweep run before a PUT that is still authorized.
+   */
+  private async shortenResolvedRecoveryGrace(): Promise<void> {
+    const now = this.now();
+    const settledGrace = retentionGraceMilliseconds("COMPLETED", this.options.retentionPolicy);
+
+    const shortened = await this.options.database.$queryRaw<Array<{ id: string }>>`
+      UPDATE "print_sessions" AS "s"
+         SET "cleanup_due_at" = "answered"."due_at",
+             "updated_at" = ${now}
+        FROM (
+          SELECT "r"."session_id",
+                 MIN("r"."created_at") + ${settledGrace} * INTERVAL '1 millisecond' AS "due_at"
+            FROM "print_job_recovery_resolutions" AS "r"
+           GROUP BY "r"."session_id"
+        ) AS "answered"
+       WHERE "answered"."session_id" = "s"."id"
+         AND "s"."state" = 'RECOVERY_REQUIRED'
+         AND "s"."cleanup_status" = 'PENDING'
+         AND "s"."files_deleted_at" IS NULL
+         AND "s"."cleanup_due_at" IS NOT NULL
+         AND "s"."cleanup_due_at" > "answered"."due_at"
+      RETURNING "s"."id"
+    `;
+
+    if (shortened.length === 0) return;
+
+    const sessionIds = shortened.map((row) => row.id);
+
+    // The per-file barriers move with the session, or the run defers on them
+    // and nothing is actually deleted any sooner. Only rows that own bytes
+    // nobody is still writing: an upload in flight keeps the barrier that
+    // protects it.
+    await this.options.database.$executeRaw`
+      UPDATE "uploaded_files" AS "f"
+         SET "cleanup_due_at" = "s"."cleanup_due_at",
+             "updated_at" = ${now}
+        FROM "print_sessions" AS "s"
+       WHERE "s"."id" = "f"."session_id"
+         AND "f"."session_id" = ANY(${sessionIds}::uuid[])
+         AND "f"."status" IN ('QUARANTINED', 'READY', 'DELETE_PENDING', 'DELETING')
+         AND "f"."cleanup_due_at" IS NOT NULL
+         AND "f"."cleanup_due_at" > "s"."cleanup_due_at"
+    `;
+
+    // A run may already exist and be waiting on the old deadline, in which case
+    // shortening the session alone would change nothing until it woke up.
+    await this.options.database.$executeRaw`
+      UPDATE "cleanup_runs" AS "r"
+         SET "available_at" = "s"."cleanup_due_at",
+             "updated_at" = ${now}
+        FROM "print_sessions" AS "s"
+       WHERE "s"."id" = "r"."session_id"
+         AND "r"."session_id" = ANY(${sessionIds}::uuid[])
+         AND "r"."status" = 'PENDING'
+         AND "r"."lease_token" IS NULL
+         AND "r"."available_at" > "s"."cleanup_due_at"
+    `;
+
+    this.options.logger.info(
+      { sessions: sessionIds.length },
+      "recovery grace shortened after an operator recorded what happened"
+    );
   }
 
   /**

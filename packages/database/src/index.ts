@@ -183,6 +183,99 @@ export async function assertAdminWriteClientIsAppendOnly(client: PrismaClient): 
   }
 }
 
+/**
+ * The pool the control plane authorizes refunds through.
+ *
+ * A fourth pool, and the reason it exists is worth stating rather than
+ * inferring. The write pool is defined by holding no privilege on money at all;
+ * that is the property Phase 3 was built around, and the way to keep it while
+ * adding the ability to authorize a refund is a separate connection with a
+ * separate role, not a widened grant on the old one.
+ *
+ * In production this points at `printing_kiosk_admin_refund_writer`, which
+ * holds INSERT on `refunds`, on the authorization record beside it, and on the
+ * audit log — and no UPDATE anywhere. So the panel can raise an obligation and
+ * cannot settle one, cannot attach a provider reference to it, and cannot mark
+ * one paid that never was. That last part is not a policy in this repository;
+ * it is a grant this role does not have.
+ */
+export function createAdminRefundClient(connectionString: string): PrismaClient {
+  const adapter = new PrismaPg({
+    connectionString,
+    options: ADMIN_WRITE_CONNECTION_OPTIONS,
+    // Authorizing a refund is a rare, deliberate act by one of a handful of
+    // people. Two connections is generous.
+    max: 2
+  });
+  return new PrismaClient({ adapter });
+}
+
+/**
+ * The privileges the refund pool must not hold, checked at boot.
+ *
+ * The list is about the difference between raising an obligation and settling
+ * one. UPDATE on `refunds` would let the panel mark a payout complete without a
+ * payout; anything on `payments` would let it invent or rewrite the capture it
+ * is refunding against; INSERT on a recovery resolution would let the same
+ * connection manufacture the evidence for its own decision.
+ */
+const FORBIDDEN_ADMIN_REFUND_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.refunds", "UPDATE"],
+  ["public.refunds", "DELETE"],
+  ["public.payments", "INSERT"],
+  ["public.payments", "UPDATE"],
+  ["public.payment_attempts", "INSERT"],
+  ["public.print_jobs", "UPDATE"],
+  ["public.print_sessions", "UPDATE"],
+  ["public.print_job_recovery_resolutions", "INSERT"],
+  ["public.print_job_recovery_corrections", "INSERT"],
+  ["public.refund_authorizations", "UPDATE"],
+  ["public.refund_authorizations", "DELETE"],
+  ["public.audit_events", "UPDATE"],
+  ["public.audit_events", "DELETE"],
+  ["public.agent_commands", "INSERT"]
+];
+
+/** The three grants without which no refund can be authorized. */
+const REQUIRED_ADMIN_REFUND_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.refunds", "INSERT"],
+  ["public.refund_authorizations", "INSERT"],
+  ["public.audit_events", "INSERT"]
+];
+
+/**
+ * Prove the refund pool is as small as it claims before serving anything.
+ *
+ * Same argument as its sibling, with more at stake: `pnpm db:admin-refund-writer
+ * verify` checks a database somebody ran it against, and this checks the
+ * connection this process actually opened. A deployment pointed at the
+ * application role by mistake passes every offline check and fails here.
+ */
+export async function assertAdminRefundClientIsAppendOnly(client: PrismaClient): Promise<void> {
+  const held = async (table: string, privilege: string): Promise<boolean> => {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_table_privilege(${table}, ${privilege}) AS held`;
+    return rows[0]?.held === true;
+  };
+
+  const violations: string[] = [];
+  for (const [table, privilege] of FORBIDDEN_ADMIN_REFUND_PRIVILEGES) {
+    if (await held(table, privilege)) violations.push(`holds ${privilege} on ${table}`);
+  }
+  for (const [table, privilege] of REQUIRED_ADMIN_REFUND_PRIVILEGES) {
+    if (!(await held(table, privilege))) violations.push(`lacks ${privilege} on ${table}`);
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      "The admin refund connection does not match the control plane's privilege policy. " +
+        `Refusing to start: ${violations.join("; ")}. ` +
+        "Check ADMIN_REFUND_DATABASE_URL and rerun `pnpm db:admin-refund-writer verify`."
+    );
+  }
+}
+
 export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };
 export { invalidateSessionPricing } from "./session-pricing.js";

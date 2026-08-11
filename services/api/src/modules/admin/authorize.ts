@@ -45,12 +45,28 @@ export interface AdminAuthorizationDependencies {
 export async function authorizeAdmin(
   request: FastifyRequest,
   dependencies: AdminAuthorizationDependencies,
-  capability: AdminCapability
+  capability: AdminCapability,
+  /**
+   * Called when an authenticated account is refused the capability, before the
+   * refusal is thrown.
+   *
+   * Optional because most refusals here are uninteresting: a role that cannot
+   * see a screen will be refused its endpoints all day, and recording each one
+   * would bury the log. The money route passes a recorder anyway — somebody
+   * without `refund.authorize` asking to authorize a payout is worth a
+   * permanent row whatever else it is — and it is a hook rather than a rule so
+   * that the choice stays visible at the route that made it.
+   *
+   * A failure here must not turn a 403 into a 500, so it is awaited defensively
+   * by the caller rather than trusted.
+   */
+  onRefused?: (admin: AuthenticatedAdmin) => Promise<void>
 ): Promise<AuthenticatedAdmin> {
   const admin = await requireSession(request, dependencies);
   await requireCsrf(request, dependencies, admin);
 
   if (!hasCapability(admin.role, capability)) {
+    if (onRefused) await onRefused(admin);
     throw new ApiError(403, "ADMIN_FORBIDDEN", "This action is not available to your role.");
   }
 

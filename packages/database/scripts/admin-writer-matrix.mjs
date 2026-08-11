@@ -6,13 +6,18 @@
  * written the same way: as data, so that the answer to "could a compromised
  * admin backend move money" is a grant list rather than a code review.
  *
- * The shape of this policy is the whole point. It holds INSERT on two tables
- * and nothing else — no UPDATE and no DELETE anywhere in the database, on any
- * table, ever. That is not a coincidence of the current feature set; it is the
- * Phase 3 acceptance gate expressed as a privilege:
+ * The shape of this policy is the whole point. It holds INSERT on a short list
+ * of tables and nothing else — no UPDATE and no DELETE anywhere in the
+ * database, on any table, ever. That is not a coincidence of the current
+ * feature set; it is the Phase 3 acceptance gate expressed as a privilege, and
+ * Phase 4 kept it by giving money its own role rather than widening this one:
  *
- *   - It cannot touch `refunds` or `payments`, so an Operator cannot cause a
- *     payout. Money is `refund.authorize`, a later phase and a different role.
+ *   - It cannot touch `refunds` or `payments`, so nobody acting through this
+ *     connection can cause a payout. Money is `refund.authorize`, and it runs
+ *     on `printing_kiosk_admin_refund_writer` over its own pool.
+ *   - It cannot UPDATE `cleanup_runs`, so asking retention to try again is a
+ *     row appended to a request table that the worker reads — not a reach into
+ *     retention state.
  *   - It cannot UPDATE `print_jobs` or `print_sessions`, so nobody can force a
  *     job into recovery, out of one, or into a success. What the device
  *     reported stays exactly as reported.
@@ -29,14 +34,20 @@
 export const ADMIN_WRITER_ROLE = "printing_kiosk_admin_writer";
 
 /**
- * The only two tables this role may add a row to.
+ * The tables this role may add a row to.
  *
- * Both are append-only by trigger as well: an admin action produces new facts,
- * never edited ones.
+ * Every one of them is append-only by trigger as well: an admin action produces
+ * new facts, never edited ones. Nothing here changes operational state — a
+ * correction supersedes an observation without touching it, and a retry request
+ * asks the worker to act rather than acting.
  */
 export const INSERTABLE_TABLES = Object.freeze({
   print_job_recovery_resolutions:
     "One operator observation per print job that the device could not settle.",
+  print_job_recovery_corrections:
+    "A later account superseding one of those, by somebody who did not make it. Appends; the original stays exactly as written.",
+  cleanup_retry_requests:
+    "A person asking retention to try a dead-lettered run again. The worker re-arms its own run; this role holds nothing on cleanup_runs.",
   audit_events: "Every admin action records itself here, including the ones that failed."
 });
 
@@ -89,8 +100,24 @@ export const READABLE_TABLES = Object.freeze({
   // Never the WebAuthn handle.
   admin_users: ["id", "display_name", "role", "status", "disabled_at", "suspended_at"],
 
-  // Read back to replay an identical repeat submission instead of failing it.
+  // Read back to replay an identical repeat submission instead of failing it,
+  // and — for a correction — to find the record it is allowed to supersede.
   print_job_recovery_resolutions: "*",
+  print_job_recovery_corrections: "*",
+
+  // A retry may only be asked for a run that has actually given up, and the
+  // request has to describe the failure it answers, so the run is read to pin
+  // those columns. Read only: re-arming is the worker's job.
+  cleanup_runs: [
+    "id",
+    "session_id",
+    "status",
+    "attempts",
+    "last_error_code",
+    "dead_lettered_at",
+    "available_at"
+  ],
+  cleanup_retry_requests: "*",
 
   // The error centre's acknowledgements are audit events; reading them back is
   // how a repeat acknowledgement is recognised as one.
@@ -110,7 +137,9 @@ export const READABLE_TABLES = Object.freeze({
  */
 export const FORBIDDEN_TABLES = Object.freeze({
   refunds:
-    "Money. Creating or settling an obligation is refund.authorize, which nobody holding print.recovery.resolve holds by that fact alone.",
+    "Money. Creating or settling an obligation is refund.authorize, which nobody holding print.recovery.resolve holds by that fact alone. It has its own role and its own pool: printing_kiosk_admin_refund_writer.",
+  refund_authorizations:
+    "The record of who authorized a payout. Written on the refund connection, in the same transaction as the obligation it explains, and never from here.",
   payment_attempts: "The provider ledger. Written by the payment path, never by a person.",
   payment_webhook_inbox: "Provider callbacks. A forged row here is a forged payment.",
   kiosk_credentials:
@@ -120,8 +149,6 @@ export const FORBIDDEN_TABLES = Object.freeze({
   uploaded_files: "Customer documents.",
   file_derivatives: "Storage addresses of customer documents.",
   file_pages: "Page geometry of customer documents.",
-  cleanup_runs:
-    "Retention state. Re-arming a dead-lettered run is document.retention.retry, a later phase, and it goes through the worker rather than through a row edit.",
   pricing_rule_sets: "A published tariff is an R3 change requiring three people.",
   pricing_rules: "A published tariff is an R3 change requiring three people.",
   price_quotes: "What a customer was quoted is evidence of what they agreed to pay.",
@@ -153,59 +180,3 @@ export const ROLE_SETTINGS = Object.freeze({
   idle_in_transaction_session_timeout: "5s",
   lock_timeout: "1s"
 });
-
-/** Every table this policy has an opinion about. */
-export function decidedTables() {
-  return [
-    ...new Set([
-      ...Object.keys(INSERTABLE_TABLES),
-      ...Object.keys(READABLE_TABLES),
-      ...Object.keys(FORBIDDEN_TABLES)
-    ])
-  ].sort();
-}
-
-/**
- * Tables present in the database that this policy has not decided.
- *
- * A non-empty result stops the tool. A migration that adds a table has to say
- * whether the control plane may write to it, and the answer is written down
- * before the role is provisioned rather than discovered afterwards.
- */
-export function undecidedTables(existingTables) {
-  const decided = new Set(decidedTables());
-  return existingTables.filter((table) => !decided.has(table)).sort();
-}
-
-/** Tables named by the policy that no longer exist. Stale entries to remove. */
-export function staleTables(existingTables) {
-  const existing = new Set(existingTables);
-  return decidedTables().filter((table) => !existing.has(table));
-}
-
-/** Columns of a readable table the writer must NOT hold a grant on. */
-export function deniedColumnsFor(table, existingColumns) {
-  const allowed = READABLE_TABLES[table];
-  if (allowed === undefined || allowed === "*") return [];
-  const allowedSet = new Set(allowed);
-  return existingColumns.filter((column) => !allowedSet.has(column));
-}
-
-/** Allow-listed columns the live schema does not have. */
-export function missingColumnsFor(table, existingColumns) {
-  const allowed = READABLE_TABLES[table];
-  if (allowed === undefined || allowed === "*") return [];
-  const existing = new Set(existingColumns);
-  return allowed.filter((column) => !existing.has(column));
-}
-
-/**
- * A table appearing in both the insertable and forbidden lists is a policy
- * contradiction, and the safe reading of a contradiction is "forbidden".
- * Checked rather than assumed, because the two lists are edited separately.
- */
-export function contradictoryTables() {
-  return Object.keys(INSERTABLE_TABLES)
-    .filter((table) => table in FORBIDDEN_TABLES)
-    .sort();
-}

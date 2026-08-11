@@ -770,6 +770,8 @@ const secureProductionEnvironment = {
   // application's. Loopback here so the transport rule is exercised separately.
   ADMIN_READ_DATABASE_URL: "postgresql://printing_kiosk_admin_reader:secret@localhost:5432/kiosk",
   ADMIN_WRITE_DATABASE_URL: "postgresql://printing_kiosk_admin_writer:secret@localhost:5432/kiosk",
+  ADMIN_REFUND_DATABASE_URL:
+    "postgresql://printing_kiosk_admin_refund_writer:secret@localhost:5432/kiosk",
   MALWARE_SCANNER_ADAPTER: "clamav",
   S3_SERVER_SIDE_ENCRYPTION: "AES256"
 } as const;

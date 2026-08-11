@@ -27,6 +27,10 @@ interface StubOptions {
   cleanupRunUpdateCount?: number;
   sessionAlreadyCleaned?: boolean;
   outOfScopeArtifact?: boolean;
+  /** A person has asked for this dead-lettered run to be tried again. */
+  retryRequested?: boolean;
+  /** Somebody has recorded what happened to this session's print. */
+  recoveryResolved?: boolean;
 }
 
 function stubDatabase(options: StubOptions = {}) {
@@ -114,6 +118,19 @@ function stubDatabase(options: StubOptions = {}) {
     $executeRaw: vi.fn().mockResolvedValue(0),
     $queryRaw: vi.fn().mockImplementation((strings: TemplateStringsArray) => {
       const sql = Array.isArray(strings) ? strings.join(" ") : "";
+
+      // A pass now issues three statements against `cleanup_runs`, so this
+      // matches on what each one is *for* rather than on the table it names.
+      // Answering "here is a claimed run" to all three is how a stub quietly
+      // makes a runner look like it did work nobody asked it to do.
+      if (sql.includes("cleanup_retry_requests")) {
+        return Promise.resolve(
+          options.retryRequested ? [{ id: runId, session_id: sessionId }] : []
+        );
+      }
+      if (sql.includes("print_job_recovery_resolutions")) {
+        return Promise.resolve(options.recoveryResolved ? [{ id: sessionId }] : []);
+      }
       if (sql.includes("cleanup_runs")) {
         return Promise.resolve(
           options.claimable === false
@@ -459,6 +476,87 @@ describe("SessionCleanupRunner", () => {
     expect(database.sessionUpdate).not.toHaveBeenCalled();
     expect(database.outboxCreate).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
+  });
+
+  it("re-arms a dead-lettered run a person asked to retry, and says so", async () => {
+    const database = stubDatabase({ retryRequested: true, claimable: false });
+    stubTransactionClient(database);
+    const info = vi.fn<CleanupLogger["info"]>();
+
+    await createRunner(database.client, stubStore(), { ...silentLogger, info }).runOnce();
+
+    // The request came from a connection holding no privilege on `cleanup_runs`
+    // at all. This is the other half of that: the worker re-arms its own run.
+    const rearm = (database.client.$queryRaw as Mock).mock.calls
+      .map((call) => (call[0] as TemplateStringsArray).join(" "))
+      .find((sql: string) => sql.includes("cleanup_retry_requests"));
+    expect(rearm).toContain(`"status" = 'PENDING'`);
+    expect(rearm).toContain(`"attempts" = 0`);
+    expect(rearm).toContain(`"c"."status" = 'DEAD_LETTER'`);
+
+    // The operator-facing mirror moves with the run, or the dashboard keeps
+    // telling somebody to act on something already in hand.
+    expect(database.sessionUpdateMany).toHaveBeenCalledWith({
+      where: { id: sessionId, cleanupStatus: "DEAD_LETTER" },
+      data: { cleanupStatus: "PENDING", updatedAt: now }
+    });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ cleanupRunId: runId }),
+      "cleanup run re-armed at an operator's request"
+    );
+  });
+
+  it("leaves a dead-lettered run alone when nobody has asked for it", async () => {
+    const database = stubDatabase({ claimable: false });
+    stubTransactionClient(database);
+
+    await createRunner(database.client, stubStore()).runOnce();
+
+    const mirrored = database.sessionUpdateMany.mock.calls.map(
+      ([call]) => (call as { where: { cleanupStatus?: string } }).where.cleanupStatus
+    );
+    expect(mirrored).not.toContain("DEAD_LETTER");
+  });
+
+  it("lets a session out of its recovery grace once somebody has answered it", async () => {
+    const database = stubDatabase({ recoveryResolved: true, claimable: false });
+    stubTransactionClient(database);
+
+    await createRunner(database.client, stubStore()).runOnce();
+
+    const shorten = (database.client.$queryRaw as Mock).mock.calls
+      .map((call) => (call[0] as TemplateStringsArray).join(" "))
+      .find((sql: string) => sql.includes("print_job_recovery_resolutions"));
+
+    // Retention learns from the observation itself. No signal table, no grant,
+    // and nothing the control plane writes to make this happen.
+    expect(shorten).toContain(`"s"."state" = 'RECOVERY_REQUIRED'`);
+    // Only ever shorter. A resolution must never push a deletion deadline out.
+    expect(shorten).toContain(`"s"."cleanup_due_at" > "answered"."due_at"`);
+
+    const followUps = (database.client.$executeRaw as Mock).mock.calls.map((call) =>
+      (call[0] as TemplateStringsArray).join(" ")
+    );
+    const files = followUps.find((sql: string) => sql.includes("uploaded_files"));
+
+    // A file still being written keeps its own barrier: that one protects a PUT
+    // this system has already authorized, and pulling it forward could let a
+    // sweep run underneath one.
+    expect(files).toContain("'QUARANTINED', 'READY', 'DELETE_PENDING', 'DELETING'");
+    expect(files).not.toContain("UPLOADING");
+    expect(files).not.toContain("VALIDATING");
+  });
+
+  it("does not touch a session's deadline when nobody has recorded anything", async () => {
+    const database = stubDatabase({ claimable: false });
+    stubTransactionClient(database);
+
+    await createRunner(database.client, stubStore()).runOnce();
+
+    const followUps = (database.client.$executeRaw as Mock).mock.calls.map((call) =>
+      (call[0] as TemplateStringsArray).join(" ")
+    );
+    expect(followUps.some((sql: string) => sql.includes("uploaded_files"))).toBe(false);
   });
 
   it("does nothing when no run is due", async () => {

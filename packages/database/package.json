@@ -29,7 +29,9 @@
     "verify:phase9-upgrade": "node scripts/verify-phase9-upgrade.mjs",
     "admin": "node scripts/admin-account.mjs",
     "admin-reader": "node scripts/admin-reader.mjs",
-    "admin-writer": "node scripts/admin-writer.mjs"
+    "admin-writer": "node scripts/admin-writer.mjs",
+    "admin-refund-writer": "node scripts/admin-refund-writer.mjs",
+    "admin-owner": "node scripts/admin-owner.mjs"
   },
   "dependencies": {
     "@printing-kiosk/domain": "workspace:*",

@@ -331,8 +331,10 @@ describe("admin Phase 2 operational sections", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
-    // A count with no explanation is a number nobody acts on.
-    const entry = screen.getByText("Document deletions that gave up").closest("li");
+    // A count with no explanation is a number nobody acts on. Awaited rather
+    // than read straight after the heading: the shell renders before the
+    // overview resolves, so the two are not in the same tick.
+    const entry = (await screen.findByText("Document deletions that gave up")).closest("li");
     expect(entry).toHaveTextContent("2");
     expect(entry).toHaveClass("attention__item--critical");
   });

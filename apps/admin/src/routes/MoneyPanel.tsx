@@ -12,18 +12,23 @@ import {
   When
 } from "../features/observability/components.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
+import { RefundQueue } from "./RefundQueue.js";
 
 /**
- * Payments, and the money owed back.
+ * Payments, the money owed back, and the prints still waiting for a decision.
  *
- * Both are reads. Nothing on this page settles an obligation: that is
- * `refund.authorize`, a capability held by different people, and it does not
- * exist as an endpoint yet. Seeing that money is owed and deciding to pay it
- * are deliberately not the same permission.
+ * The queue leads, because it is the only thing on this page anybody has to
+ * act on: the two tables below it are records of what already happened.
+ *
+ * One action lives here and it is the only one in the control plane that costs
+ * money. Authorizing a refund creates an obligation; nothing on this page
+ * settles one. Settling is done against the payment provider by something that
+ * holds a provider credential, and no part of the panel does.
  */
 export function MoneyPanel({ focus }: { focus?: "refunds" | undefined } = {}) {
   const session = useSession();
   const canSeeRefunds = session.can("refund.obligation.read");
+  const canAuthorizeRefunds = session.can("refund.authorize");
   const canReconcile = session.can("payment.reconcile.read");
 
   const loadPayments = useCallback(() => observabilityApi.payments(), []);
@@ -107,7 +112,7 @@ export function MoneyPanel({ focus }: { focus?: "refunds" | undefined } = {}) {
       key="refunds"
       title="Refunds owed"
       state={refunds}
-      hint="Obligations that have not been settled. Settling one is a separate capability and is not available here."
+      hint="Obligations that have not been settled. Authorizing one is done from the queue above; settling one is done against the payment provider and is not available here."
       actions={
         <button type="button" onClick={refunds.reload} disabled={refunds.loading}>
           Refresh
@@ -120,7 +125,16 @@ export function MoneyPanel({ focus }: { focus?: "refunds" | undefined } = {}) {
 
       {refunds.data && refunds.data.items.length > 0 ? (
         <Table
-          columns={["Refund", "Session", "Amount", "Reason", "Status", "Outstanding", "Created"]}
+          columns={[
+            "Refund",
+            "Session",
+            "Amount",
+            "Reason",
+            "Authorized by",
+            "Status",
+            "Outstanding",
+            "Created"
+          ]}
         >
           {refunds.data.items.map((refund) => (
             <tr key={refund.id}>
@@ -141,6 +155,15 @@ export function MoneyPanel({ focus }: { focus?: "refunds" | undefined } = {}) {
                 <StateBadge value={refund.reason} />
               </td>
               <td>
+                {/* Null means the payment path raised this on its own. "The
+                    system noticed" and "a named person decided" are different
+                    claims on the same ledger and should not look alike. */}
+                {refund.authorizedByDisplayName ?? <span className="key-list__meta">system</span>}
+                {refund.authorizationReason ? (
+                  <span className="key-list__meta">{refund.authorizationReason}</span>
+                ) : null}
+              </td>
+              <td>
                 <StateBadge value={refund.status} />
               </td>
               <td>{refund.outstandingHours === null ? "—" : `${refund.outstandingHours} h`}</td>
@@ -154,11 +177,23 @@ export function MoneyPanel({ focus }: { focus?: "refunds" | undefined } = {}) {
     </Panel>
   ) : null;
 
+  const queue = canSeeRefunds ? (
+    <RefundQueue
+      key="queue"
+      canAuthorize={canAuthorizeRefunds}
+      onAuthorized={() => {
+        refunds.reload();
+        payments.reload();
+      }}
+    />
+  ) : null;
+
   // Arriving from "unsettled refunds" on the overview puts the money owed at
   // the top. Landing on the payment ledger and having to scroll past it to find
   // what you clicked is how a link stops being worth following.
   return (
     <>
+      {queue}
       {focus === "refunds" ? refundsPanel : null}
       {paymentsPanel}
       {focus === "refunds" ? null : refundsPanel}

@@ -5,9 +5,15 @@ import {
   suggestsRefund,
   type AcknowledgeIncidentBody,
   type AdminIncidentAcknowledgement,
+  type AdminRecoveryCorrection,
   type AdminRecoveryResolution,
+  type AdminRetentionRetry,
+  type CorrectRecoveryBody,
+  type CorrectRecoveryResponse,
   type ResolveRecoveryBody,
-  type ResolveRecoveryResponse
+  type ResolveRecoveryResponse,
+  type RetryRetentionBody,
+  type RetryRetentionResponse
 } from "@printing-kiosk/admin-access";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
@@ -19,11 +25,18 @@ import type { AuthenticatedAdmin } from "./service.js";
 import type { AdminWriteDatabase, AdminWriteTransaction } from "./write-database.js";
 
 /**
- * The two things an operator may actually do.
+ * The things a person may do that do not involve money.
  *
- * Both are additive. Neither changes a print job, a session, a payment or a
- * refund, and the connection they run on holds no privilege to do so even if
- * this file were rewritten to try.
+ * Four actions: record what was seen at a tray, correct such a record, ask
+ * retention to retry a run that gave up, and say that somebody is looking at a
+ * failure. All of them are additive. None changes a print job, a session, a
+ * payment, a cleanup run or a refund, and the connection they run on holds no
+ * privilege to do so even if this file were rewritten to try.
+ *
+ * Authorizing a refund is deliberately not here. It runs in `refunds.ts`, on a
+ * different pool as a different database role, because the phase gate is that
+ * the money path and the operator observation path are separate — and a
+ * separation that lives in one file's control flow is not one.
  *
  * The shape every action here follows, in order:
  *
@@ -270,6 +283,354 @@ export class AdminOperationsService {
   }
 
   // -------------------------------------------------------------------------
+  // Correcting a recovery observation (R2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Put right an account of a print that turned out to be wrong.
+   *
+   * Phase 3 left this deliberately impossible: an observation was one per job,
+   * append-only, and there was no way to say "that was a mistake". That is the
+   * correct default — somebody who could rewrite their own account of a paid
+   * print could launder a failure into a success — but a system where a genuine
+   * error can never be recorded as an error is a system where people stop
+   * trusting the record.
+   *
+   * So the correction is a new fact, made by somebody else. The original stays
+   * exactly as written; this appends a row that supersedes it, holds a
+   * capability no Operator has, and names the record it replaces so that two
+   * people correcting the same print collide instead of overwriting each other.
+   *
+   * What it cannot do: withdraw a refund somebody already authorized. A
+   * correction changes what the queue says is owed, not what has been decided.
+   * Undoing a decision about money is a different act and does not exist yet.
+   */
+  public async correctPrintRecovery(
+    admin: AuthenticatedAdmin,
+    printJobId: string,
+    body: CorrectRecoveryBody,
+    requestId: string
+  ): Promise<CorrectRecoveryResponse> {
+    const now = this.options.clock.now();
+    const refundSuggested = suggestsRefund(body.outcome);
+    const digest = digestCorrectionRequest(body);
+
+    try {
+      return await this.options.database.$transaction(
+        async (transaction) => {
+          const job = await transaction.printJob.findFirst({
+            where: { id: printJobId },
+            select: {
+              id: true,
+              sessionId: true,
+              kioskId: true,
+              status: true,
+              resultConfidence: true,
+              sheetsProduced: true
+            }
+          });
+
+          if (!job || !(await this.mayActOnKiosk(transaction, admin, job.kioskId))) {
+            throw new RefusedAction(adminNotFound(), {
+              action: "admin.print.recovery.correct",
+              failureCode: "NOT_FOUND_OR_OUT_OF_SCOPE",
+              reason: body.reason,
+              printJobId
+            });
+          }
+
+          const resolution = await transaction.printJobRecoveryResolution.findUnique({
+            where: { printJobId },
+            select: RESOLUTION_FIELDS
+          });
+
+          // Nothing to correct is a different answer from "you may not correct
+          // it", and the person reading it needs to know which.
+          if (!resolution) {
+            throw new RefusedAction(
+              new ApiError(
+                409,
+                "PRINT_RECOVERY_NOT_RESOLVED",
+                "Nobody has recorded what happened to this print yet, so there is nothing to correct."
+              ),
+              {
+                action: "admin.print.recovery.correct",
+                failureCode: "NOT_RESOLVED",
+                reason: body.reason,
+                printJobId,
+                kioskId: job.kioskId,
+                sessionId: job.sessionId
+              }
+            );
+          }
+
+          // A repeat of the same correction replays. The digest includes the
+          // record being superseded, so resubmitting a form is a replay while
+          // correcting the same record twice with different words is not.
+          const existing = await transaction.printJobRecoveryCorrection.findUnique({
+            where: { supersedesId: body.supersedesId },
+            select: CORRECTION_FIELDS
+          });
+
+          if (existing) {
+            if (existing.requestDigest !== digest) {
+              throw new RefusedAction(
+                new ApiError(
+                  409,
+                  "PRINT_RECOVERY_ALREADY_CORRECTED",
+                  "Somebody has already corrected this record. Reload to see what it says now."
+                ),
+                {
+                  action: "admin.print.recovery.correct",
+                  failureCode: "ALREADY_CORRECTED",
+                  reason: body.reason,
+                  printJobId,
+                  kioskId: job.kioskId,
+                  sessionId: job.sessionId,
+                  outcome: body.outcome
+                }
+              );
+            }
+
+            return {
+              correction: await this.presentCorrection(transaction, existing),
+              replayed: true,
+              refundAuthorized: false as const
+            };
+          }
+
+          // The record being corrected must be the newest account of this
+          // print. Correcting a superseded one would be answering a question
+          // somebody has already moved past, and the answer would silently lose
+          // to the row that superseded it.
+          const effective = await this.effectiveObservation(transaction, printJobId, resolution);
+          if (effective.id !== body.supersedesId) {
+            throw new RefusedAction(
+              new ApiError(
+                409,
+                "PRINT_RECOVERY_SUPERSEDED",
+                "This account of the print has already been superseded. Reload and correct the current one."
+              ),
+              {
+                action: "admin.print.recovery.correct",
+                failureCode: "STALE_SUPERSEDES",
+                reason: body.reason,
+                printJobId,
+                kioskId: job.kioskId,
+                sessionId: job.sessionId
+              }
+            );
+          }
+
+          const created = await transaction.printJobRecoveryCorrection.create({
+            data: {
+              id: this.options.random.uuid(now),
+              printJobId: job.id,
+              sessionId: job.sessionId,
+              kioskId: job.kioskId,
+              supersedesId: body.supersedesId,
+              outcome: body.outcome,
+              reason: body.reason,
+              refundSuggested,
+              observedSheets: body.observedSheets ?? null,
+              correctedByAdminId: admin.adminUserId,
+              correctedByRole: admin.role,
+              requestDigest: digest,
+              createdAt: now
+            },
+            select: CORRECTION_FIELDS
+          });
+
+          await writeAdminAuditEvent(transaction, {
+            id: this.options.random.uuid(now),
+            occurredAt: now,
+            actorId: admin.adminUserId,
+            action: "admin.print.recovery.correct",
+            outcome: "SUCCESS",
+            requestId,
+            kioskId: job.kioskId,
+            metadata: {
+              role: admin.role,
+              capability: "print.recovery.correct",
+              risk: "R2",
+              stepUpFresh: true,
+              printJobId: job.id,
+              reason: body.reason,
+              supersedesId: body.supersedesId,
+              // Before and after, as accounts of the print rather than as
+              // states of it. The job itself did not move and cannot.
+              previousOutcome: effective.outcome,
+              recoveryOutcome: body.outcome,
+              refundSuggested,
+              observedSheets: body.observedSheets ?? null,
+              sheetsProduced: job.sheetsProduced,
+              confidence: job.resultConfidence,
+              previousState: "RECOVERY_REQUIRED",
+              resultingState: "RECOVERY_REQUIRED"
+            }
+          });
+
+          return {
+            correction: await this.presentCorrection(transaction, created),
+            replayed: false,
+            refundAuthorized: false as const
+          };
+        },
+        { timeout: ACTION_TRANSACTION_TIMEOUT_MILLISECONDS }
+      );
+    } catch (error) {
+      if (error instanceof RefusedAction) {
+        await this.auditRefusal(admin, requestId, now, error.details);
+        throw error.response;
+      }
+      throw error;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Asking retention to try again (R1)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Ask the retention worker to retry a cleanup run that gave up.
+   *
+   * A dead-lettered run means a customer's documents are still in object
+   * storage past the point this system promised they would be gone, and the
+   * only thing still holding the line is a storage lifecycle rule meant to be a
+   * backstop. Somebody has to be able to say "the object store is back" without
+   * waiting for an approval, so this is R1 and needs no step-up.
+   *
+   * It appends a request; it does not re-arm anything. The control plane holds
+   * no privilege on `cleanup_runs` — it can read six columns of one and write
+   * nothing — so the worker re-arms its own run after reading this. That is
+   * what keeps "retry the cleanup" from being a way to reach into retention
+   * state and change something else, and it is why this returns
+   * `rearmed: false`: the panel is not the thing that deletes documents and
+   * should never report that it is.
+   */
+  public async retryRetention(
+    admin: AuthenticatedAdmin,
+    body: RetryRetentionBody,
+    requestId: string
+  ): Promise<RetryRetentionResponse> {
+    const now = this.options.clock.now();
+
+    try {
+      return await this.options.database.$transaction(
+        async (transaction) => {
+          const run = await transaction.cleanupRun.findFirst({
+            where: { sessionId: body.sessionId },
+            select: {
+              id: true,
+              sessionId: true,
+              status: true,
+              attempts: true,
+              lastErrorCode: true,
+              deadLetteredAt: true
+            }
+          });
+
+          if (!run) {
+            throw new RefusedAction(adminNotFound(), {
+              action: "admin.document.retention.retry",
+              failureCode: "NOT_FOUND",
+              reason: body.reason,
+              sessionId: body.sessionId
+            });
+          }
+
+          // Revalidated here rather than trusted from the list the person was
+          // looking at. A run that recovered on its own between the page
+          // rendering and this request is not a run anybody needs to retry.
+          if (run.status !== "DEAD_LETTER" || !run.deadLetteredAt) {
+            throw new RefusedAction(
+              new ApiError(
+                409,
+                "CLEANUP_RUN_NOT_DEAD_LETTERED",
+                "This cleanup has not given up. Reload to see where it is."
+              ),
+              {
+                action: "admin.document.retention.retry",
+                failureCode: "NOT_DEAD_LETTERED",
+                reason: body.reason,
+                sessionId: body.sessionId,
+                previousState: run.status
+              }
+            );
+          }
+
+          // One request per dead-lettering. An identical repeat replays rather
+          // than piling up requests the worker would answer once anyway.
+          const existing = await transaction.cleanupRetryRequest.findFirst({
+            where: { cleanupRunId: run.id, deadLetteredAt: run.deadLetteredAt },
+            select: RETRY_FIELDS
+          });
+
+          if (existing) {
+            return {
+              retry: await this.presentRetry(transaction, existing),
+              replayed: true,
+              rearmed: false as const
+            };
+          }
+
+          const created = await transaction.cleanupRetryRequest.create({
+            data: {
+              id: this.options.random.uuid(now),
+              cleanupRunId: run.id,
+              sessionId: run.sessionId,
+              deadLetteredAt: run.deadLetteredAt,
+              attempts: run.attempts,
+              lastErrorCode: run.lastErrorCode,
+              reason: body.reason,
+              requestedByAdminId: admin.adminUserId,
+              requestedByRole: admin.role,
+              createdAt: now
+            },
+            select: RETRY_FIELDS
+          });
+
+          await writeAdminAuditEvent(transaction, {
+            id: this.options.random.uuid(now),
+            occurredAt: now,
+            actorId: admin.adminUserId,
+            action: "admin.document.retention.retry",
+            outcome: "SUCCESS",
+            requestId,
+            sessionId: run.sessionId,
+            metadata: {
+              role: admin.role,
+              capability: "document.retention.retry",
+              risk: "R1",
+              cleanupRunId: run.id,
+              reason: body.reason,
+              attempts: run.attempts,
+              failureCode: run.lastErrorCode,
+              // The run's state before and after. Identical, because this
+              // records a request and the worker is what acts on it.
+              previousState: "DEAD_LETTER",
+              resultingState: "DEAD_LETTER"
+            }
+          });
+
+          return {
+            retry: await this.presentRetry(transaction, created),
+            replayed: false,
+            rearmed: false as const
+          };
+        },
+        { timeout: ACTION_TRANSACTION_TIMEOUT_MILLISECONDS }
+      );
+    } catch (error) {
+      if (error instanceof RefusedAction) {
+        await this.auditRefusal(admin, requestId, now, error.details);
+        throw error.response;
+      }
+      throw error;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Incident acknowledgement (R1)
   // -------------------------------------------------------------------------
 
@@ -379,6 +740,38 @@ export class AdminOperationsService {
     return assignment !== null;
   }
 
+  /**
+   * The account of a print as it currently stands.
+   *
+   * A resolution, then however many corrections have superseded it in turn.
+   * Following the chain rather than taking the newest row by timestamp is what
+   * makes "correct the current record" a checkable claim: the chain has exactly
+   * one end, and two people cannot both be at it.
+   */
+  private async effectiveObservation(
+    transaction: AdminWriteTransaction,
+    printJobId: string,
+    resolution: StoredResolution & { id?: string }
+  ): Promise<{ id: string; outcome: string }> {
+    const corrections = await transaction.printJobRecoveryCorrection.findMany({
+      where: { printJobId },
+      select: { id: true, supersedesId: true, outcome: true }
+    });
+
+    const bySuperseded = new Map(corrections.map((row) => [row.supersedesId, row]));
+    let current = { id: resolution.id ?? "", outcome: resolution.outcome };
+
+    // Bounded by the number of rows read, so a cycle the database should make
+    // impossible cannot become a loop that holds a transaction open.
+    for (let step = 0; step < corrections.length; step += 1) {
+      const next = bySuperseded.get(current.id);
+      if (!next) break;
+      current = { id: next.id, outcome: next.outcome };
+    }
+
+    return current;
+  }
+
   /** Put a person's name on the stored row without a second round trip. */
   private async present(
     transaction: AdminWriteTransaction,
@@ -390,6 +783,7 @@ export class AdminOperationsService {
     });
 
     return {
+      id: row.id,
       printJobId: row.printJobId,
       // Stored as text and returned through a closed enum on the way out. A
       // value the database somehow held that this build does not recognise
@@ -402,6 +796,53 @@ export class AdminOperationsService {
       resolvedByDisplayName: person?.displayName ?? null,
       resolvedByRole: row.resolvedByRole,
       resolvedAt: row.createdAt.toISOString()
+    };
+  }
+
+  /** The same, for a correction. */
+  private async presentCorrection(
+    transaction: AdminWriteTransaction,
+    row: StoredCorrection
+  ): Promise<AdminRecoveryCorrection> {
+    const person = await transaction.adminUser.findUnique({
+      where: { id: row.correctedByAdminId },
+      select: { displayName: true }
+    });
+
+    return {
+      id: row.id,
+      printJobId: row.printJobId,
+      supersedesId: row.supersedesId,
+      outcome: row.outcome as AdminRecoveryCorrection["outcome"],
+      reason: row.reason,
+      refundSuggested: row.refundSuggested,
+      observedSheets: row.observedSheets,
+      correctedByAdminUserId: row.correctedByAdminId,
+      correctedByDisplayName: person?.displayName ?? null,
+      correctedByRole: row.correctedByRole,
+      correctedAt: row.createdAt.toISOString()
+    };
+  }
+
+  /** And for a retention retry request. */
+  private async presentRetry(
+    transaction: AdminWriteTransaction,
+    row: StoredRetry
+  ): Promise<AdminRetentionRetry> {
+    const person = await transaction.adminUser.findUnique({
+      where: { id: row.requestedByAdminId },
+      select: { displayName: true }
+    });
+
+    return {
+      sessionId: row.sessionId,
+      cleanupRunId: row.cleanupRunId,
+      deadLetteredAt: row.deadLetteredAt.toISOString(),
+      lastErrorCode: row.lastErrorCode,
+      attempts: row.attempts,
+      requestedByAdminUserId: row.requestedByAdminId,
+      requestedByDisplayName: person?.displayName ?? null,
+      requestedAt: row.createdAt.toISOString()
     };
   }
 
@@ -436,6 +877,7 @@ export class AdminOperationsService {
 }
 
 const RESOLUTION_FIELDS = {
+  id: true,
   printJobId: true,
   outcome: true,
   reason: true,
@@ -448,6 +890,7 @@ const RESOLUTION_FIELDS = {
 } as const;
 
 interface StoredResolution {
+  id: string;
   printJobId: string;
   outcome: string;
   reason: string;
@@ -456,6 +899,54 @@ interface StoredResolution {
   resolvedByAdminId: string;
   resolvedByRole: string;
   requestDigest: string;
+  createdAt: Date;
+}
+
+const CORRECTION_FIELDS = {
+  id: true,
+  printJobId: true,
+  supersedesId: true,
+  outcome: true,
+  reason: true,
+  refundSuggested: true,
+  observedSheets: true,
+  correctedByAdminId: true,
+  correctedByRole: true,
+  requestDigest: true,
+  createdAt: true
+} as const;
+
+interface StoredCorrection {
+  id: string;
+  printJobId: string;
+  supersedesId: string;
+  outcome: string;
+  reason: string;
+  refundSuggested: boolean;
+  observedSheets: number | null;
+  correctedByAdminId: string;
+  correctedByRole: string;
+  requestDigest: string;
+  createdAt: Date;
+}
+
+const RETRY_FIELDS = {
+  sessionId: true,
+  cleanupRunId: true,
+  deadLetteredAt: true,
+  attempts: true,
+  lastErrorCode: true,
+  requestedByAdminId: true,
+  createdAt: true
+} as const;
+
+interface StoredRetry {
+  sessionId: string;
+  cleanupRunId: string;
+  deadLetteredAt: Date;
+  attempts: number;
+  lastErrorCode: string | null;
+  requestedByAdminId: string;
   createdAt: Date;
 }
 
@@ -489,6 +980,28 @@ class RefusedAction extends Error {
     super(details.failureCode);
     this.name = "RefusedAction";
   }
+}
+
+/**
+ * The same, for a correction.
+ *
+ * The record being superseded is part of the digest. Resubmitting a form is a
+ * replay; correcting the same record a second time with different words is a
+ * conflict, and correcting a *different* record is a different request that has
+ * to stand on its own.
+ */
+function digestCorrectionRequest(body: CorrectRecoveryBody): string {
+  return createHash("sha256")
+    .update("printing-kiosk/admin/recovery-correction/v1", "utf8")
+    .update("\0", "utf8")
+    .update(body.supersedesId, "utf8")
+    .update("\0", "utf8")
+    .update(body.outcome, "utf8")
+    .update("\0", "utf8")
+    .update(body.reason, "utf8")
+    .update("\0", "utf8")
+    .update(body.observedSheets === undefined ? "" : String(body.observedSheets), "utf8")
+    .digest("hex");
 }
 
 /**

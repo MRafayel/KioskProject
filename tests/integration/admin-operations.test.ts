@@ -125,12 +125,25 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("an Operator cannot move money", () => {
-  it("exposes no endpoint that authorizes, creates or settles a refund", async () => {
-    // `refund.authorize` is a later phase. It must not be reachable now — not
-    // as a disabled route, not as a guarded one, not at all.
-    const attempts = [
+  it("exposes exactly one money endpoint, and no Operator may reach it", async () => {
+    // Phase 4 added `refund.authorize`. It is one route, it is the only one,
+    // and an Operator is refused it — which is the Phase 3 property restated
+    // rather than retired: recording what happened at a tray and authorizing a
+    // payout stayed different capabilities held by different people.
+    const refused = await request(
+      operatorOnA,
+      "POST",
+      `/v1/admin/print-jobs/${worldA.printJobId}/refund-authorization`,
+      { amountMinor: 100, reason: "An Operator reaching for the money route." }
+    );
+    expect(refused.statusCode).toBe(403);
+
+    // Nothing else answers. A settle route in particular does not exist for
+    // anybody: money moves against the provider, not from this panel.
+    const absent = [
       { method: "POST" as const, url: "/v1/admin/refunds" },
       { method: "POST" as const, url: `/v1/admin/refunds/${randomUUID()}/authorize` },
+      { method: "POST" as const, url: `/v1/admin/refunds/${randomUUID()}/settle` },
       { method: "POST" as const, url: `/v1/admin/payments/${worldA.paymentId}/refund` },
       { method: "POST" as const, url: `/v1/admin/sessions/${worldA.sessionId}/refund` },
       {
@@ -139,7 +152,7 @@ describe("an Operator cannot move money", () => {
       }
     ];
 
-    for (const attempt of attempts) {
+    for (const attempt of absent) {
       const response = await request(admin, attempt.method, attempt.url, {});
       expect(response.statusCode, attempt.url).toBe(404);
     }

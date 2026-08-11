@@ -60,7 +60,30 @@ const ALLOWED_METADATA_KEYS = new Set([
   "confidence",
   // Acknowledging a group in the error centre.
   "subsystem",
-  "incidentCode"
+  "incidentCode",
+  // Correcting an observation. `previousOutcome` is the account being
+  // superseded, so a reader can see what changed without joining to a row that
+  // may itself have been superseded since.
+  "supersedesId",
+  "previousOutcome",
+  // Authorizing a refund. The money is written out in full — what was
+  // captured, what was already owed, what this decision added — because an
+  // audit row about a payout that needs three joins to interpret is one nobody
+  // interprets during the incident it was kept for. No provider reference and
+  // no payment credential: those are not ours to record.
+  "paymentId",
+  "refundId",
+  "amountMinor",
+  "currency",
+  "capturedAmountMinor",
+  "previouslyOwedMinor",
+  "authorizableAmountMinor",
+  "observedRecordId",
+  "physicalSheets",
+  "status",
+  // Asking retention to try again.
+  "cleanupRunId",
+  "attempts"
 ]);
 
 export type AdminAuditMetadataValue = string | number | boolean | null;
@@ -73,6 +96,13 @@ export interface WriteAdminAuditEventInput {
   outcome: AdminAuditOutcome;
   requestId?: string | undefined;
   kioskId?: string | undefined;
+  /**
+   * The session an action was about, when it was about one rather than about a
+   * device. Retention works per session and has no kiosk to name, so without
+   * this its audit rows would be the only ones that could not be found from the
+   * thing they concern.
+   */
+  sessionId?: string | undefined;
   metadata?: Readonly<Record<string, AdminAuditMetadataValue>> | undefined;
 }
 
@@ -103,6 +133,7 @@ export async function writeAdminAuditEvent(
       outcome: input.outcome,
       ...(input.requestId ? { requestId: input.requestId } : {}),
       ...(input.kioskId ? { kioskId: input.kioskId } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.metadata ? { metadata: sanitizeMetadata(input.metadata) } : {})
     }
   });

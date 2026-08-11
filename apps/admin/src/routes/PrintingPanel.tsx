@@ -11,7 +11,11 @@ import {
   When
 } from "../features/observability/components.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
-import { RecordedResolution, RecoveryResolutionForm } from "./RecoveryResolutionForm.js";
+import {
+  RecordedResolution,
+  RecoveryCorrectionForm,
+  RecoveryResolutionForm
+} from "./RecoveryResolutionForm.js";
 
 /**
  * Print jobs, and what the device actually said.
@@ -121,6 +125,7 @@ export function PrintingPanel({ initialStatus }: { initialStatus?: string | unde
           printJobId={selected}
           canSeeDiagnostics={session.can("print.diagnostics.read")}
           canResolveRecovery={session.can("print.recovery.resolve")}
+          canCorrectRecovery={session.can("print.recovery.correct")}
           onResolved={list.reload}
           onClose={() => setSelected(null)}
         />
@@ -133,12 +138,14 @@ function PrintJobDetail({
   printJobId,
   canSeeDiagnostics,
   canResolveRecovery,
+  canCorrectRecovery,
   onResolved,
   onClose
 }: {
   printJobId: string;
   canSeeDiagnostics: boolean;
   canResolveRecovery: boolean;
+  canCorrectRecovery: boolean;
   onResolved: () => void;
   onClose: () => void;
 }) {
@@ -194,7 +201,25 @@ function PrintJobDetail({
             <>
               <h3>Recovery</h3>
               {detail.data.resolution ? (
-                <RecordedResolution resolution={detail.data.resolution} />
+                <>
+                  <RecordedResolution
+                    resolution={detail.data.resolution}
+                    corrections={detail.data.corrections}
+                  />
+                  {canCorrectRecovery ? (
+                    <RecoveryCorrectionForm
+                      printJobId={printJobId}
+                      supersedesId={detail.data.corrections.at(-1)?.id ?? detail.data.resolution.id}
+                      currentOutcome={
+                        detail.data.corrections.at(-1)?.outcome ?? detail.data.resolution.outcome
+                      }
+                      onCorrected={() => {
+                        detail.reload();
+                        onResolved();
+                      }}
+                    />
+                  ) : null}
+                </>
               ) : canResolveRecovery ? (
                 <RecoveryResolutionForm
                   printJobId={printJobId}

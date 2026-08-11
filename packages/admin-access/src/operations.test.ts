@@ -102,6 +102,7 @@ describe("resolve recovery response", () => {
   it("states in the response itself that no money moved", () => {
     const response = {
       resolution: {
+        id: "3f4a2d16-6f0f-4f4a-9c94-4a06c8f1b000",
         printJobId: "3f4a2d16-6f0f-4f4a-9c94-4a06c8f1b111",
         outcome: "NOT_DELIVERED" as const,
         reason: "Tray was empty.",

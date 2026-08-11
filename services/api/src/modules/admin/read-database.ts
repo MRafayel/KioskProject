@@ -41,6 +41,12 @@ export interface AdminReadDatabase {
   printJobEvent: ReadOnly<PrismaClient["printJobEvent"]>;
   /** One operator's account of a print the system would not settle. */
   printJobRecoveryResolution: ReadOnly<PrismaClient["printJobRecoveryResolution"]>;
+  /** The later accounts that supersede one, and who wrote them. */
+  printJobRecoveryCorrection: ReadOnly<PrismaClient["printJobRecoveryCorrection"]>;
+  /** Why a refund exists, when a named person is the reason it exists. */
+  refundAuthorization: ReadOnly<PrismaClient["refundAuthorization"]>;
+  /** Who asked retention to try again, and about which failure. */
+  cleanupRetryRequest: ReadOnly<PrismaClient["cleanupRetryRequest"]>;
   agentCommand: ReadOnly<PrismaClient["agentCommand"]>;
   outboxEvent: ReadOnly<PrismaClient["outboxEvent"]>;
   auditEvent: ReadOnly<PrismaClient["auditEvent"]>;

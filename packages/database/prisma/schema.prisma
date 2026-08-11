@@ -99,6 +99,8 @@ model PrintSession {
   sessionEvents           SessionEvent[]
   cleanupRun              CleanupRun?
   recoveryResolutions     PrintJobRecoveryResolution[]
+  recoveryCorrections     PrintJobRecoveryCorrection[]
+  refundAuthorizations    RefundAuthorization[]
 
   @@index([kioskId, createdAt])
   @@index([state, idleExpiresAt])
@@ -133,6 +135,7 @@ model CleanupRun {
   completedAt             DateTime?    @map("completed_at")
   deadLetteredAt          DateTime?    @map("dead_lettered_at")
   session                 PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  retryRequests           CleanupRetryRequest[]
 
   @@index([status, availableAt])
   @@index([status, leaseExpiresAt])
@@ -355,6 +358,7 @@ model Refund {
   completedAt      DateTime?    @map("completed_at")
   payment          Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
   session          PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  authorization    RefundAuthorization?
 
   @@unique([paymentId, reason])
   @@index([status, createdAt])
@@ -411,6 +415,8 @@ model PrintJob {
   events               PrintJobEvent[]
   commands             AgentCommand[]
   recoveryResolution   PrintJobRecoveryResolution?
+  recoveryCorrections  PrintJobRecoveryCorrection[]
+  refundAuthorization  RefundAuthorization?
 
   @@unique([sessionId], map: "print_jobs_one_per_session_idx")
   @@index([status, availableAt])
@@ -465,6 +471,122 @@ model PrintJobRecoveryResolution {
   @@index([kioskId, createdAt])
   @@index([refundSuggested, createdAt])
   @@map("print_job_recovery_resolutions")
+}
+
+/// A later, higher-authority account of the same print.
+///
+/// The resolution it supersedes stays exactly as written. Somebody who could
+/// edit their own account of a paid print could launder a failure into a
+/// success, so a correction appends rather than overwrites, is made by a role
+/// that does not record observations, and leaves both versions readable.
+///
+/// `supersedesId` names the record the corrector was looking at — the original
+/// resolution, or the newest correction when a print has been through this
+/// before. It is unique, so each record can be superseded once: two people
+/// correcting the same print at the same moment collide in the database instead
+/// of quietly overwriting each other.
+model PrintJobRecoveryCorrection {
+  id                 String       @id @db.Uuid
+  printJobId         String       @map("print_job_id") @db.Uuid
+  /// Denormalized from the job and pinned by a trigger, as the resolution's are.
+  sessionId          String       @map("session_id") @db.Uuid
+  kioskId            String       @map("kiosk_id") @db.VarChar(64)
+  /// The resolution or earlier correction this one replaces. Not a foreign key
+  /// because it names a row in one of two tables; a trigger checks both.
+  supersedesId       String       @unique @map("supersedes_id") @db.Uuid
+  outcome            String       @db.VarChar(32)
+  reason             String       @db.VarChar(280)
+  refundSuggested    Boolean      @map("refund_suggested")
+  observedSheets     Int?         @map("observed_sheets")
+  correctedByAdminId String       @map("corrected_by_admin_id") @db.Uuid
+  correctedByRole    String       @map("corrected_by_role") @db.VarChar(24)
+  requestDigest      String       @map("request_digest") @db.VarChar(64)
+  createdAt          DateTime     @default(now()) @map("created_at")
+  printJob           PrintJob     @relation(fields: [printJobId], references: [id], onDelete: Restrict)
+  session            PrintSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  correctedBy        AdminUser    @relation(fields: [correctedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([printJobId, createdAt])
+  @@index([kioskId, createdAt])
+  @@map("print_job_recovery_corrections")
+}
+
+/// Why a refund exists, when a person is the reason it exists.
+///
+/// `refunds` is the ledger the payment path also writes to, and a row there
+/// means the same thing whoever raised it. This is the provenance of the ones a
+/// named person raised: the print it was about, the account of that print they
+/// were reading, and the words they wrote at the time.
+///
+/// A refund carrying the `OPERATOR_REQUESTED` reason cannot exist without a row
+/// here — a deferred constraint trigger checks it at commit — so the ledger
+/// cannot acquire a human-authorized obligation that nobody is recorded as
+/// having authorized. The payment path's own automatic compensations
+/// (`LATE_CAPTURE`, `AMOUNT_MISMATCH`, `PRINT_FAILED`) are untouched by it.
+model RefundAuthorization {
+  id                  String       @id @db.Uuid
+  refundId            String       @unique @map("refund_id") @db.Uuid
+  /// One authorized refund per print. The obligation's own
+  /// `UNIQUE (payment_id, reason)` says the same thing about the payment; this
+  /// says it about the thing a person was actually looking at.
+  printJobId          String       @unique @map("print_job_id") @db.Uuid
+  sessionId           String       @map("session_id") @db.Uuid
+  /// Pinned to the refund's own by a trigger rather than by a foreign key: the
+  /// refund already references the payment, so this cannot drift from it.
+  paymentId           String       @map("payment_id") @db.Uuid
+  amountMinor         Int          @map("amount_minor")
+  currency            String       @db.Char(3)
+  currencyExponent    Int          @map("currency_exponent")
+  reason              String       @db.VarChar(280)
+  /// The account of the print this decision was made against, copied here so
+  /// the justification can still be read if the observation is later corrected.
+  observedOutcome     String       @map("observed_outcome") @db.VarChar(32)
+  observedRecordId    String       @map("observed_record_id") @db.Uuid
+  authorizedByAdminId String       @map("authorized_by_admin_id") @db.Uuid
+  authorizedByRole    String       @map("authorized_by_role") @db.VarChar(24)
+  requestDigest       String       @map("request_digest") @db.VarChar(64)
+  createdAt           DateTime     @default(now()) @map("created_at")
+  refund              Refund       @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  printJob            PrintJob     @relation(fields: [printJobId], references: [id], onDelete: Restrict)
+  session             PrintSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  authorizedBy        AdminUser    @relation(fields: [authorizedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([createdAt])
+  @@map("refund_authorizations")
+}
+
+/// A person asking retention to try a dead-lettered cleanup run again.
+///
+/// A request, not an edit. The control plane holds no privilege on
+/// `cleanup_runs`: it appends one of these, and the worker that owns retention
+/// re-arms its own run. That is what stops "retry the cleanup" from being a way
+/// to reach into retention state and change something else.
+///
+/// Unique per dead-lettering rather than per run. A request answers one
+/// specific failure, so re-arming consumes it by making the run's status no
+/// longer `DEAD_LETTER`; if the run fails its way back to dead-lettered, that
+/// is a new `deadLetteredAt` and needs a new decision from a person.
+model CleanupRetryRequest {
+  id                 String     @id @db.Uuid
+  cleanupRunId       String     @map("cleanup_run_id") @db.Uuid
+  sessionId          String     @map("session_id") @db.Uuid
+  /// The dead-lettering this request was made about, copied from the run and
+  /// pinned by a trigger. It is half the idempotency key.
+  deadLetteredAt     DateTime   @map("dead_lettered_at")
+  /// What the run had already tried, and why it gave up. Evidence about the
+  /// decision, kept because the run's own columns move on when it retries.
+  attempts           Int
+  lastErrorCode      String?    @map("last_error_code") @db.VarChar(80)
+  reason             String     @db.VarChar(280)
+  requestedByAdminId String     @map("requested_by_admin_id") @db.Uuid
+  requestedByRole    String     @map("requested_by_role") @db.VarChar(24)
+  createdAt          DateTime   @default(now()) @map("created_at")
+  cleanupRun         CleanupRun @relation(fields: [cleanupRunId], references: [id], onDelete: Cascade)
+  requestedBy        AdminUser  @relation(fields: [requestedByAdminId], references: [id], onDelete: Restrict)
+
+  @@unique([cleanupRunId, deadLetteredAt])
+  @@index([createdAt])
+  @@map("cleanup_retry_requests")
 }
 
 /// The operation ledger. Append-only: what the device said is evidence, and a
@@ -714,6 +836,9 @@ model AdminUser {
   challenges     AdminWebAuthnChallenge[]
   breakGlass     AdminBreakGlassCredential[]
   recoveryResolutions PrintJobRecoveryResolution[]
+  recoveryCorrections PrintJobRecoveryCorrection[]
+  refundAuthorizations RefundAuthorization[]
+  cleanupRetryRequests CleanupRetryRequest[]
 
   @@index([status, role])
   @@map("admin_users")

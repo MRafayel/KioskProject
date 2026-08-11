@@ -12,7 +12,8 @@ import type { PrismaClient } from "@printing-kiosk/database";
  * `update`, no `delete`, no `upsert` and no `createMany` anywhere in this
  * interface, so `database.printJob.update(...)` in an admin action is a compile
  * error rather than a review comment — and `database.refund.create(...)` does
- * not typecheck at all, because `refund` is absent.
+ * not typecheck at all, because `refund` is absent. Money has its own pool with
+ * its own role and its own narrowing: see `refund-database.ts`.
  *
  * This is the third statement of the Phase 3 gate. The writer role's grants
  * refuse the statement at the database. The table triggers refuse the row. This
@@ -20,10 +21,17 @@ import type { PrismaClient } from "@printing-kiosk/database";
  * rather than after somebody tries it in production.
  */
 
-/** Reads used to revalidate eligibility inside the writing transaction. */
+/**
+ * Reads used to revalidate eligibility inside the writing transaction.
+ *
+ * `findMany` is here for one reason: a correction has to walk the chain of
+ * records already superseding an observation before it may add another. Reading
+ * more rows is not writing any, and the alternative — a recursive query on a
+ * wider client — would have widened the surface this type exists to narrow.
+ */
 type ReadOnly<TDelegate> = Pick<
   TDelegate,
-  Extract<keyof TDelegate, "findFirst" | "findUnique" | "count">
+  Extract<keyof TDelegate, "findFirst" | "findUnique" | "findMany" | "count">
 >;
 
 /** A table an admin action may add a row to, and nothing else. */
@@ -33,6 +41,17 @@ type Appendable<TDelegate> = ReadOnly<TDelegate> &
 export interface AdminWriteDatabase {
   /** The observation itself. Append-only by trigger as well as by type. */
   printJobRecoveryResolution: Appendable<PrismaClient["printJobRecoveryResolution"]>;
+  /**
+   * A later account superseding one of those. Appendable, never updatable: a
+   * correction that could edit the record it corrects would be an edit.
+   */
+  printJobRecoveryCorrection: Appendable<PrismaClient["printJobRecoveryCorrection"]>;
+  /**
+   * A person asking retention to try a dead-lettered run again. Note what is
+   * absent beside it: `cleanupRun` is read-only, so re-arming is something the
+   * worker does after reading this, and not something an admin action does.
+   */
+  cleanupRetryRequest: Appendable<PrismaClient["cleanupRetryRequest"]>;
   /** Every admin action records itself, including the ones that were refused. */
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
 
@@ -44,6 +63,7 @@ export interface AdminWriteDatabase {
   printJob: ReadOnly<PrismaClient["printJob"]>;
   printSession: ReadOnly<PrismaClient["printSession"]>;
   payment: ReadOnly<PrismaClient["payment"]>;
+  cleanupRun: ReadOnly<PrismaClient["cleanupRun"]>;
   adminUser: ReadOnly<PrismaClient["adminUser"]>;
   adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
 
@@ -63,10 +83,13 @@ export interface AdminWriteDatabase {
  */
 export interface AdminWriteTransaction {
   printJobRecoveryResolution: Appendable<PrismaClient["printJobRecoveryResolution"]>;
+  printJobRecoveryCorrection: Appendable<PrismaClient["printJobRecoveryCorrection"]>;
+  cleanupRetryRequest: Appendable<PrismaClient["cleanupRetryRequest"]>;
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
   printJob: ReadOnly<PrismaClient["printJob"]>;
   printSession: ReadOnly<PrismaClient["printSession"]>;
   payment: ReadOnly<PrismaClient["payment"]>;
+  cleanupRun: ReadOnly<PrismaClient["cleanupRun"]>;
   adminUser: ReadOnly<PrismaClient["adminUser"]>;
   adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
 }

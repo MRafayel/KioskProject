@@ -10,6 +10,7 @@ import {
   adminPaymentsResponseSchema,
   adminPrintJobDetailResponseSchema,
   adminPrintJobsResponseSchema,
+  adminRefundQueueResponseSchema,
   adminRefundsResponseSchema,
   adminRetentionResponseSchema,
   adminSessionDetailResponseSchema,
@@ -82,6 +83,9 @@ const refundsQuerySchema = z.object({
   /** Defaults to the obligations that still need settling — the reason to look. */
   unsettledOnly: z.enum(["true", "false"]).default("true")
 });
+
+/** The refund queue takes no filter: everything on it is waiting for somebody. */
+const cursorQuerySchema = z.object({ cursor: cursorSchema });
 
 const retentionQuerySchema = z.object({
   cursor: cursorSchema,
@@ -256,9 +260,10 @@ export function registerAdminObservabilityRoutes(
   /**
    * Money owed back, and how long it has been owed.
    *
-   * Reading an obligation is not authorising its settlement. That is
-   * `refund.authorize`, a different capability held by different people, and it
-   * does not exist as an endpoint yet.
+   * Reading an obligation is not authorising one, and neither is settling it.
+   * Authorizing is `refund.authorize` on its own route and its own connection;
+   * settling belongs to an executor holding a provider credential, which no
+   * part of the control plane has.
    */
   app.get("/v1/admin/refunds", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "refund.obligation.read");
@@ -269,6 +274,28 @@ export function registerAdminObservabilityRoutes(
       cursor: query.cursor
     });
     return sendNoStore(reply, adminRefundsResponseSchema.parse(refunds));
+  });
+
+  /**
+   * The prints waiting for somebody who can decide about money.
+   *
+   * Read under `refund.obligation.read` rather than under `refund.authorize`:
+   * seeing that a decision is outstanding is not the same as being able to make
+   * it, and the queue is worth reading for anybody who can see the obligations
+   * it turns into.
+   *
+   * Every row states the money in full — captured, already owed, and therefore
+   * the most that may still be authorized — because the alternative is an Admin
+   * doing that arithmetic from three screens.
+   */
+  app.get("/v1/admin/refund-queue", readRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "refund.obligation.read");
+    await throttleAccount(request, admin.sessionId);
+    const query = cursorQuerySchema.parse(request.query ?? {});
+    const queue = await dependencies.observability.refundQueue(scopeForAdmin(admin), {
+      cursor: query.cursor
+    });
+    return sendNoStore(reply, adminRefundQueueResponseSchema.parse(queue));
   });
 
   // ---------------------------------------------------------------------------

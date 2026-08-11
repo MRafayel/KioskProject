@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 
+import { useSession } from "../features/auth/SessionProvider.js";
 import { observabilityApi } from "../features/observability/api.js";
 import {
   Counters,
@@ -10,6 +11,7 @@ import {
   Table,
   When
 } from "../features/observability/components.js";
+import { useAdminAction } from "../features/observability/useAdminAction.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
 
 /**
@@ -28,6 +30,7 @@ export function RetentionPanel({
   const [problemsOnly, setProblemsOnly] = useState(initialProblemsOnly ?? true);
   const load = useCallback(() => observabilityApi.retention(problemsOnly), [problemsOnly]);
   const state = useAdminData(load, { refreshMilliseconds: 30_000 });
+  const canRetry = useSession().can("document.retention.retry");
 
   return (
     <Panel
@@ -77,7 +80,8 @@ export function RetentionPanel({
                 "Attempts",
                 "Last error",
                 "Due",
-                "Gave up"
+                "Gave up",
+                ...(canRetry ? ["Retry"] : [])
               ]}
             >
               {state.data.items.map((run) => (
@@ -103,6 +107,18 @@ export function RetentionPanel({
                   <td>
                     <When value={run.deadLetteredAt} />
                   </td>
+                  {canRetry ? (
+                    <td>
+                      {run.status === "DEAD_LETTER" ? (
+                        <RetentionRetryButton
+                          sessionId={run.sessionId}
+                          onRequested={state.reload}
+                        />
+                      ) : (
+                        <span className="key-list__meta">—</span>
+                      )}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </Table>
@@ -110,5 +126,81 @@ export function RetentionPanel({
         </>
       ) : null}
     </Panel>
+  );
+}
+
+/**
+ * Asking retention to try a run again.
+ *
+ * Deliberately not a confirmation dialog. A dead-lettered run means documents
+ * that should be gone are still there, and the cost of asking again is one more
+ * attempt by a worker that is safe to run three times — so the friction belongs
+ * on the reason, which is recorded, rather than on the click.
+ *
+ * It reports what actually happened: a request was recorded. The worker picks
+ * it up on its next pass, and telling somebody their documents were deleted at
+ * the moment they pressed a button would be telling them something this panel
+ * does not know.
+ */
+function RetentionRetryButton({
+  sessionId,
+  onRequested
+}: {
+  sessionId: string;
+  onRequested: () => void;
+}) {
+  const [asked, setAsked] = useState(false);
+  const [reason, setReason] = useState("");
+
+  const action = useAdminAction<{ reason: string }>(
+    useCallback(
+      async (input) => observabilityApi.retryRetention({ sessionId, reason: input.reason.trim() }),
+      [sessionId]
+    )
+  );
+
+  if (action.state.succeeded) {
+    return <span className="key-list__meta">Requested — the worker will pick it up.</span>;
+  }
+
+  if (!asked) {
+    return (
+      <button type="button" className="button-quiet" onClick={() => setAsked(true)}>
+        Try again
+      </button>
+    );
+  }
+
+  const trimmed = reason.trim();
+  const ready = trimmed.length >= 8 && !action.state.running;
+
+  return (
+    <form
+      className="inline-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!ready) return;
+        void action.run({ reason }).then((recorded) => {
+          if (recorded) onRequested();
+        });
+      }}
+    >
+      <input
+        type="text"
+        value={reason}
+        maxLength={280}
+        placeholder="Object storage is back."
+        aria-label="Why this should be retried"
+        onChange={(event) => setReason(event.target.value)}
+      />
+      <button type="submit" disabled={!ready}>
+        {action.state.running ? "Asking…" : "Ask"}
+      </button>
+      {action.state.error ? (
+        <span className="resolve__error" role="alert">
+          {action.state.error}
+        </span>
+      ) : null}
+    </form>
   );
 }

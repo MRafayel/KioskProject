@@ -98,7 +98,14 @@ const sessionCleanup = new SessionCleanupRunner({
   logger,
   leaseMilliseconds: environment.RETENTION_LEASE_SECONDS * 1_000,
   maximumAttempts: environment.RETENTION_MAX_ATTEMPTS,
-  intervalMilliseconds: environment.RETENTION_SWEEP_INTERVAL_SECONDS * 1_000
+  intervalMilliseconds: environment.RETENTION_SWEEP_INTERVAL_SECONDS * 1_000,
+  // The same policy the print path schedules from. A session whose recovery has
+  // been answered is let down to the settled grace, and the two must agree
+  // about what that is or a resolution could move a deadline the wrong way.
+  retentionPolicy: {
+    settledGraceMilliseconds: environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
+    recoveryGraceMilliseconds: environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
+  }
 });
 
 const storageReconciler = new StorageReconciler({

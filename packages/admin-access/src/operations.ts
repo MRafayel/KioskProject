@@ -3,21 +3,33 @@ import { z } from "zod";
 import {
   ADMIN_ERROR_SUBSYSTEMS,
   RECOVERY_OUTCOMES,
+  adminRecoveryCorrectionSchema,
   adminRecoveryResolutionSchema,
+  adminRefundAuthorizationSchema,
   type RecoveryOutcome
 } from "./observability.js";
 
 /**
  * What the control plane may actually change.
  *
- * Everything in `observability.ts` describes an answer. This file describes the
- * two requests an operator may make, and it is short on purpose: the surface a
+ * Everything in `observability.ts` describes an answer. This file describes
+ * every request a person may make, and it is short on purpose: the surface a
  * dashboard can act through should be small enough to read in one sitting and
  * to review as a closed set.
  *
- * Neither request can move money, change a print job, reopen a session or issue
- * a command to a device. Both produce a new fact and nothing else — an operator
- * observation, and an acknowledgement that somebody is looking at a failure.
+ * Five requests, in ascending order of what they can cost:
+ *
+ *   - acknowledge an incident            nothing changes at all
+ *   - ask retention to try again         a worker retries work it already owns
+ *   - record a recovery observation      a new fact about a print
+ *   - correct a recovery observation     a new fact superseding an earlier one
+ *   - authorize a refund                 an obligation to return money
+ *
+ * Only the last one is about money, and it is the only one whose row is written
+ * on a different connection by a different database role. Everything above it
+ * is additive: none of them changes a print job, reopens a session, or issues a
+ * command to a device, and the connection they run on holds no privilege to do
+ * so even if this package were rewritten to ask.
  *
  * The vocabularies here are mirrored by check constraints in the database, so a
  * value that gets past this file still cannot get past PostgreSQL.
@@ -51,50 +63,58 @@ export const recoveryReasonSchema = z
   .min(8, "Say what you saw — at least a few words.")
   .max(280);
 
+/**
+ * What the person counted, when they could count. Optional because "I could not
+ * count them" is a real state, and a required number would be answered with a
+ * made-up one.
+ */
+const observedSheetsSchema = z.number().int().min(0).max(10_000).optional();
+
+/**
+ * The contradictions the database refuses, refused earlier and with a message a
+ * person can act on.
+ *
+ * Shared by an observation and by a correction of one, so the two can never
+ * drift into accepting different accounts of the same print. Both layers exist
+ * because this one can be bypassed and the check constraint cannot.
+ */
+function refineObservedSheets(
+  value: { outcome: RecoveryOutcome; observedSheets?: number | undefined },
+  context: z.RefinementCtx
+): void {
+  if (value.observedSheets === undefined) return;
+
+  if (value.outcome === "NOT_DELIVERED" && value.observedSheets !== 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["observedSheets"],
+      message: "Nothing delivered means no sheets. Choose partially delivered instead."
+    });
+  }
+  if (value.outcome === "DELIVERED" && value.observedSheets === 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["observedSheets"],
+      message: "Delivered means at least one sheet. Choose not delivered instead."
+    });
+  }
+  if (value.outcome === "UNRESOLVABLE") {
+    context.addIssue({
+      code: "custom",
+      path: ["observedSheets"],
+      message: "An unresolvable outcome cannot carry a sheet count."
+    });
+  }
+}
+
 export const resolveRecoveryBodySchema = z
   .object({
     outcome: z.enum(RECOVERY_OUTCOMES),
     reason: recoveryReasonSchema,
-    /**
-     * What the operator counted, when they could count. Optional because
-     * "I could not count them" is a real state, and a required number would be
-     * answered with a made-up one.
-     */
-    observedSheets: z.number().int().min(0).max(10_000).optional()
+    observedSheets: observedSheetsSchema
   })
   .strict()
-  .superRefine((value, context) => {
-    // The same contradictions the database refuses, refused earlier and with a
-    // message a person can act on. Both layers exist because this one can be
-    // bypassed and the other one cannot.
-    if (value.outcome === "NOT_DELIVERED" && value.observedSheets !== undefined) {
-      if (value.observedSheets !== 0) {
-        context.addIssue({
-          code: "custom",
-          path: ["observedSheets"],
-          message: "Nothing delivered means no sheets. Choose partially delivered instead."
-        });
-      }
-    }
-    if (
-      value.outcome === "DELIVERED" &&
-      value.observedSheets !== undefined &&
-      value.observedSheets === 0
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["observedSheets"],
-        message: "Delivered means at least one sheet. Choose not delivered instead."
-      });
-    }
-    if (value.outcome === "UNRESOLVABLE" && value.observedSheets !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["observedSheets"],
-        message: "An unresolvable outcome cannot carry a sheet count."
-      });
-    }
-  });
+  .superRefine(refineObservedSheets);
 
 export type ResolveRecoveryBody = z.infer<typeof resolveRecoveryBodySchema>;
 
@@ -115,6 +135,166 @@ export const resolveRecoveryResponseSchema = z.object({
 });
 
 export type ResolveRecoveryResponse = z.infer<typeof resolveRecoveryResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Correcting a recovery observation
+// ---------------------------------------------------------------------------
+
+/**
+ * Putting right an account of a print that turned out to be wrong.
+ *
+ * The observation itself stays exactly as it was written: this appends a later
+ * one that supersedes it. Somebody who could edit their own account of a paid
+ * print could launder a failure into a success, so the correction is a separate
+ * capability held by roles that do not make the observations, and it produces a
+ * new row rather than a changed one.
+ *
+ * `supersedesId` is the record the corrector was actually looking at — the
+ * original resolution, or the newest correction if this print has been through
+ * this before. Naming it is what turns two people correcting the same print at
+ * the same moment into a conflict somebody reads, instead of a silent
+ * last-writer-wins.
+ */
+export const correctRecoveryBodySchema = z
+  .object({
+    supersedesId: z.string().uuid(),
+    outcome: z.enum(RECOVERY_OUTCOMES),
+    reason: recoveryReasonSchema,
+    observedSheets: observedSheetsSchema
+  })
+  .strict()
+  .superRefine(refineObservedSheets);
+
+export type CorrectRecoveryBody = z.infer<typeof correctRecoveryBodySchema>;
+
+export const correctRecoveryResponseSchema = z.object({
+  correction: adminRecoveryCorrectionSchema,
+  replayed: z.boolean(),
+  /**
+   * Restates the boundary, as the resolution response does. Correcting an
+   * observation can change what a refund queue says is owed; it never moves
+   * money, and it never settles or withdraws a refund already authorized.
+   */
+  refundAuthorized: z.literal(false)
+});
+
+export type CorrectRecoveryResponse = z.infer<typeof correctRecoveryResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Authorizing a refund
+// ---------------------------------------------------------------------------
+
+/**
+ * The `refunds.reason` value written by a refund a person authorized.
+ *
+ * Taken from the vocabulary Phase 7 closed rather than added to it. That list
+ * already reserved a value for this — the other three describe things the
+ * system noticed on its own (a late capture, an amount mismatch, a print the
+ * device reported as failed), and this one describes a person deciding. The
+ * name says "operator" in the operational sense; the capability that reaches it
+ * is Admin and above, and who actually decided is recorded beside the row.
+ *
+ * Two consequences worth stating. It is distinct from `PRINT_FAILED`, which the
+ * print path raises automatically for a job that settled as failed, so an
+ * authorization can never collide with or masquerade as one of those. And
+ * `UNIQUE (payment_id, reason)` makes "one authorized refund per payment" a
+ * property of the database rather than a check somebody has to remember.
+ */
+export const REFUND_AUTHORIZATION_REASON = "OPERATOR_REQUESTED";
+
+/**
+ * Turning an observation into an obligation to return money.
+ *
+ * The only request in this file that costs anything, and the shape reflects it:
+ * an amount somebody typed, a reason somebody wrote, and nothing else. The
+ * currency is not accepted from the client — it is the payment's own, because a
+ * refund denominated in a currency the capture was not made in is not a refund.
+ *
+ * What this does *not* do is move money. It records an obligation, at `PENDING`,
+ * for the executor that settles refunds against the provider. Nothing in the
+ * control plane holds a provider credential, and this request is why that is
+ * worth restating: authorizing a payout and performing one are different acts,
+ * and only the first one is reachable from a browser.
+ */
+export const authorizeRefundBodySchema = z
+  .object({
+    /**
+     * Bounded here so an obviously wrong number is refused before it reaches a
+     * transaction; the real ceiling is what the payment actually captured, less
+     * anything already owed on it, and only the server knows that.
+     */
+    amountMinor: z.number().int().positive().max(100_000_000),
+    reason: recoveryReasonSchema
+  })
+  .strict();
+
+export type AuthorizeRefundBody = z.infer<typeof authorizeRefundBodySchema>;
+
+export const authorizeRefundResponseSchema = z.object({
+  authorization: adminRefundAuthorizationSchema,
+  replayed: z.boolean(),
+  /**
+   * The obligation is recorded; no money has moved. Written as a literal so no
+   * code path can produce a response claiming a customer has been paid, in the
+   * same way the resolution response cannot claim a refund was authorized.
+   */
+  settled: z.literal(false)
+});
+
+export type AuthorizeRefundResponse = z.infer<typeof authorizeRefundResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Asking retention to try again
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-arming a cleanup run that gave up.
+ *
+ * A dead-lettered run means a customer's documents are still in object storage
+ * after the point at which this system promised they would be gone, and the
+ * only thing still holding the line is a storage lifecycle rule meant to be a
+ * backstop. Somebody has to be able to say "the object store is back, try
+ * again" without waiting for anybody's approval — so this is R1.
+ *
+ * It is a request, not an edit. The panel appends a row; the worker that owns
+ * retention reads it and re-arms its own run. The control plane holds no
+ * privilege on `cleanup_runs` at all, which is what stops "retry the cleanup"
+ * from being a way to reach into retention state and change something else.
+ */
+export const retryRetentionBodySchema = z
+  .object({
+    sessionId: z.string().uuid(),
+    reason: recoveryReasonSchema
+  })
+  .strict();
+
+export type RetryRetentionBody = z.infer<typeof retryRetentionBodySchema>;
+
+export const adminRetentionRetrySchema = z.object({
+  sessionId: z.string().uuid(),
+  /** The run this request was made against, and the failure it was made about. */
+  cleanupRunId: z.string().uuid(),
+  deadLetteredAt: z.string().datetime(),
+  lastErrorCode: z.string().max(100).nullable(),
+  attempts: z.number().int().nonnegative(),
+  requestedByAdminUserId: z.string().uuid(),
+  requestedByDisplayName: z.string().max(120).nullable(),
+  requestedAt: z.string().datetime()
+});
+
+export const retryRetentionResponseSchema = z.object({
+  retry: adminRetentionRetrySchema,
+  replayed: z.boolean(),
+  /**
+   * Nothing has been deleted yet, and this request did not delete it. The
+   * worker picks the run up on its next pass; the panel is not the thing that
+   * removes a customer's documents and should never report that it is.
+   */
+  rearmed: z.literal(false)
+});
+
+export type AdminRetentionRetry = z.infer<typeof adminRetentionRetrySchema>;
+export type RetryRetentionResponse = z.infer<typeof retryRetentionResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Incident acknowledgement

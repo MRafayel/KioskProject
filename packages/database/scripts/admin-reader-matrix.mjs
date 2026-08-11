@@ -54,6 +54,17 @@ export const READABLE_TABLES = Object.freeze({
   // meant to be read back — including `reason`, which is free text written by
   // somebody the system never shows a filename to.
   print_job_recovery_resolutions: "*",
+  // The later accounts that supersede one. Readable for the same reason and by
+  // the same argument: the panel shows the whole chain, because a correction
+  // that hid what it corrected would be an edit wearing a different name.
+  print_job_recovery_corrections: "*",
+  // Why a refund exists when a person is the reason. Readable so the money
+  // screens can say who decided and on what evidence, rather than showing an
+  // obligation that appears to have raised itself.
+  refund_authorizations: "*",
+  // Who asked retention to try again, and about which failure. Operational
+  // state the retention screen reports; it names no document and no object key.
+  cleanup_retry_requests: "*",
 
   // `selections` carries per-document content digests until retention strips
   // them. The priced aggregates beside it answer every operational question.

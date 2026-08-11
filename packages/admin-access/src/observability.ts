@@ -515,6 +515,11 @@ export type RecoveryOutcome = (typeof RECOVERY_OUTCOMES)[number];
  * `refund.authorize`; nothing here has moved any money.
  */
 export const adminRecoveryResolutionSchema = z.object({
+  /**
+   * The record's own identifier, not the job's. A correction has to name the
+   * exact record it supersedes, so the chain needs something to point at.
+   */
+  id: z.string().uuid(),
   printJobId: z.string().uuid(),
   outcome: z.enum(RECOVERY_OUTCOMES),
   reason: z.string().max(280),
@@ -526,13 +531,43 @@ export const adminRecoveryResolutionSchema = z.object({
   resolvedAt: isoTimestamp
 });
 
+/**
+ * A later, higher-authority account of the same print.
+ *
+ * A correction never replaces the row it supersedes — both stay readable, and
+ * the chain of them is the record of how the account of one print changed and
+ * who changed it. `supersedesId` names the exact record the corrector was
+ * looking at, which is what makes two simultaneous corrections a conflict
+ * rather than a race.
+ */
+export const adminRecoveryCorrectionSchema = z.object({
+  id: z.string().uuid(),
+  printJobId: z.string().uuid(),
+  /** The resolution or earlier correction this one supersedes. */
+  supersedesId: z.string().uuid(),
+  outcome: z.enum(RECOVERY_OUTCOMES),
+  reason: z.string().max(280),
+  refundSuggested: z.boolean(),
+  observedSheets: z.number().int().nullable(),
+  correctedByAdminUserId: z.string().uuid(),
+  correctedByDisplayName: z.string().max(120).nullable(),
+  correctedByRole: z.string().max(24),
+  correctedAt: isoTimestamp
+});
+
 export const adminPrintJobDetailResponseSchema = z.object({
   job: adminPrintJobSchema,
   /** Present only for a caller holding `print.diagnostics.read`. */
   ledger: z.array(adminPrintJobEventSchema).nullable(),
   command: adminAgentCommandSchema.nullable(),
   /** What a person recorded seeing, if anybody has yet. */
-  resolution: adminRecoveryResolutionSchema.nullable()
+  resolution: adminRecoveryResolutionSchema.nullable(),
+  /**
+   * Corrections to that observation, oldest first. Almost always empty: this
+   * exists so a mistake can be put right without anybody editing evidence, not
+   * because correcting is expected to be routine.
+   */
+  corrections: z.array(adminRecoveryCorrectionSchema)
 });
 
 // ---------------------------------------------------------------------------
@@ -592,7 +627,17 @@ export const adminRefundSchema = z.object({
   createdAt: isoTimestamp,
   completedAt: isoTimestamp.nullable(),
   /** How long this obligation has been outstanding, in whole hours. */
-  outstandingHours: z.number().int().nonnegative().nullable()
+  outstandingHours: z.number().int().nonnegative().nullable(),
+  /**
+   * The person who authorized this obligation from the panel, if one did.
+   *
+   * Null for a refund the payment path raised on its own — a late capture or an
+   * amount mismatch, where the provider's own report is the justification. The
+   * distinction is worth showing: "the system noticed" and "a named person
+   * decided" are different kinds of claim on the same ledger.
+   */
+  authorizedByDisplayName: z.string().max(120).nullable(),
+  authorizationReason: z.string().max(280).nullable()
 });
 
 export const adminRefundsResponseSchema = z.object({
@@ -600,6 +645,133 @@ export const adminRefundsResponseSchema = z.object({
   nextCursor: z.string().nullable(),
   unsettledCount: z.number().int().nonnegative()
 });
+
+/**
+ * Who decided that money was owed, on what evidence, and why.
+ *
+ * Kept beside the obligation rather than inside it: `refunds` is the ledger the
+ * payment path also writes to, and a row there means the same thing whoever
+ * raised it. This is the provenance of the ones a person raised — the print it
+ * was about, the account of that print they were reading, and the words they
+ * wrote down at the time.
+ *
+ * `status` is the refund's own, and it is `PENDING` here. Authorizing is not
+ * settling: the money moves when an executor with a provider credential acts on
+ * this obligation, and nothing in the control plane holds one.
+ */
+export const adminRefundAuthorizationSchema = z.object({
+  refundId: z.string().uuid(),
+  printJobId: z.string().uuid(),
+  paymentId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  amountMinor: z.number().int().positive(),
+  currency: z.string().length(3),
+  currencyExponent: z.number().int().nonnegative(),
+  reason: z.string().max(280),
+  status: operationalState,
+  /** The account of the print that justified it, as it read at that moment. */
+  observedOutcome: z.enum(RECOVERY_OUTCOMES),
+  authorizedByAdminUserId: z.string().uuid(),
+  authorizedByDisplayName: z.string().max(120).nullable(),
+  authorizedByRole: z.string().max(24),
+  authorizedAt: isoTimestamp
+});
+
+export type AdminRefundAuthorization = z.infer<typeof adminRefundAuthorizationSchema>;
+
+// ---------------------------------------------------------------------------
+// The refund queue
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a print is waiting for somebody who can decide about money.
+ *
+ * Two different questions, deliberately not merged. `REFUND_SUGGESTED` is a
+ * person saying pages are missing; the decision is how much. `UNRESOLVABLE` is
+ * a person saying nobody could tell what happened, which suggests no refund and
+ * used to drop off every list at that point — it is a judgement call that needs
+ * more authority than the operator who could not make it, not a closed case.
+ */
+export const REFUND_QUEUE_REASONS = ["REFUND_SUGGESTED", "UNRESOLVABLE"] as const;
+export type RefundQueueReason = (typeof REFUND_QUEUE_REASONS)[number];
+
+/**
+ * One print awaiting a money decision.
+ *
+ * The money on it is stated in full — what was captured, what has already been
+ * returned, and therefore the most that may still be authorized — because the
+ * alternative is an Admin doing that arithmetic from three screens.
+ */
+export const adminRefundQueueEntrySchema = z.object({
+  printJobId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  kioskId: z.string().max(64),
+  queueReason: z.enum(REFUND_QUEUE_REASONS),
+  /** The effective account of the print: the newest correction, or the original. */
+  outcome: z.enum(RECOVERY_OUTCOMES),
+  reason: z.string().max(280),
+  observedSheets: z.number().int().nullable(),
+  /** What the device itself reported, kept beside the human account. */
+  sheetsProduced: z.number().int().nullable(),
+  physicalSheets: z.number().int().nonnegative(),
+  observedByDisplayName: z.string().max(120).nullable(),
+  observedAt: isoTimestamp,
+  /** True when the effective account above is a correction, not the original. */
+  corrected: z.boolean(),
+  paymentId: z.string().uuid(),
+  capturedAmountMinor: z.number().int().nonnegative(),
+  /** Already owed or returned on this payment, from every reason combined. */
+  refundedAmountMinor: z.number().int().nonnegative(),
+  /** Captured minus refunded: the ceiling the server will enforce. */
+  authorizableAmountMinor: z.number().int().nonnegative(),
+  currency: z.string().length(3),
+  currencyExponent: z.number().int().nonnegative()
+});
+
+export const adminRefundQueueResponseSchema = z.object({
+  items: z.array(adminRefundQueueEntrySchema),
+  nextCursor: z.string().nullable(),
+  totals: z.object({
+    suggested: z.number().int().nonnegative(),
+    unresolvable: z.number().int().nonnegative()
+  })
+});
+
+/**
+ * What the observation implies is owed, as a starting point for a person.
+ *
+ * A suggestion and nothing more. The server bounds what may be authorized but
+ * does not compute it, because the arithmetic below cannot know that the
+ * customer reprinted two of the ruined sheets themselves — and an amount the
+ * system insisted on would be an amount nobody took responsibility for.
+ *
+ * Nothing came out means everything still authorizable is owed. Some of it came
+ * out means the sheets that did not, pro rata. Nobody could tell means there is
+ * no arithmetic to do, which is exactly why that case needs a person.
+ */
+export function suggestedRefundMinor(entry: {
+  outcome: RecoveryOutcome;
+  observedSheets: number | null;
+  physicalSheets: number;
+  authorizableAmountMinor: number;
+}): number | null {
+  if (entry.authorizableAmountMinor <= 0) return null;
+
+  switch (entry.outcome) {
+    case "NOT_DELIVERED":
+      return entry.authorizableAmountMinor;
+    case "PARTIALLY_DELIVERED": {
+      if (entry.observedSheets === null || entry.physicalSheets <= 0) return null;
+      const missing = Math.max(entry.physicalSheets - entry.observedSheets, 0);
+      if (missing === 0) return null;
+      const owed = Math.round((entry.authorizableAmountMinor * missing) / entry.physicalSheets);
+      return Math.min(Math.max(owed, 1), entry.authorizableAmountMinor);
+    }
+    case "DELIVERED":
+    case "UNRESOLVABLE":
+      return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Retention
@@ -737,8 +909,11 @@ export type AdminDocumentsResponse = z.infer<typeof adminDocumentsResponseSchema
 export type AdminPrintJobsResponse = z.infer<typeof adminPrintJobsResponseSchema>;
 export type AdminPrintJobDetailResponse = z.infer<typeof adminPrintJobDetailResponseSchema>;
 export type AdminRecoveryResolution = z.infer<typeof adminRecoveryResolutionSchema>;
+export type AdminRecoveryCorrection = z.infer<typeof adminRecoveryCorrectionSchema>;
 export type AdminPaymentsResponse = z.infer<typeof adminPaymentsResponseSchema>;
 export type AdminRefundsResponse = z.infer<typeof adminRefundsResponseSchema>;
+export type AdminRefundQueueEntry = z.infer<typeof adminRefundQueueEntrySchema>;
+export type AdminRefundQueueResponse = z.infer<typeof adminRefundQueueResponseSchema>;
 export type AdminRetentionResponse = z.infer<typeof adminRetentionResponseSchema>;
 export type AdminErrorsResponse = z.infer<typeof adminErrorsResponseSchema>;
 export type AdminAuditResponse = z.infer<typeof adminAuditResponseSchema>;

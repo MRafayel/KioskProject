@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 import {
   RECOVERY_OUTCOMES,
   suggestsRefund,
+  type AdminRecoveryCorrection,
   type AdminRecoveryResolution,
   type RecoveryOutcome
 } from "@printing-kiosk/admin-access";
@@ -180,27 +181,231 @@ export function RecoveryResolutionForm({
   );
 }
 
-/** The stored observation, once somebody has made one. */
-export function RecordedResolution({ resolution }: { resolution: AdminRecoveryResolution }) {
+/**
+ * The stored account of a print: the original observation, then any correction.
+ *
+ * Both are shown, always. A correction that replaced what it corrected on
+ * screen would be an edit wearing a different name, and the whole reason a
+ * correction is a new row rather than an UPDATE is that the earlier version
+ * stays readable by whoever looks next.
+ */
+export function RecordedResolution({
+  resolution,
+  corrections
+}: {
+  resolution: AdminRecoveryResolution;
+  corrections: readonly AdminRecoveryCorrection[];
+}) {
+  const superseded = new Set(corrections.map((correction) => correction.supersedesId));
+  const effective = corrections.at(-1) ?? resolution;
+
   return (
     <div className="resolution">
-      <p className="resolution__outcome">
-        <strong>{OUTCOME_LABELS[resolution.outcome].title}</strong>
-        {resolution.observedSheets === null ? null : (
-          <span className="key-list__meta">{resolution.observedSheets} sheet(s) counted</span>
-        )}
-      </p>
-      <blockquote className="resolution__reason">{resolution.reason}</blockquote>
-      <p className="resolution__by">
-        {resolution.resolvedByDisplayName ?? "Unknown"} ({resolution.resolvedByRole}) &middot;{" "}
-        <When value={resolution.resolvedAt} />
-      </p>
-      {resolution.refundSuggested ? (
+      <div className={superseded.has(resolution.id) ? "resolution__superseded" : ""}>
+        <p className="resolution__outcome">
+          <strong>{OUTCOME_LABELS[resolution.outcome].title}</strong>
+          {resolution.observedSheets === null ? null : (
+            <span className="key-list__meta">{resolution.observedSheets} sheet(s) counted</span>
+          )}
+        </p>
+        <blockquote className="resolution__reason">{resolution.reason}</blockquote>
+        <p className="resolution__by">
+          {resolution.resolvedByDisplayName ?? "Unknown"} ({resolution.resolvedByRole}) &middot;{" "}
+          <When value={resolution.resolvedAt} />
+          {superseded.has(resolution.id) ? " · corrected below" : null}
+        </p>
+      </div>
+
+      {corrections.map((correction) => (
+        <div
+          key={correction.id}
+          className={
+            superseded.has(correction.id)
+              ? "resolution__correction resolution__superseded"
+              : "resolution__correction"
+          }
+        >
+          <p className="resolution__outcome">
+            <span className="key-list__meta">Corrected to</span>{" "}
+            <strong>{OUTCOME_LABELS[correction.outcome].title}</strong>
+            {correction.observedSheets === null ? null : (
+              <span className="key-list__meta">{correction.observedSheets} sheet(s) counted</span>
+            )}
+          </p>
+          <blockquote className="resolution__reason">{correction.reason}</blockquote>
+          <p className="resolution__by">
+            {correction.correctedByDisplayName ?? "Unknown"} ({correction.correctedByRole}) &middot;{" "}
+            <When value={correction.correctedAt} />
+            {superseded.has(correction.id) ? " · corrected below" : null}
+          </p>
+        </div>
+      ))}
+
+      {effective.refundSuggested ? (
         <p className="resolve__money" role="note">
           Money looks owed on this print. Whether it is refunded is an administrator&apos;s decision
           and is recorded separately.
         </p>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Putting right an account of a print that turned out to be wrong.
+ *
+ * Deliberately not a friendly edit form. The wording says what this actually
+ * does — appends a correction that supersedes what somebody else recorded,
+ * permanently and under your name — because an interface that made it feel like
+ * editing a field would be an interface that encouraged rewriting evidence.
+ *
+ * `supersedesId` is the record on screen at the moment the form is opened. If
+ * somebody else corrects it first, the server refuses this with a 409 rather
+ * than quietly letting the second answer win.
+ */
+export function RecoveryCorrectionForm({
+  printJobId,
+  supersedesId,
+  currentOutcome,
+  onCorrected
+}: {
+  printJobId: string;
+  supersedesId: string;
+  currentOutcome: RecoveryOutcome;
+  onCorrected: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [outcome, setOutcome] = useState<RecoveryOutcome | "">("");
+  const [reason, setReason] = useState("");
+  const [sheets, setSheets] = useState("");
+
+  const action = useAdminAction<{ outcome: RecoveryOutcome; reason: string; sheets: string }>(
+    useCallback(
+      async (input) =>
+        observabilityApi.correctRecovery(printJobId, {
+          supersedesId,
+          outcome: input.outcome,
+          reason: input.reason.trim(),
+          ...(input.sheets === "" || input.outcome === "UNRESOLVABLE"
+            ? {}
+            : { observedSheets: Number(input.sheets) })
+        }),
+      [printJobId, supersedesId]
+    )
+  );
+
+  if (!open) {
+    return (
+      <p className="resolve__actions">
+        <button type="button" className="button-quiet" onClick={() => setOpen(true)}>
+          This account is wrong — correct it
+        </button>
+      </p>
+    );
+  }
+
+  const trimmed = reason.trim();
+  const countable = outcome !== "" && outcome !== "UNRESOLVABLE" && outcome !== "NOT_DELIVERED";
+  const ready =
+    outcome !== "" && outcome !== currentOutcome && trimmed.length >= 8 && !action.state.running;
+
+  return (
+    <form
+      className="resolve"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (outcome === "" || !ready) return;
+        void action.run({ outcome, reason, sheets }).then((recorded) => {
+          if (recorded) {
+            setOpen(false);
+            onCorrected();
+          }
+        });
+      }}
+    >
+      <h3>Correct this record</h3>
+      <p className="resolve__device">
+        The record above stays exactly as written. This adds a later account that supersedes it,
+        under your name. Say what was actually the case and why the earlier account was wrong.
+      </p>
+
+      <fieldset className="resolve__outcomes">
+        <legend>What was actually the case</legend>
+        {RECOVERY_OUTCOMES.map((value) => (
+          <label
+            key={value}
+            className={outcome === value ? "resolve__option is-chosen" : "resolve__option"}
+          >
+            <input
+              type="radio"
+              name="correction-outcome"
+              value={value}
+              checked={outcome === value}
+              disabled={value === currentOutcome}
+              onChange={() => {
+                setOutcome(value);
+                if (value === "UNRESOLVABLE" || value === "NOT_DELIVERED") setSheets("");
+              }}
+            />
+            <span>
+              <strong>{OUTCOME_LABELS[value].title}</strong>
+              <small>
+                {value === currentOutcome
+                  ? "This is what the record already says."
+                  : OUTCOME_LABELS[value].detail}
+              </small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+
+      {countable ? (
+        <label className="resolve__field">
+          Sheets actually delivered <span className="resolve__optional">optional</span>
+          <input
+            type="number"
+            min={1}
+            max={10000}
+            value={sheets}
+            onChange={(event) => setSheets(event.target.value)}
+            placeholder="Leave blank if nobody counted"
+          />
+        </label>
+      ) : null}
+
+      <label className="resolve__field">
+        Why the earlier account was wrong
+        <textarea
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          rows={3}
+          maxLength={280}
+          placeholder="The customer returned with the pages; they had been left in the lower tray."
+        />
+        <small className="resolve__optional">
+          {trimmed.length < 8
+            ? "A few words at least — this is the reason the record changed."
+            : `${trimmed.length}/280`}
+        </small>
+      </label>
+
+      {action.state.error ? (
+        <p className="resolve__error" role="alert">
+          {action.state.error}
+        </p>
+      ) : null}
+
+      <div className="resolve__actions">
+        <button type="submit" disabled={!ready}>
+          {action.state.running ? "Recording…" : "Record the correction"}
+        </button>
+        <button type="button" className="button-quiet" onClick={() => setOpen(false)}>
+          Cancel
+        </button>
+        <span className="resolve__optional">
+          It does not withdraw a refund anybody has already authorized.
+        </span>
+      </div>
+    </form>
   );
 }

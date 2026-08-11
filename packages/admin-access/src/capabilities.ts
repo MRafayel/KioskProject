@@ -71,6 +71,15 @@ export const ADMIN_CAPABILITIES = [
   "print.diagnostics.read",
   /** Records what a person observed. Cannot move money — see `refund.authorize`. */
   "print.recovery.resolve",
+  /**
+   * Superseding somebody else's recorded observation with a corrected one.
+   *
+   * Deliberately not held by the role that records observations. An account
+   * that could rewrite its own account of a paid print could launder a failure
+   * into a success; correcting one is therefore an act of higher authority,
+   * and it appends a new fact rather than editing the original.
+   */
+  "print.recovery.correct",
 
   "payment.read",
   "payment.reconcile.read",
@@ -154,6 +163,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "document.retention.retry",
     "print.read",
     "print.recovery.resolve",
+    "print.recovery.correct",
     "payment.read",
     "payment.reconcile.read",
     "payment.mismatch.read",
@@ -188,6 +198,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "print.read",
     "print.diagnostics.read",
     "print.recovery.resolve",
+    "print.recovery.correct",
     "payment.read",
     "payment.reconcile.read",
     "payment.mismatch.read",
@@ -249,6 +260,7 @@ const CAPABILITY_RISK: Readonly<Record<AdminCapability, ActionRisk>> = {
   "print.read": "R0",
   "print.diagnostics.read": "R0",
   "print.recovery.resolve": "R2",
+  "print.recovery.correct": "R2",
 
   "payment.read": "R0",
   "payment.reconcile.read": "R0",

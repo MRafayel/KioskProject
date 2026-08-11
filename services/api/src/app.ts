@@ -10,8 +10,10 @@ import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 import {
   assertAdminReadClientIsReadOnly,
+  assertAdminRefundClientIsAppendOnly,
   assertAdminWriteClientIsAppendOnly,
   createAdminReadClient,
+  createAdminRefundClient,
   createAdminWriteClient,
   createDatabaseClient,
   type PrismaClient
@@ -23,6 +25,9 @@ import { AdminObservabilityService } from "./modules/admin/observability.js";
 import { registerAdminObservabilityRoutes } from "./modules/admin/observability-routes.js";
 import { AdminOperationsService } from "./modules/admin/operations.js";
 import { registerAdminOperationsRoutes } from "./modules/admin/operations-routes.js";
+import { asAdminRefundDatabase } from "./modules/admin/refund-database.js";
+import { registerAdminRefundRoutes } from "./modules/admin/refund-routes.js";
+import { AdminRefundService } from "./modules/admin/refunds.js";
 import { asAdminReadDatabase } from "./modules/admin/read-database.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { AdminService } from "./modules/admin/service.js";
@@ -82,6 +87,11 @@ export interface BuildAppOptions {
    * prove that the absence of a grant is what stops a refund, not the code.
    */
   adminWriteDatabase?: PrismaClient;
+  /**
+   * The refund pool. Absent means the panel cannot authorize refunds at all,
+   * which is how a deployment turns the capability off without code changes.
+   */
+  adminRefundDatabase?: PrismaClient;
   clock?: Clock;
   random?: RandomSource;
   objectStore?: ObjectStore;
@@ -574,10 +584,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     observability
   });
 
-  // A third pool, and the only one in this process that can write on an
-  // operator's behalf. In production it connects as a role holding INSERT on
-  // two tables and no UPDATE or DELETE on anything — which is what makes "an
-  // Operator cannot move money" and "nobody can rewrite what a device reported"
+  // A third pool, and the one that writes on an operator's behalf. In
+  // production it connects as a role holding INSERT on a short list of tables
+  // and no UPDATE or DELETE on anything — which is what makes "an Operator
+  // cannot move money" and "nobody can rewrite what a device reported"
   // properties of the database rather than of the code above it.
   const adminWriteDatabase =
     options.adminWriteDatabase ??
@@ -618,6 +628,49 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       random
     })
   });
+
+  // A fourth pool, and the only connection in this process that can create an
+  // obligation to pay a customer back. Separate from the write pool on purpose:
+  // that one is defined by holding no grant on money at all, and the way to add
+  // `refund.authorize` without discarding that property is another role, not a
+  // wider one.
+  //
+  // Unset means the panel simply cannot authorize refunds. That is a safe
+  // failure and a deliberate one — an environment without the role is an
+  // environment where the route answers 503 rather than one where money moves
+  // on the application's own grants.
+  if (options.environment.ADMIN_REFUND_DATABASE_URL || options.adminRefundDatabase) {
+    const adminRefundDatabase =
+      options.adminRefundDatabase ??
+      createAdminRefundClient(options.environment.ADMIN_REFUND_DATABASE_URL as string);
+    const ownsAdminRefundDatabase = !options.adminRefundDatabase;
+
+    if (options.environment.ADMIN_REFUND_DATABASE_URL) {
+      await assertAdminRefundClientIsAppendOnly(adminRefundDatabase);
+    }
+
+    if (ownsAdminRefundDatabase) {
+      app.addHook("onClose", async () => {
+        await adminRefundDatabase.$disconnect();
+      });
+    }
+
+    registerAdminRefundRoutes(app, {
+      admin: adminService,
+      clock,
+      stepUpTtlMilliseconds,
+      refunds: new AdminRefundService({
+        database: asAdminRefundDatabase(adminRefundDatabase),
+        clock,
+        random
+      })
+    });
+  } else {
+    app.log.warn(
+      "ADMIN_REFUND_DATABASE_URL is not set: authorizing a refund is unavailable. " +
+        "Provision the role with `pnpm db:admin-refund-writer provision`."
+    );
+  }
 
   return app;
 }
