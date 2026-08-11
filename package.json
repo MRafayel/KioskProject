@@ -36,13 +36,13 @@
   "devDependencies": {
     "@aws-sdk/client-s3": "3.1086.0",
     "@eslint/js": "10.0.1",
-    "@types/node": "24.13.3",
-    "eslint": "10.7.0",
-    "prettier": "3.9.5",
+    "@types/node": "26.2.0",
+    "eslint": "10.8.1",
+    "prettier": "3.9.6",
     "socket.io-client": "4.8.3",
-    "turbo": "2.10.4",
-    "typescript": "6.0.3",
-    "typescript-eslint": "8.63.0",
+    "turbo": "2.10.9",
+    "typescript": "7.0.2",
+    "typescript-eslint": "8.66.0",
     "vitest": "4.1.10"
   }
 }
