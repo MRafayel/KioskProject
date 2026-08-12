@@ -252,5 +252,21 @@ export const adminApi = {
       ceremonyId,
       credential,
       label
+    }),
+
+  /**
+   * Redeeming an enrolment ticket. Separate calls from break-glass, matching the
+   * separate routes: the two ceremonies differ in what account they may enrol
+   * onto, and one client function for both would have made that a parameter.
+   */
+  beginTicketEnrolment: (enrollmentCode: string) =>
+    call<CeremonyResponse>("POST", "/v1/admin/auth/enrollment/registration/options", {
+      enrollmentCode
+    }),
+  completeTicketEnrolment: (ceremonyId: string, credential: unknown, label: string) =>
+    call<{ authenticatorId: string }>("POST", "/v1/admin/auth/enrollment/registration/verify", {
+      ceremonyId,
+      credential,
+      label
     })
 };

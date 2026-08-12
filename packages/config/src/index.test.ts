@@ -183,6 +183,40 @@ describe("loadEnvironment", () => {
     ).toThrow(/must differ from both/u);
   });
 
+  it("requires the control plane's people role, and keeps it to itself", () => {
+    // The only connection in the system that can change a row an account's
+    // access depends on. Sharing it would hand "suspend this person" and
+    // "retire that key" to whatever else uses the same string.
+    expect(() =>
+      loadEnvironment({ ...secureProductionEnvironment, ADMIN_PEOPLE_DATABASE_URL: undefined })
+    ).toThrow(/ADMIN_PEOPLE_DATABASE_URL/u);
+
+    for (const shared of [
+      "DATABASE_URL",
+      "ADMIN_READ_DATABASE_URL",
+      "ADMIN_WRITE_DATABASE_URL"
+    ] as const) {
+      expect(() =>
+        loadEnvironment({
+          ...secureProductionEnvironment,
+          [shared]: "postgresql://shared:secret@localhost:5432/kiosk",
+          ADMIN_PEOPLE_DATABASE_URL: "postgresql://shared:secret@localhost:5432/kiosk"
+        })
+      ).toThrow(/ADMIN_PEOPLE_DATABASE_URL must not equal/u);
+    }
+
+    // And the money role must not be it either, in the other direction: that
+    // check names the refund variable, because losing that separation is the
+    // more expensive of the two.
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        ADMIN_PEOPLE_DATABASE_URL: "postgresql://shared:secret@localhost:5432/kiosk",
+        ADMIN_REFUND_DATABASE_URL: "postgresql://shared:secret@localhost:5432/kiosk"
+      })
+    ).toThrow(/ADMIN_REFUND_DATABASE_URL must not equal ADMIN_PEOPLE_DATABASE_URL/u);
+  });
+
   it("holds the control plane's connections to the same transport rule as the application's", () => {
     expect(() =>
       loadEnvironment({
@@ -195,6 +229,13 @@ describe("loadEnvironment", () => {
       loadEnvironment({
         ...secureProductionEnvironment,
         ADMIN_WRITE_DATABASE_URL: "postgresql://writer:secret@db.example.test:5432/kiosk"
+      })
+    ).toThrow(/sslmode=verify-full/u);
+
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        ADMIN_PEOPLE_DATABASE_URL: "postgresql://people:secret@db.example.test:5432/kiosk"
       })
     ).toThrow(/sslmode=verify-full/u);
 
@@ -214,12 +255,15 @@ describe("loadEnvironment", () => {
     const environment = loadNonAdminEnvironment({
       ...process.env,
       ADMIN_READ_DATABASE_URL: "postgresql://reader:secret@localhost:5432/kiosk",
-      ADMIN_WRITE_DATABASE_URL: "postgresql://writer:hunter2@localhost:5432/kiosk"
+      ADMIN_WRITE_DATABASE_URL: "postgresql://writer:hunter2@localhost:5432/kiosk",
+      ADMIN_PEOPLE_DATABASE_URL: "postgresql://people:correcthorse@localhost:5432/kiosk"
     });
     expect(environment).not.toHaveProperty("ADMIN_READ_DATABASE_URL");
     expect(environment).not.toHaveProperty("ADMIN_WRITE_DATABASE_URL");
+    expect(environment).not.toHaveProperty("ADMIN_PEOPLE_DATABASE_URL");
     expect(JSON.stringify(environment)).not.toContain("secret@localhost");
     expect(JSON.stringify(environment)).not.toContain("hunter2");
+    expect(JSON.stringify(environment)).not.toContain("correcthorse");
   });
 
   it("requires isolated, digest-pinned processing and malware scanning in production", () => {
@@ -772,6 +816,8 @@ const secureProductionEnvironment = {
   ADMIN_WRITE_DATABASE_URL: "postgresql://printing_kiosk_admin_writer:secret@localhost:5432/kiosk",
   ADMIN_REFUND_DATABASE_URL:
     "postgresql://printing_kiosk_admin_refund_writer:secret@localhost:5432/kiosk",
+  ADMIN_PEOPLE_DATABASE_URL:
+    "postgresql://printing_kiosk_admin_people_writer:secret@localhost:5432/kiosk",
   MALWARE_SCANNER_ADAPTER: "clamav",
   S3_SERVER_SIDE_ENCRYPTION: "AES256"
 } as const;

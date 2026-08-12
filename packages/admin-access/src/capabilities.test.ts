@@ -60,7 +60,6 @@ describe("no role is a superset of another", () => {
     const technical = new Set<string>(capabilitiesForRole("TECHNICAL_ADMIN"));
     const missing = capabilitiesForRole("ADMIN").filter((capability) => !technical.has(capability));
     expect(missing).toContain("operator.manage");
-    expect(missing).toContain("authenticator.manage.operator");
     expect(missing).toContain("change.approve.admin");
   });
 
@@ -151,19 +150,31 @@ describe("money is separated from observation", () => {
 });
 
 describe("account management boundaries", () => {
-  it("lets only an Admin manage Operators", () => {
+  it("lets only an Admin suspend an account or move a kiosk assignment", () => {
     expect(hasCapability("ADMIN", "operator.manage")).toBe(true);
+    // A Technical Admin can get an Operator onto a key; it cannot decide
+    // whether that Operator may work, or where. See ROLE_CAPABILITIES.
     expect(hasCapability("TECHNICAL_ADMIN", "operator.manage")).toBe(false);
     expect(hasCapability("OPERATOR", "operator.manage")).toBe(false);
   });
 
-  it("lets every role manage only its own authenticators by default", () => {
+  it("lets every role manage its own authenticators, and an Operator's only from above", () => {
     for (const role of ADMIN_ROLES) {
       expect(hasCapability(role, "authenticator.manage.self")).toBe(true);
     }
     expect(hasCapability("ADMIN", "authenticator.manage.operator")).toBe(true);
-    expect(hasCapability("TECHNICAL_ADMIN", "authenticator.manage.operator")).toBe(false);
+    expect(hasCapability("TECHNICAL_ADMIN", "authenticator.manage.operator")).toBe(true);
     expect(hasCapability("OPERATOR", "authenticator.manage.operator")).toBe(false);
+  });
+
+  it("declares no capability that changes an account's role", () => {
+    // Nothing in the control plane promotes anybody. An account holds the role
+    // it was created with, and changing that is a CLI operation with database
+    // access behind it.
+    for (const capability of ADMIN_CAPABILITIES) {
+      expect(capability.includes("role")).toBe(false);
+      expect(capability.startsWith("admin.manage")).toBe(false);
+    }
   });
 
   it("gives an Operator only its own audit trail", () => {

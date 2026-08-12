@@ -37,6 +37,7 @@
     "db:admin-reader": "pnpm --filter @printing-kiosk/database admin-reader",
     "db:admin-writer": "pnpm --filter @printing-kiosk/database admin-writer",
     "db:admin-refund-writer": "pnpm --filter @printing-kiosk/database admin-refund-writer",
+    "db:admin-people-writer": "pnpm --filter @printing-kiosk/database admin-people-writer",
     "db:admin-owner": "pnpm --filter @printing-kiosk/database admin-owner"
   },
   "devDependencies": {

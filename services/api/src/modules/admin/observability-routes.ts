@@ -8,6 +8,7 @@ import {
   adminKiosksResponseSchema,
   adminOverviewResponseSchema,
   adminPaymentsResponseSchema,
+  adminPeopleResponseSchema,
   adminPrintJobDetailResponseSchema,
   adminPrintJobsResponseSchema,
   adminRefundQueueResponseSchema,
@@ -353,5 +354,25 @@ export function registerAdminObservabilityRoutes(
       action: query.action
     });
     return sendNoStore(reply, adminAuditResponseSchema.parse(audit));
+  });
+
+  /**
+   * The Operators, and enough about each to decide what to do about them.
+   *
+   * Gated on `authenticator.manage.operator` rather than on `operator.manage`,
+   * which is the looser of the two on purpose: a Technical Admin can issue an
+   * enrolment ticket and retire a key, so it has to be able to see who it would
+   * be doing that to. An Admin holds both and sees the same rows with more
+   * controls beside them — the panel decides which to draw, and every one of
+   * them is refused again by its own route.
+   *
+   * A read, so it runs on the read pool like every other list. The connection
+   * that changes people is a different one and appears nowhere in this file.
+   */
+  app.get("/v1/admin/people", readRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "authenticator.manage.operator");
+    await throttleAccount(request, admin.sessionId);
+    const people = await dependencies.observability.people(dependencies.clock.now());
+    return sendNoStore(reply, adminPeopleResponseSchema.parse(people));
   });
 }

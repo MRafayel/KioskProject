@@ -161,6 +161,8 @@ export const FORBIDDEN_TABLES = Object.freeze({
   admin_sessions: "Session and CSRF digests.",
   admin_webauthn_challenges: "In-flight ceremony state.",
   admin_break_glass_credentials: "Recovery credential digests.",
+  admin_enrollment_tickets:
+    "Authorising somebody's first enrolment is authenticator.manage.operator, on the people role. A connection that records what an operator saw at a tray must not be able to mint an identity.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

@@ -50,8 +50,23 @@ export interface AdminReadDatabase {
   agentCommand: ReadOnly<PrismaClient["agentCommand"]>;
   outboxEvent: ReadOnly<PrismaClient["outboxEvent"]>;
   auditEvent: ReadOnly<PrismaClient["auditEvent"]>;
-  /** Only to put a colleague's name on an audit row. */
+  /** A colleague's name on an audit row, and the people section's roster. */
   adminUser: ReadOnly<PrismaClient["adminUser"]>;
+  /**
+   * Phase 4B. The people section has to answer "can this person work, and
+   * should they", which needs key counts, live session counts, kiosk
+   * assignments and outstanding tickets.
+   *
+   * None of that is a credential, and the reader role's column allow-list is
+   * what makes that statement true rather than intended: `credential_id`,
+   * `public_key`, `token_digest`, `csrf_digest` and the ticket's own
+   * `secret_digest` are all denied at the grant, so a query here that asked for
+   * one would be refused by PostgreSQL.
+   */
+  adminAuthenticator: ReadOnly<PrismaClient["adminAuthenticator"]>;
+  adminSession: ReadOnly<PrismaClient["adminSession"]>;
+  adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
+  adminEnrollmentTicket: ReadOnly<PrismaClient["adminEnrollmentTicket"]>;
 }
 
 /**

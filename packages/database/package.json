@@ -31,6 +31,7 @@
     "admin-reader": "node scripts/admin-reader.mjs",
     "admin-writer": "node scripts/admin-writer.mjs",
     "admin-refund-writer": "node scripts/admin-refund-writer.mjs",
+    "admin-people-writer": "node scripts/admin-people-writer.mjs",
     "admin-owner": "node scripts/admin-owner.mjs"
   },
   "dependencies": {

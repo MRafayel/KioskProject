@@ -9,6 +9,7 @@ import {
   beginBreakGlassBodySchema,
   capabilitiesForRole,
   hasFreshStepUp,
+  redeemEnrollmentTicketBodySchema,
   revokeAuthenticatorBodySchema,
   verifyAuthenticationBodySchema,
   verifyRegistrationBodySchema,
@@ -50,6 +51,13 @@ const VERIFY_RATE = { max: 20, timeWindow: "1 minute" } as const;
  * the sealed code itself has 256 bits and is not made guessable by this bound.
  */
 const BREAK_GLASS_RATE = { max: 30, timeWindow: "1 hour" } as const;
+/**
+ * Onboarding is more routine than recovery, and a redemption attempt costs the
+ * attacker a 256-bit guess either way. This is loose enough that a new colleague
+ * fumbling the code at a counter is not locked out for an hour, and tight enough
+ * that the endpoint is not a place to grind.
+ */
+const ENROLLMENT_RATE = { max: 60, timeWindow: "1 hour" } as const;
 
 export interface AdminRouteDependencies extends AdminAuthorizationDependencies {
   admin: AdminService;
@@ -349,6 +357,84 @@ export function registerAdminRoutes(
 
       // No session is issued here on purpose. Recovery restores the ability to
       // sign in; it is not itself a sign-in.
+      return sendNoStore(reply, { authenticatorId: result.authenticatorId });
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Enrollment tickets
+  // -------------------------------------------------------------------------
+
+  /**
+   * The way in for somebody who has never had a key.
+   *
+   * Unauthenticated, necessarily: the person redeeming this cannot sign in yet,
+   * which is the entire problem it solves. What bounds it is not a session but
+   * the ticket — single use, fifteen minutes, one named account, and only an
+   * Operator account that is still PROVISIONING with no usable authenticator.
+   *
+   * Deliberately not folded into the break-glass routes above. The two look
+   * alike and differ in the one way that matters: break-glass may enrol onto an
+   * account that has keys already, and this may not. Sharing a route would have
+   * made that difference a branch rather than a boundary, and it would have let
+   * a stolen ticket be presented where a sealed recovery code is expected.
+   */
+  app.post(
+    "/v1/admin/auth/enrollment/registration/options",
+    { config: { rateLimit: { ...ENROLLMENT_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = redeemEnrollmentTicketBodySchema.parse(request.body ?? {});
+      const ceremony = await dependencies.admin.beginEnrollmentTicketRegistration({
+        enrollmentCode: body.enrollmentCode,
+        requestId: request.id
+      });
+
+      // Not an error-level event like break-glass: onboarding a new colleague is
+      // routine, where a consumed recovery credential never is. It is still
+      // worth a line naming the account, because a redemption nobody expected is
+      // the signal that an issued ticket went to the wrong person.
+      request.log.info(
+        { adminUserId: ceremony.adminUserId, requestId: request.id },
+        "admin enrollment ticket redeemed"
+      );
+
+      return sendNoStore(
+        reply,
+        webAuthnOptionsResponseSchema.parse({
+          ceremonyId: ceremony.ceremonyId,
+          options: ceremony.options
+        })
+      );
+    }
+  );
+
+  app.post(
+    "/v1/admin/auth/enrollment/registration/verify",
+    { config: { rateLimit: { ...ENROLLMENT_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = verifyRegistrationBodySchema.parse(request.body ?? {});
+      const target = await dependencies.admin.resolveEnrollmentCeremonyTarget(body.ceremonyId);
+      if (!target) {
+        throw new ApiError(
+          400,
+          "ADMIN_CEREMONY_EXPIRED",
+          "This request expired. Please try again."
+        );
+      }
+
+      const result = await dependencies.admin.completeRegistration({
+        targetAdminUserId: target,
+        actorAdminUserId: target,
+        ceremonyId: body.ceremonyId,
+        credential: body.credential,
+        label: body.label,
+        requestId: request.id,
+        purpose: "ENROLLMENT_TICKET_REGISTRATION"
+      });
+
+      // No session here either. The account now has one key and still needs its
+      // second before it can be activated, so the honest next step is to say so
+      // rather than to sign somebody in halfway through provisioning.
       return sendNoStore(reply, { authenticatorId: result.authenticatorId });
     }
   );

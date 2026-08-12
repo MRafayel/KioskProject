@@ -101,6 +101,18 @@ const environmentSchema = z
       .min(1)
       .refine(isPostgresUrl, "ADMIN_REFUND_DATABASE_URL must be a valid PostgreSQL URL")
       .optional(),
+    // The connection that administers people, as the role provisioned by
+    // `pnpm db:admin-people-writer provision`. The first one in this list that
+    // can change a row rather than add one, and the only one that holds UPDATE
+    // at all — on nine named columns, never on a table. Notably absent from
+    // those columns is `admin_users.role`: nothing reachable from a browser
+    // promotes anybody. Production requires it; development may leave it unset,
+    // in which case managing people is unavailable rather than unprotected.
+    ADMIN_PEOPLE_DATABASE_URL: z
+      .string()
+      .min(1)
+      .refine(isPostgresUrl, "ADMIN_PEOPLE_DATABASE_URL must be a valid PostgreSQL URL")
+      .optional(),
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
     OBJECT_STORAGE_DRIVER: z.literal("s3").default("s3"),
     S3_ENDPOINT: z.string().url().default("http://localhost:9000"),
@@ -550,6 +562,17 @@ const environmentSchema = z
       });
     }
 
+    if (
+      environment.ADMIN_PEOPLE_DATABASE_URL !== undefined &&
+      !isPostgresConnectionUrl(environment.ADMIN_PEOPLE_DATABASE_URL)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_PEOPLE_DATABASE_URL"],
+        message: "ADMIN_PEOPLE_DATABASE_URL must be a postgresql:// or postgres:// URL"
+      });
+    }
+
     // The refund role is the only grant in this system that can pay somebody.
     // Pointing it at any other connection string would hand that grant to
     // whatever else uses that string, which is the entire thing this separation
@@ -557,7 +580,8 @@ const environmentSchema = z
     for (const [name, value] of [
       ["DATABASE_URL", environment.DATABASE_URL],
       ["ADMIN_READ_DATABASE_URL", environment.ADMIN_READ_DATABASE_URL],
-      ["ADMIN_WRITE_DATABASE_URL", environment.ADMIN_WRITE_DATABASE_URL]
+      ["ADMIN_WRITE_DATABASE_URL", environment.ADMIN_WRITE_DATABASE_URL],
+      ["ADMIN_PEOPLE_DATABASE_URL", environment.ADMIN_PEOPLE_DATABASE_URL]
     ] as const) {
       if (
         environment.ADMIN_REFUND_DATABASE_URL !== undefined &&
@@ -570,6 +594,31 @@ const environmentSchema = z
             `ADMIN_REFUND_DATABASE_URL must not equal ${name}. It is the only connection ` +
             "that can create a refund; sharing it gives that power to everything else. " +
             "Provision the role with `pnpm db:admin-refund-writer provision`."
+        });
+      }
+    }
+
+    // The people role is the only grant in this system that can change a row an
+    // account's access depends on. Sharing its connection string would give
+    // "suspend this person" and "retire that key" to everything else that uses
+    // it, so — like the refund role — this is checked outside production too.
+    for (const [name, value] of [
+      ["DATABASE_URL", environment.DATABASE_URL],
+      ["ADMIN_READ_DATABASE_URL", environment.ADMIN_READ_DATABASE_URL],
+      ["ADMIN_WRITE_DATABASE_URL", environment.ADMIN_WRITE_DATABASE_URL]
+    ] as const) {
+      if (
+        environment.ADMIN_PEOPLE_DATABASE_URL !== undefined &&
+        environment.ADMIN_PEOPLE_DATABASE_URL === value
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["ADMIN_PEOPLE_DATABASE_URL"],
+          message:
+            `ADMIN_PEOPLE_DATABASE_URL must not equal ${name}. It is the only connection ` +
+            "that can suspend an account or retire somebody's key; sharing it gives that " +
+            "power to everything else. " +
+            "Provision the role with `pnpm db:admin-people-writer provision`."
         });
       }
     }
@@ -624,6 +673,21 @@ const environmentSchema = z
           "ADMIN_REFUND_DATABASE_URL must be set in production. Provision the role with " +
           "`pnpm db:admin-refund-writer provision`, or disable it deliberately with " +
           "`pnpm db:admin-refund-writer disable`."
+      });
+    }
+
+    // Five connections, five different sets of grants. Same argument as the
+    // refund role's: without this the panel cannot manage people at all, which
+    // is safe but silent, and a deployment that meant to offer it should find
+    // out at boot rather than when an Admin tries to suspend somebody.
+    if (environment.ADMIN_PEOPLE_DATABASE_URL === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_PEOPLE_DATABASE_URL"],
+        message:
+          "ADMIN_PEOPLE_DATABASE_URL must be set in production. Provision the role with " +
+          "`pnpm db:admin-people-writer provision`, or disable it deliberately with " +
+          "`pnpm db:admin-people-writer disable`."
       });
     }
 
@@ -790,7 +854,8 @@ const environmentSchema = z
       "DATABASE_URL",
       "ADMIN_READ_DATABASE_URL",
       "ADMIN_WRITE_DATABASE_URL",
-      "ADMIN_REFUND_DATABASE_URL"
+      "ADMIN_REFUND_DATABASE_URL",
+      "ADMIN_PEOPLE_DATABASE_URL"
     ] as const) {
       const value = environment[name];
       if (value === undefined) continue;
@@ -878,10 +943,12 @@ const ADMIN_ENVIRONMENT_KEYS = [
   // to serve and therefore no reason to hold any of them — the write one is the
   // only credential in this system that can append to the audit log, and the
   // refund one is the only credential that can create an obligation to pay a
-  // customer back.
+  // customer back, and the people one is the only credential that can change
+  // whether somebody may sign in at all.
   "ADMIN_READ_DATABASE_URL",
   "ADMIN_WRITE_DATABASE_URL",
-  "ADMIN_REFUND_DATABASE_URL"
+  "ADMIN_REFUND_DATABASE_URL",
+  "ADMIN_PEOPLE_DATABASE_URL"
 ] as const;
 type AdminEnvironmentKey = (typeof ADMIN_ENVIRONMENT_KEYS)[number];
 const ADMIN_ENVIRONMENT_KEY_SET: ReadonlySet<string> = new Set(ADMIN_ENVIRONMENT_KEYS);
@@ -959,12 +1026,14 @@ export function loadNonAdminEnvironment(
     ADMIN_BREAK_GLASS_TTL_HOURS: "2160",
     // Loopback so the production transport rule does not demand TLS settings
     // for connections this process will never open, and distinct from each
-    // other because production requires the four roles to differ.
+    // other because production requires the five roles to differ.
     ADMIN_READ_DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api",
     ADMIN_WRITE_DATABASE_URL:
       "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-write",
     ADMIN_REFUND_DATABASE_URL:
-      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-refund"
+      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-refund",
+    ADMIN_PEOPLE_DATABASE_URL:
+      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-people"
   });
   return Object.fromEntries(
     Object.entries(parsed).filter(([name]) => !ADMIN_ENVIRONMENT_KEY_SET.has(name))

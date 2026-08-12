@@ -734,7 +734,10 @@ export class AdminOperationsService {
   ): Promise<boolean> {
     if (admin.role !== "OPERATOR") return true;
     const assignment = await transaction.adminKioskScope.findFirst({
-      where: { adminUserId: admin.adminUserId, kioskId },
+      // `revokedAt` is what a withdrawal writes — the row stays so the history
+      // does. An Admin taking a kiosk back therefore stops an in-flight
+      // Operator here, on their next action, rather than on their next sign-in.
+      where: { adminUserId: admin.adminUserId, kioskId, revokedAt: null },
       select: { kioskId: true }
     });
     return assignment !== null;

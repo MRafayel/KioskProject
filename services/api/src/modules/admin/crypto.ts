@@ -18,6 +18,17 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 const SESSION_TOKEN_PURPOSE = "printing-kiosk/admin-session-token/v1";
 const CSRF_TOKEN_PURPOSE = "printing-kiosk/admin-csrf-token/v1";
 const BREAK_GLASS_PURPOSE = "printing-kiosk/admin-break-glass/v1";
+/**
+ * Enrollment tickets share the break-glass pepper deliberately.
+ *
+ * They are the same kind of thing — a one-time code that authorises exactly one
+ * enrolment ceremony and nothing else — so a deployment holding one secret for
+ * both is coherent rather than lazy. What keeps them from being interchangeable
+ * is this purpose string: the same code digests differently for each, so a
+ * ticket presented to the break-glass endpoint matches nothing, and neither does
+ * a recovery code presented to the ticket endpoint.
+ */
+const ENROLLMENT_TICKET_PURPOSE = "printing-kiosk/admin-enrollment-ticket/v1";
 
 function digest(purpose: string, value: string, pepper: string): string {
   return createHmac("sha256", pepper)
@@ -37,6 +48,10 @@ export function digestAdminCsrfToken(token: string, pepper: string): string {
 
 export function digestBreakGlassSecret(secret: string, pepper: string): string {
   return digest(BREAK_GLASS_PURPOSE, secret, pepper);
+}
+
+export function digestEnrollmentTicketSecret(secret: string, pepper: string): string {
+  return digest(ENROLLMENT_TICKET_PURPOSE, secret, pepper);
 }
 
 /**

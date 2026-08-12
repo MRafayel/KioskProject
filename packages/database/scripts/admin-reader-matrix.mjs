@@ -253,6 +253,53 @@ export const READABLE_TABLES = Object.freeze({
     "suspended_at",
     "disabled_at",
     "last_login_at"
+  ],
+
+  // Phase 4B: the people section has to answer "can this person work, and
+  // should they" — which needs how many keys they hold, when each was last
+  // used, and how many sessions are live. None of that is a credential, and the
+  // columns that are stay denied by omission: `credential_id` and `public_key`
+  // identify and verify a key, `sign_count`, `transports` and `aaguid` describe
+  // the device holding it, and none of the five is anything an operator reads.
+  admin_authenticators: [
+    "id",
+    "admin_user_id",
+    "attachment",
+    "backup_eligible",
+    "backed_up",
+    "label",
+    "created_at",
+    "last_used_at",
+    "revoked_at",
+    "revoked_reason"
+  ],
+
+  // Enough to count live sessions and say when one was last used. `token_digest`
+  // and `csrf_digest` are absent: a digest is not replayable, but the panel has
+  // no question that needs one, and the cheapest guarantee is the missing grant.
+  admin_sessions: [
+    "id",
+    "admin_user_id",
+    "created_at",
+    "idle_expires_at",
+    "hard_expires_at",
+    "last_seen_at",
+    "last_step_up_at",
+    "revoked_at",
+    "revoked_reason"
+  ],
+
+  // Whether an enrolment is outstanding on an account, and until when. Never
+  // `secret_digest` — the redeemable half lives on the application connection,
+  // which is the only thing that ever needs to match one.
+  admin_enrollment_tickets: [
+    "id",
+    "admin_user_id",
+    "issued_by_admin_id",
+    "reason",
+    "created_at",
+    "expires_at",
+    "consumed_at"
   ]
 });
 
@@ -269,8 +316,6 @@ export const DENIED_TABLES = Object.freeze({
   mobile_clients: "Phone session cookie and nonce digests.",
   file_derivatives:
     "Object keys: the storage address of original uploads, normalized PDFs and rendered page images. The control plane must not be able to name them, let alone hold a credential for them.",
-  admin_authenticators: "Credential public keys and signature counters.",
-  admin_sessions: "Session and CSRF token digests.",
   admin_webauthn_challenges: "In-flight ceremony state.",
   admin_break_glass_credentials: "Recovery credential digests.",
   idempotency_records: "Stored response bodies from every replayed request.",

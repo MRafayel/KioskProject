@@ -83,7 +83,14 @@ const OWNED_TABLES = Object.freeze({
   admin_sessions: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   admin_webauthn_challenges: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   admin_break_glass_credentials: ["SELECT", "INSERT", "UPDATE", "DELETE"],
-  admin_kiosk_scopes: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+  admin_kiosk_scopes: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  // Phase 4B. Redemption runs on the application connection — matching a
+  // presented code against a stored digest, and marking the ticket consumed —
+  // so the application keeps ordinary CRUD here. What it loses, as everywhere
+  // else in this list, is the ability to drop the table or switch off the
+  // trigger that makes a ticket single-use and refuses to let one name a
+  // working account.
+  admin_enrollment_tickets: ["SELECT", "INSERT", "UPDATE", "DELETE"]
 });
 
 const ALL_PRIVILEGES = [

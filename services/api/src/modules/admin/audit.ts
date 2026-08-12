@@ -83,7 +83,22 @@ const ALLOWED_METADATA_KEYS = new Set([
   "status",
   // Asking retention to try again.
   "cleanupRunId",
-  "attempts"
+  "attempts",
+  // Administering people. `targetRole` is written beside the actor's own
+  // `role` because "an Admin suspended somebody" and "an Admin suspended a
+  // Technical Admin" are different events, and a row that named only one of
+  // the two would need a join to a row that may itself have moved on.
+  //
+  // What is deliberately not here: a display name, which is a person's name and
+  // belongs to the account row rather than to a permanent log; and the ticket
+  // code, which is a credential and is never written anywhere in readable form.
+  "targetRole",
+  "targetStatus",
+  "kioskAssigned",
+  "ticketId",
+  "ticketExpiresAt",
+  "revokedSessions",
+  "usableAuthenticators"
 ]);
 
 export type AdminAuditMetadataValue = string | number | boolean | null;

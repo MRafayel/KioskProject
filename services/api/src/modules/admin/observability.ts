@@ -5,6 +5,9 @@ import {
   deriveAttention,
   encodeAdminCursor,
   incidentKey,
+  isAdminRole,
+  isAdminUserStatus,
+  minimumAuthenticators,
   type AdminAttentionCode,
   type AdminAuditResponse,
   type AdminDocumentsResponse,
@@ -12,6 +15,9 @@ import {
   type AdminKiosksResponse,
   type AdminOverviewResponse,
   type AdminPaymentsResponse,
+  type AdminPeopleResponse,
+  type AdminRole,
+  type AdminUserStatus,
   type AdminPrintJobDetailResponse,
   type AdminPrintJobsResponse,
   type AdminRecoveryCorrection,
@@ -1554,6 +1560,170 @@ export class AdminObservabilityService {
       })
     };
   }
+
+  /**
+   * The Operators, and enough about each to decide what to do about them.
+   *
+   * Read through the same read-only pool as every other screen, deliberately:
+   * the people *actions* need their own least-privilege role, but looking at a
+   * roster is a read, and routing it anywhere else would have given the
+   * connection that suspends people a reason to be able to enumerate them too.
+   *
+   * Only Operators appear. `operator.manage` and `authenticator.manage.operator`
+   * reach no other role, so listing Admins here would be showing a person a set
+   * of rows on which every control is refused — and telling them who the
+   * Technical Admins are, which is the more interesting half of that mistake.
+   *
+   * There is no pagination and no cursor. This is a roster of colleagues, not a
+   * log: an installation with enough Operators to need a page here has a
+   * different problem, and the take below is what stops that being unbounded.
+   */
+  public async people(now: Date): Promise<AdminPeopleResponse> {
+    const operators = await this.options.database.adminUser.findMany({
+      where: { role: "OPERATOR" },
+      orderBy: [{ status: "asc" }, { displayName: "asc" }],
+      take: ADMIN_PEOPLE_LIMIT,
+      select: {
+        id: true,
+        displayName: true,
+        role: true,
+        status: true,
+        createdAt: true,
+        activatedAt: true,
+        suspendedAt: true,
+        disabledAt: true,
+        lastLoginAt: true
+      }
+    });
+
+    const ids = operators.map((person) => person.id);
+    if (ids.length === 0) return { items: [], kiosks: await this.assignableKiosks() };
+
+    // Four bounded queries rather than four per person. Everything here is
+    // keyed on `admin_user_id`, which is indexed on all four tables.
+    const [authenticators, sessions, scopes, tickets, kiosks] = await Promise.all([
+      this.options.database.adminAuthenticator.findMany({
+        where: { adminUserId: { in: ids }, revokedAt: null },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          adminUserId: true,
+          label: true,
+          attachment: true,
+          backupEligible: true,
+          createdAt: true,
+          lastUsedAt: true
+        }
+      }),
+      this.options.database.adminSession.findMany({
+        where: {
+          adminUserId: { in: ids },
+          revokedAt: null,
+          idleExpiresAt: { gt: now },
+          hardExpiresAt: { gt: now }
+        },
+        select: { id: true, adminUserId: true }
+      }),
+      this.options.database.adminKioskScope.findMany({
+        where: { adminUserId: { in: ids }, revokedAt: null },
+        orderBy: { kioskId: "asc" },
+        select: { adminUserId: true, kioskId: true }
+      }),
+      this.options.database.adminEnrollmentTicket.findMany({
+        where: { adminUserId: { in: ids }, consumedAt: null, expiresAt: { gt: now } },
+        orderBy: { expiresAt: "desc" },
+        select: { adminUserId: true, expiresAt: true }
+      }),
+      this.assignableKiosks()
+    ]);
+
+    const byPerson = <TRow extends { adminUserId: string }>(rows: readonly TRow[]) => {
+      const grouped = new Map<string, TRow[]>();
+      for (const row of rows) {
+        const existing = grouped.get(row.adminUserId);
+        if (existing) existing.push(row);
+        else grouped.set(row.adminUserId, [row]);
+      }
+      return grouped;
+    };
+
+    const keysByPerson = byPerson(authenticators);
+    const sessionsByPerson = byPerson(sessions);
+    const scopesByPerson = byPerson(scopes);
+    const ticketsByPerson = byPerson(tickets);
+
+    return {
+      items: operators.map((person) => {
+        const keys = keysByPerson.get(person.id) ?? [];
+        const live = ticketsByPerson.get(person.id) ?? [];
+        return {
+          adminUserId: person.id,
+          displayName: person.displayName,
+          role: asAdminRole(person.role),
+          status: asAdminUserStatus(person.status),
+          createdAt: person.createdAt.toISOString(),
+          activatedAt: person.activatedAt?.toISOString() ?? null,
+          suspendedAt: person.suspendedAt?.toISOString() ?? null,
+          disabledAt: person.disabledAt?.toISOString() ?? null,
+          lastLoginAt: person.lastLoginAt?.toISOString() ?? null,
+          usableAuthenticators: keys.length,
+          minimumAuthenticators: minimumAuthenticators(asAdminRole(person.role)),
+          authenticators: keys.map((key) => ({
+            id: key.id,
+            label: key.label,
+            attachment: asAttachment(key.attachment),
+            backupEligible: key.backupEligible,
+            createdAt: key.createdAt.toISOString(),
+            lastUsedAt: key.lastUsedAt?.toISOString() ?? null
+          })),
+          activeSessions: (sessionsByPerson.get(person.id) ?? []).length,
+          kioskIds: (scopesByPerson.get(person.id) ?? []).map((scope) => scope.kioskId),
+          liveEnrollmentTickets: live.length,
+          enrollmentTicketExpiresAt: live[0]?.expiresAt.toISOString() ?? null
+        };
+      }),
+      kiosks
+    };
+  }
+
+  private async assignableKiosks(): Promise<AdminPeopleResponse["kiosks"]> {
+    const kiosks = await this.options.database.kiosk.findMany({
+      orderBy: { id: "asc" },
+      take: ADMIN_PEOPLE_KIOSK_LIMIT,
+      select: { id: true, name: true }
+    });
+    return kiosks.map((kiosk) => ({ id: kiosk.id, name: kiosk.name }));
+  }
+}
+
+/**
+ * Ceilings on the people roster.
+ *
+ * Not pagination — a bound. Every query in the control plane is bounded, and a
+ * roster is no exception just because it is expected to be short.
+ */
+const ADMIN_PEOPLE_LIMIT = 200;
+const ADMIN_PEOPLE_KIOSK_LIMIT = 200;
+
+/**
+ * The role and status columns are `VARCHAR`, so the database can in principle
+ * hold a value this build does not know. Narrowing here rather than casting
+ * means such a row fails the response schema loudly instead of arriving in a
+ * browser as an unhandled string.
+ */
+function asAdminRole(value: string): AdminRole {
+  if (!isAdminRole(value)) throw new Error(`ADMIN_ROLE_INVALID:${value}`);
+  return value;
+}
+
+function asAdminUserStatus(value: string): AdminUserStatus {
+  if (!isAdminUserStatus(value)) throw new Error(`ADMIN_STATUS_INVALID:${value}`);
+  return value;
+}
+
+/** `platform`, `cross-platform`, or the authenticator declining to say. */
+function asAttachment(value: string | null): "platform" | "cross-platform" | null {
+  return value === "platform" || value === "cross-platform" ? value : null;
 }
 
 // ---------------------------------------------------------------------------

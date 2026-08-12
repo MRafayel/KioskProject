@@ -21,6 +21,7 @@ import {
   digestAdminCsrfToken,
   digestAdminSessionToken,
   digestBreakGlassSecret,
+  digestEnrollmentTicketSecret,
   digestsMatch
 } from "./crypto.js";
 import {
@@ -386,11 +387,16 @@ export class AdminService {
     } & (
       | { purpose?: "REGISTRATION"; actorSessionId: string }
       | { purpose: "BREAK_GLASS_REGISTRATION"; actorSessionId?: never }
+      | { purpose: "ENROLLMENT_TICKET_REGISTRATION"; actorSessionId?: never }
     )
   ): Promise<{ authenticatorId: string; activated: boolean }> {
     const now = this.options.clock.now();
     const purpose = input.purpose ?? "REGISTRATION";
     const isBreakGlass = purpose === "BREAK_GLASS_REGISTRATION";
+    const isEnrollmentTicket = purpose === "ENROLLMENT_TICKET_REGISTRATION";
+    // The two ceremonies that begin without a key also begin without a session,
+    // so there is none to lock and none to revalidate against.
+    const hasActorSession = !isBreakGlass && !isEnrollmentTicket;
     const challenge = await this.consumeChallenge(
       input.ceremonyId,
       purpose,
@@ -405,10 +411,28 @@ export class AdminService {
     const role = asRole(user.role);
     const status = asStatus(user.status);
 
-    if (
-      (isBreakGlass && !isRecoveryEligibleStatus(status)) ||
-      (!isBreakGlass && status !== "ACTIVE")
-    ) {
+    // Three ceremonies, three eligible states, and the difference between the
+    // last two is the whole distinction between recovery and onboarding.
+    // Break-glass may enrol onto a PROVISIONING or ACTIVE account, because it
+    // exists for somebody who has lost the keys they had. A ticket may only
+    // enrol onto an account that never had one.
+    const eligible = isBreakGlass
+      ? isRecoveryEligibleStatus(status)
+      : isEnrollmentTicket
+        ? status === "PROVISIONING"
+        : status === "ACTIVE";
+
+    // What the caller is told when the account is not in a state this ceremony
+    // may enrol onto. Three messages, none of which distinguishes "no such
+    // account" from "wrong state" — that difference is an enumeration oracle.
+    const ceremonyFailed = (): ApiError =>
+      isBreakGlass
+        ? recoveryFailed()
+        : isEnrollmentTicket
+          ? enrollmentFailed()
+          : mutationAuthorizationFailed();
+
+    if (!eligible) {
       await this.auditFailure(
         input.actorAdminUserId,
         "admin.authenticator.enrol",
@@ -416,7 +440,7 @@ export class AdminService {
         now,
         { role, targetAdminUserId: input.targetAdminUserId, failureCode: "ACCOUNT_" + status }
       );
-      throw isBreakGlass ? recoveryFailed() : mutationAuthorizationFailed();
+      throw ceremonyFailed();
     }
 
     const verified = await verifyRegistration({
@@ -481,7 +505,11 @@ export class AdminService {
           where: {
             id: input.targetAdminUserId,
             role,
-            status: isBreakGlass ? { in: ["PROVISIONING", "ACTIVE"] } : "ACTIVE"
+            status: isBreakGlass
+              ? { in: ["PROVISIONING", "ACTIVE"] }
+              : isEnrollmentTicket
+                ? "PROVISIONING"
+                : "ACTIVE"
           },
           data: { updatedAt: now }
         });
@@ -489,9 +517,10 @@ export class AdminService {
 
         // Ordinary enrolment is self-management in Phase 1. Locking the live
         // session in the same transaction means a logout/suspension that wins
-        // this race prevents the key change. Recovery deliberately has no
-        // session and is restricted by the account-status predicate above.
-        if (!isBreakGlass) {
+        // this race prevents the key change. Recovery and ticket redemption
+        // deliberately have no session and are restricted by the account-status
+        // predicate above.
+        if (hasActorSession) {
           const actorSessionId = input.actorSessionId;
           if (!actorSessionId) throw new AdminCredentialStateChangedError();
           const session = await transaction.adminSession.updateMany({
@@ -573,7 +602,7 @@ export class AdminService {
           failureCode: "ACCOUNT_OR_SESSION_STATE_CHANGED"
         }
       );
-      throw isBreakGlass ? recoveryFailed() : mutationAuthorizationFailed();
+      throw ceremonyFailed();
     }
 
     return { authenticatorId, activated };
@@ -851,6 +880,174 @@ export class AdminService {
   }
 
   // -------------------------------------------------------------------------
+  // Enrollment tickets
+  // -------------------------------------------------------------------------
+
+  /**
+   * Redeem an enrollment ticket to authorise one first-key ceremony.
+   *
+   * The second path in this file that does not begin with an authenticator, and
+   * it is narrower than the first. Break-glass exists for somebody who has lost
+   * the keys they had, so it may enrol onto a PROVISIONING or an ACTIVE account.
+   * This exists for somebody who never had one, so the account must still be
+   * PROVISIONING and must still hold zero usable keys — checked here, checked
+   * again by the predicate on the owner-row lock in `completeRegistration`, and
+   * checked a third time at issuance by a database trigger.
+   *
+   * It issues no session, carries no capability, and cannot perform an
+   * operational action. Redeeming it restores the ability to sign in; it is not
+   * itself a sign-in.
+   *
+   * **The ticket is consumed at the point it authorises a ceremony, not at the
+   * point the ceremony succeeds** — the same choice break-glass makes, for the
+   * same reason: a failed attempt must still burn the code, or it is retryable
+   * by anyone who saw it. The cost is different here, and much lower: a burnt
+   * ticket is replaced by an Admin in seconds, where a burnt break-glass code is
+   * a sealed envelope somebody has to physically fetch.
+   */
+  public async beginEnrollmentTicketRegistration(input: {
+    enrollmentCode: string;
+    requestId: string;
+  }): Promise<{ ceremonyId: string; options: unknown; adminUserId: string }> {
+    const now = this.options.clock.now();
+    const ticket = await this.options.database.adminEnrollmentTicket.findUnique({
+      where: {
+        secretDigest: digestEnrollmentTicketSecret(
+          input.enrollmentCode,
+          this.options.breakGlassPepper
+        )
+      },
+      include: {
+        adminUser: {
+          include: {
+            authenticators: { where: { revokedAt: null }, select: { credentialId: true } }
+          }
+        }
+      }
+    });
+
+    if (!ticket || ticket.consumedAt || now.getTime() >= ticket.expiresAt.getTime()) {
+      await this.auditAnonymousFailure(
+        "admin.enrollment.redeem",
+        input.requestId,
+        now,
+        "ENROLLMENT_TICKET_INVALID"
+      );
+      throw enrollmentFailed();
+    }
+
+    const user = ticket.adminUser;
+    const role = asRole(user.role);
+    // A ticket that outlived its purpose — the account enrolled some other way,
+    // or was suspended in the meantime — buys nothing.
+    if (
+      role !== "OPERATOR" ||
+      asStatus(user.status) !== "PROVISIONING" ||
+      user.authenticators.length > 0
+    ) {
+      await this.auditAnonymousFailure(
+        "admin.enrollment.redeem",
+        input.requestId,
+        now,
+        "ENROLLMENT_ACCOUNT_UNAVAILABLE"
+      );
+      throw enrollmentFailed();
+    }
+
+    const options = await createRegistrationOptions({
+      relyingParty: this.options.relyingParty,
+      userHandle: new Uint8Array(user.userHandle),
+      displayName: user.displayName,
+      existingCredentialIds: user.authenticators.map((entry) => entry.credentialId),
+      requireCrossPlatform: false
+    });
+
+    const ceremonyId = this.options.random.uuid(now);
+    const claimed = await this.options.database.$transaction(async (transaction) => {
+      // Lock the owner first, matching every other identity mutation, so a
+      // concurrent suspension and this one-use claim have a clear winner.
+      const eligibleUser = await transaction.adminUser.updateMany({
+        where: { id: user.id, role: "OPERATOR", status: "PROVISIONING" },
+        data: { updatedAt: now }
+      });
+      if (eligibleUser.count !== 1) return false;
+
+      // The read above is intentionally not the claim. Only this conditional
+      // write consumes the ticket, so two requests presenting the same code
+      // cannot both open a valid ceremony.
+      const consumed = await transaction.adminEnrollmentTicket.updateMany({
+        where: { id: ticket.id, consumedAt: null, expiresAt: { gt: now } },
+        data: { consumedAt: now }
+      });
+      if (consumed.count !== 1) return false;
+
+      await transaction.adminWebAuthnChallenge.create({
+        data: {
+          id: ceremonyId,
+          purpose: "ENROLLMENT_TICKET_REGISTRATION",
+          challenge: options.challenge,
+          adminUserId: user.id,
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + this.options.challengeTtlMilliseconds)
+        }
+      });
+
+      // Redemption is audited as its own event, separate from the enrolment it
+      // leads to. The two are not the same fact: a code was spent here, and a
+      // key may or may not exist by the end of it.
+      await writeAdminAuditEvent(transaction, {
+        id: this.options.random.uuid(now),
+        occurredAt: now,
+        actorId: user.id,
+        action: "admin.enrollment.redeem",
+        outcome: "SUCCESS",
+        requestId: input.requestId,
+        metadata: {
+          role,
+          targetAdminUserId: user.id,
+          ticketId: ticket.id,
+          ceremonyPurpose: "ENROLLMENT_TICKET_REGISTRATION"
+        }
+      });
+      return true;
+    });
+
+    if (!claimed) {
+      await this.auditAnonymousFailure(
+        "admin.enrollment.redeem",
+        input.requestId,
+        now,
+        "ENROLLMENT_TICKET_INVALID"
+      );
+      throw enrollmentFailed();
+    }
+
+    return { ceremonyId, options, adminUserId: user.id };
+  }
+
+  /**
+   * The account an enrollment ceremony was opened for.
+   *
+   * The ticket named it; the browser only carries the ceremony identifier, so
+   * the target is read back from the server rather than trusted from the
+   * request. Same shape as its break-glass sibling, and separate from it so
+   * neither ceremony can be finished through the other's route.
+   */
+  public async resolveEnrollmentCeremonyTarget(ceremonyId: string): Promise<string | null> {
+    const now = this.options.clock.now();
+    const ceremony = await this.options.database.adminWebAuthnChallenge.findFirst({
+      where: {
+        id: ceremonyId,
+        purpose: "ENROLLMENT_TICKET_REGISTRATION",
+        consumedAt: null,
+        expiresAt: { gt: now }
+      },
+      select: { adminUserId: true }
+    });
+    return ceremony?.adminUserId ?? null;
+  }
+
+  // -------------------------------------------------------------------------
   // Sessions
   // -------------------------------------------------------------------------
 
@@ -866,7 +1063,11 @@ export class AdminService {
     const now = this.options.clock.now();
     const session = await this.options.database.adminSession.findUnique({
       where: { tokenDigest: digestAdminSessionToken(sessionToken, this.options.sessionPepper) },
-      include: { adminUser: { include: { kioskScopes: { select: { kioskId: true } } } } }
+      include: {
+        adminUser: {
+          include: { kioskScopes: { where: { revokedAt: null }, select: { kioskId: true } } }
+        }
+      }
     });
     if (!session) return null;
 
@@ -1099,7 +1300,9 @@ export class AdminService {
         // this transaction. If scope loading fails, no unreachable live session
         // is committed after the one-time ceremony has been consumed.
         return transaction.adminKioskScope.findMany({
-          where: { adminUserId: input.adminUserId },
+          // Withdrawn assignments stay as rows so the history survives; they
+          // are not assignments any more, so they are not loaded here.
+          where: { adminUserId: input.adminUserId, revokedAt: null },
           select: { kioskId: true }
         });
       });
@@ -1241,6 +1444,21 @@ function authenticationFailed(): ApiError {
 
 function stepUpFailed(): ApiError {
   return new ApiError(401, "ADMIN_STEP_UP_FAILED", "Confirmation failed.");
+}
+
+/**
+ * Every way an enrollment ticket can fail says the same thing.
+ *
+ * Wrong code, expired code, spent code, account already enrolled, account
+ * suspended — one message, because the differences between them are exactly
+ * what somebody holding a stolen code would like to learn.
+ */
+function enrollmentFailed(): ApiError {
+  return new ApiError(
+    401,
+    "ADMIN_ENROLLMENT_FAILED",
+    "This enrollment code is not valid. Ask for a new one."
+  );
 }
 
 function recoveryFailed(): ApiError {

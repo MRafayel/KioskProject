@@ -83,9 +83,17 @@ describe("capability denial", () => {
     expect(await attempt("OPERATOR", "audit.read.self")).toBeNull();
   });
 
-  it("refuses a Technical Admin the ability to manage people", async () => {
+  it("refuses a Technical Admin the ability to decide whether somebody may work", async () => {
+    // The half of people management it does not hold. It can get an Operator
+    // onto a key and retire one; it cannot suspend an account or move a kiosk
+    // assignment, so a compromised Technical Admin cannot lock a shift out.
     expect((await attempt("TECHNICAL_ADMIN", "operator.manage"))?.code).toBe("ADMIN_FORBIDDEN");
-    expect((await attempt("TECHNICAL_ADMIN", "authenticator.manage.operator"))?.code).toBe(
+    expect(await attempt("TECHNICAL_ADMIN", "authenticator.manage.operator")).toBeNull();
+  });
+
+  it("refuses an Operator every capability over anybody but themselves", async () => {
+    expect((await attempt("OPERATOR", "operator.manage"))?.code).toBe("ADMIN_FORBIDDEN");
+    expect((await attempt("OPERATOR", "authenticator.manage.operator"))?.code).toBe(
       "ADMIN_FORBIDDEN"
     );
   });

@@ -196,8 +196,153 @@ export function SignInScreen() {
           ) : null}
         </section>
       ) : null}
+
+      <EnrollmentPanel busy={authenticationBusy} />
     </main>
   );
+}
+
+/**
+ * The first key, for somebody who has never had one.
+ *
+ * Deliberately below recovery and worded to keep the two apart, because
+ * confusing them is expensive in one direction: somebody who has lost their keys
+ * and tries this instead gets a refusal, while somebody being onboarded who
+ * reaches for a sealed envelope has burnt a recovery code for nothing.
+ *
+ * Redeeming enrols one key and signs nobody in. The account still needs its
+ * second key before it can be used, and this panel says so rather than leaving
+ * a new colleague wondering why nothing happened.
+ */
+function EnrollmentPanel({ busy }: { busy: boolean }) {
+  const session = useSession();
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [label, setLabel] = useState("");
+  const [enrolling, setEnrolling] = useState(false);
+  const [message, setMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const inFlight = useRef(false);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (inFlight.current) return;
+
+    const enrollmentCode = code.trim();
+    const keyName = label.trim();
+    if (enrollmentCode.length < 32) {
+      setMessage({ kind: "error", text: "Enter the complete enrolment code." });
+      return;
+    }
+    if (!keyName) {
+      setMessage({ kind: "error", text: "Give the key a name so it can be identified later." });
+      return;
+    }
+
+    inFlight.current = true;
+    setEnrolling(true);
+    setMessage(null);
+    // The code is spent the moment the ceremony opens. Nothing keeps it in
+    // component state past submission.
+    setCode("");
+    try {
+      await session.redeemEnrollmentTicket(enrollmentCode, keyName);
+      setLabel("");
+      setMessage({
+        kind: "success",
+        text: "Security key enrolled. This does not sign you in — your account needs a second key before it can be used. Ask for another code and enrol a different key."
+      });
+    } catch (error) {
+      setMessage({ kind: "error", text: describeEnrollmentFailure(error) });
+    } finally {
+      inFlight.current = false;
+      setEnrolling(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        className="button-link"
+        aria-expanded={open}
+        aria-controls="enrollment-panel"
+        disabled={busy || enrolling}
+        onClick={() => {
+          if (enrolling) return;
+          setOpen((current) => !current);
+          setCode("");
+          setLabel("");
+          setMessage(null);
+        }}
+      >
+        {open ? "Close enrolment" : "I have an enrolment code"}
+      </button>
+
+      {open ? (
+        <section id="enrollment-panel" className="recovery" aria-labelledby="enrollment-title">
+          <h2 id="enrollment-title">Enrol your first security key</h2>
+          <p id="enrollment-warning" className="recovery__warning">
+            The code an Admin read to you works once, for fifteen minutes, and is spent as soon as
+            the security-key prompt opens. If you lost keys you already had, this is not the right
+            path — that is recovery, above.
+          </p>
+
+          <form
+            className="recovery__form"
+            autoComplete="off"
+            onSubmit={(event) => void submit(event)}
+          >
+            <label htmlFor="enrollment-code">Enrolment code</label>
+            <input
+              id="enrollment-code"
+              type="password"
+              value={code}
+              minLength={32}
+              maxLength={200}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              disabled={enrolling}
+              aria-describedby="enrollment-warning"
+              onChange={(event) => setCode(event.target.value)}
+            />
+
+            <label htmlFor="enrollment-key-label">Name this key</label>
+            <input
+              id="enrollment-key-label"
+              value={label}
+              maxLength={80}
+              placeholder="Work laptop"
+              disabled={enrolling}
+              onChange={(event) => setLabel(event.target.value)}
+            />
+
+            <button type="submit" className="recovery__submit" disabled={enrolling}>
+              {enrolling ? "Enrolment in progress…" : "Enrol this key"}
+            </button>
+          </form>
+
+          {message ? (
+            <p
+              role={message.kind === "error" ? "alert" : "status"}
+              className={message.kind === "error" ? "signin__error" : "panel__status"}
+            >
+              {message.text}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+    </>
+  );
+}
+
+function describeEnrollmentFailure(error: unknown): string {
+  const instruction = "Ask for a new code — this one is spent.";
+  if (error && typeof error === "object" && "name" in error && error.name === "NotAllowedError") {
+    return `The security key prompt was dismissed. ${instruction}`;
+  }
+  if (error instanceof AdminApiError) return `${error.message} ${instruction}`;
+  return `Enrolment could not be confirmed. ${instruction}`;
 }
 
 function describeRecoveryFailure(error: unknown): string {

@@ -276,6 +276,129 @@ export async function assertAdminRefundClientIsAppendOnly(client: PrismaClient):
   }
 }
 
+/**
+ * The pool that administers people.
+ *
+ * The fourth of these, and the first that can change a row rather than add one.
+ * Same reasoning as its siblings, applied to a different question: suspending a
+ * colleague, retiring their key or ending their session are not things the
+ * observation connection should be able to do, and they are certainly not things
+ * the money connection should be able to do.
+ *
+ * In production this points at `printing_kiosk_admin_people_writer`, which holds
+ * UPDATE on nine named *columns* and no table-level UPDATE anywhere. The column
+ * that matters most is the one it does not hold: `admin_users.role`. Nothing
+ * reachable from a browser promotes anybody.
+ */
+export function createAdminPeopleClient(connectionString: string): PrismaClient {
+  const adapter = new PrismaPg({
+    connectionString,
+    options: ADMIN_WRITE_CONNECTION_OPTIONS,
+    // Administering people is rare and deliberate, like authorizing a refund.
+    max: 2
+  });
+  return new PrismaClient({ adapter });
+}
+
+/**
+ * The privileges the people pool must not hold, checked at boot.
+ *
+ * Read the list as the four claims the role's matrix makes, each expressed as an
+ * absence PostgreSQL can be asked about directly. It cannot promote anybody, it
+ * cannot enrol a credential, it cannot destroy the history of who could do what,
+ * and it cannot reach the printing system or the money in it.
+ *
+ * `admin_users.role` is checked at column granularity because the table-level
+ * answer would be yes — this role does hold UPDATE on `admin_users`, on four
+ * columns that do not include this one.
+ */
+const FORBIDDEN_ADMIN_PEOPLE_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.admin_users", "DELETE"],
+  ["public.admin_users", "INSERT"],
+  ["public.admin_authenticators", "INSERT"],
+  ["public.admin_authenticators", "DELETE"],
+  ["public.admin_sessions", "INSERT"],
+  ["public.admin_sessions", "DELETE"],
+  ["public.admin_kiosk_scopes", "DELETE"],
+  ["public.admin_enrollment_tickets", "UPDATE"],
+  ["public.admin_enrollment_tickets", "DELETE"],
+  ["public.admin_break_glass_credentials", "SELECT"],
+  ["public.admin_break_glass_credentials", "INSERT"],
+  ["public.admin_webauthn_challenges", "INSERT"],
+  ["public.audit_events", "UPDATE"],
+  ["public.audit_events", "DELETE"],
+  ["public.refunds", "INSERT"],
+  ["public.payments", "SELECT"],
+  ["public.print_jobs", "SELECT"],
+  ["public.print_job_recovery_resolutions", "INSERT"]
+];
+
+/** Columns this role must never be able to change, whatever its table grants say. */
+const FORBIDDEN_ADMIN_PEOPLE_COLUMNS: readonly (readonly [string, string])[] = [
+  // The single most valuable column in the database. A connection that could
+  // write it could turn a compromised Admin into a Technical Admin.
+  ["public.admin_users", "role"],
+  ["public.admin_users", "user_handle"],
+  ["public.admin_users", "activated_at"],
+  // Enrolment evidence. A people connection that could rewrite these could turn
+  // a synchronised passkey into a device-bound one after the fact.
+  ["public.admin_authenticators", "credential_id"],
+  ["public.admin_authenticators", "public_key"],
+  ["public.admin_authenticators", "backup_eligible"],
+  // Extending somebody's session is not administering them.
+  ["public.admin_sessions", "idle_expires_at"],
+  ["public.admin_sessions", "hard_expires_at"]
+];
+
+/** The grants without which no people action can run. */
+const REQUIRED_ADMIN_PEOPLE_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.admin_kiosk_scopes", "INSERT"],
+  ["public.admin_enrollment_tickets", "INSERT"],
+  ["public.audit_events", "INSERT"]
+];
+
+/**
+ * Prove the people pool is as small as it claims before serving anything.
+ *
+ * Same argument as the refund pool's: `pnpm db:admin-people-writer verify`
+ * checks a database somebody ran it against, and this checks the connection this
+ * process actually opened. A deployment pointed at the application role by
+ * mistake passes every offline check and fails here.
+ */
+export async function assertAdminPeopleClientIsBounded(client: PrismaClient): Promise<void> {
+  const heldOnTable = async (table: string, privilege: string): Promise<boolean> => {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_table_privilege(${table}, ${privilege}) AS held`;
+    return rows[0]?.held === true;
+  };
+  const heldOnColumn = async (table: string, column: string): Promise<boolean> => {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_column_privilege(${table}, ${column}, 'UPDATE') AS held`;
+    return rows[0]?.held === true;
+  };
+
+  const violations: string[] = [];
+  for (const [table, privilege] of FORBIDDEN_ADMIN_PEOPLE_PRIVILEGES) {
+    if (await heldOnTable(table, privilege)) violations.push(`holds ${privilege} on ${table}`);
+  }
+  for (const [table, column] of FORBIDDEN_ADMIN_PEOPLE_COLUMNS) {
+    if (await heldOnColumn(table, column)) violations.push(`can UPDATE ${table}.${column}`);
+  }
+  for (const [table, privilege] of REQUIRED_ADMIN_PEOPLE_PRIVILEGES) {
+    if (!(await heldOnTable(table, privilege))) violations.push(`lacks ${privilege} on ${table}`);
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      "The admin people connection does not match the control plane's privilege policy. " +
+        `Refusing to start: ${violations.join("; ")}. ` +
+        "Check ADMIN_PEOPLE_DATABASE_URL and rerun `pnpm db:admin-people-writer verify`."
+    );
+  }
+}
+
 export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };
 export { invalidateSessionPricing } from "./session-pricing.js";

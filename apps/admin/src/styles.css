@@ -1083,10 +1083,276 @@ code {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   The money queue, the correction chain, and the small forms beside them
+
+   Phase 4A shipped this markup without styling, so it rendered as a stack of
+   unstyled paragraphs. Written here in the same voice as the rest of the sheet:
+   soft cards, the accent reserved for the thing somebody has to act on, and no
+   tint at all on a fact that is merely true.
+   --------------------------------------------------------------------------- */
+
+.refund-queue {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.refund-queue__item {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 1rem 1.5rem;
+  background: var(--card-soft);
+  border-radius: var(--radius-card);
+  padding: 1.1rem 1.25rem;
+}
+
+/* The form opens underneath both columns rather than inside one of them. */
+.refund-queue__item > .resolve {
+  grid-column: 1 / -1;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 1rem 1.15rem;
+}
+
+.refund-queue__account {
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.refund-queue__money {
+  display: grid;
+  gap: 0.4rem;
+  align-content: start;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  padding-left: 1.25rem;
+}
+
+.refund-queue__money p {
+  margin: 0;
+}
+
+.refund-queue__money button {
+  justify-self: start;
+  margin-top: 0.3rem;
+}
+
+/* A correction is a new fact, so it reads as one: indented under the account it
+   supersedes, with the accent marking that somebody changed the record. */
+.resolution__correction {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.9rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+/* The superseded original stays readable and stops competing for attention. */
+.resolution__superseded {
+  opacity: 0.72;
+}
+
+.resolution__superseded .resolution__reason {
+  border-left-color: var(--line);
+}
+
+.inline-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.inline-form input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--ink);
+  min-width: 16rem;
+  flex: 1 1 16rem;
+}
+
+/* A secondary action: present, reachable, and not competing with the one the
+   screen is actually about. */
+.button-quiet {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink-soft);
+}
+
+.button-quiet:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+
+/* ---------------------------------------------------------------------------
+   People
+   --------------------------------------------------------------------------- */
+
+.people {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.people__item {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) auto;
+  gap: 0.75rem 1.5rem;
+  background: var(--card-soft);
+  border-radius: var(--radius-card);
+  padding: 1.1rem 1.25rem;
+  align-items: start;
+}
+
+.people__item > .resolve,
+.people__item > .people__keys {
+  grid-column: 1 / -1;
+}
+
+.people__item > .resolve {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 1rem 1.15rem;
+}
+
+.people__identity,
+.people__facts {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.people__identity p,
+.people__facts p {
+  margin: 0;
+}
+
+.people__name {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+/* A status is a standing fact, so it is drawn as one — no accent. The single
+   exception is an account that cannot work yet, which is somebody's job to
+   finish. */
+.people__status {
+  border-radius: var(--radius-pill);
+  padding: 0.1rem 0.6rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  background: var(--card);
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+}
+
+.people__status--provisioning {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+}
+
+.people__status--disabled {
+  text-decoration: line-through;
+}
+
+/* An outstanding ticket is the one thing on this screen a second pair of eyes
+   is meant to notice. */
+.people__ticket-warning {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-radius: var(--radius-control);
+  padding: 0.5rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+.people__controls {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.people__keys,
+.people__kiosks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.people__key,
+.people__kiosk {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  border-radius: var(--radius-control);
+  background: var(--card);
+  padding: 0.6rem 0.85rem;
+}
+
+.people__key .inline-form {
+  flex: 1 1 100%;
+}
+
+/* The code, shown once. Large, selectable, unmistakably the thing to read out. */
+.enrollment-ticket__code {
+  margin: 0;
+  background: var(--dark);
+  color: var(--dark-ink);
+  border-radius: var(--radius-control);
+  padding: 0.9rem 1rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.enrollment-ticket__code code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 60rem) {
+  .refund-queue__item,
+  .people__item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .refund-queue__money {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+    padding-top: 0.75rem;
+  }
+
+  .people__controls {
+    justify-content: flex-start;
+  }
+}
+
 @media (max-width: 36rem) {
   .shell__header,
   .shell__alert,
   .key-list__item,
+  .people__key,
+  .people__kiosk,
   .acknowledge {
     align-items: stretch;
     flex-direction: column;

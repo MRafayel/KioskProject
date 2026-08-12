@@ -155,6 +155,8 @@ export const FORBIDDEN_TABLES = Object.freeze({
     "Kiosk scoping is contextual authorization for Operators, and no Operator can authorize a refund.",
   admin_webauthn_challenges: "In-flight ceremony state.",
   admin_break_glass_credentials: "Recovery credential digests.",
+  admin_enrollment_tickets:
+    "Authorising somebody's first enrolment is authenticator.manage.operator, on the people role. The connection that can pay a customer must not be able to mint the identity that asks it to.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

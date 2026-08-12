@@ -364,6 +364,42 @@ describe("admin Phase 2 operational sections", () => {
     expect(screen.queryByRole("button", { name: "Printing" })).not.toBeInTheDocument();
   });
 
+  it("draws the people section from the looser capability and its controls from the stricter", async () => {
+    // The Phase 4B authorization split, as the screen expresses it. A Technical
+    // Admin holds `authenticator.manage.operator` and not `operator.manage`, so
+    // it can reach the section, can issue an enrolment code, and is not offered
+    // a suspension. The server refuses all three regardless — the integration
+    // suite covers that; this covers the door not opening onto a refusal.
+    vi.spyOn(observabilityApi, "people").mockResolvedValue(people());
+    vi.mocked(adminApi.me).mockResolvedValue({
+      ...identity(),
+      role: "TECHNICAL_ADMIN",
+      capabilities: ["dashboard.read", "authenticator.manage.self", "authenticator.manage.operator"]
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "People" }));
+
+    expect(await screen.findByText("Sam Operator")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Issue an enrolment code" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Change status" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Kiosks" })).not.toBeInTheDocument();
+  });
+
+  it("hides the people section entirely from an Operator", async () => {
+    vi.mocked(adminApi.me).mockResolvedValue({
+      ...identity(),
+      role: "OPERATOR",
+      capabilities: ["dashboard.read", "audit.read.self", "authenticator.manage.self"]
+    });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
+    expect(screen.queryByRole("button", { name: "People" })).not.toBeInTheDocument();
+  });
+
   it("keeps a failed panel recoverable without losing the session", async () => {
     vi.mocked(observabilityApi.overview).mockRejectedValueOnce(new TypeError("offline"));
     vi.mocked(observabilityApi.overview).mockResolvedValue(overview());
@@ -408,6 +444,32 @@ function overview() {
 
 function identityFor(displayName: string, adminUserId: string): AdminIdentityResponse {
   return { ...identity(), displayName, adminUserId };
+}
+
+function people() {
+  return {
+    items: [
+      {
+        adminUserId: "01900000-0000-7000-8000-0000000002a1",
+        displayName: "Sam Operator",
+        role: "OPERATOR" as const,
+        status: "PROVISIONING" as const,
+        createdAt: new Date().toISOString(),
+        activatedAt: null,
+        suspendedAt: null,
+        disabledAt: null,
+        lastLoginAt: null,
+        usableAuthenticators: 0,
+        minimumAuthenticators: 2,
+        authenticators: [],
+        activeSessions: 0,
+        kioskIds: [],
+        liveEnrollmentTickets: 0,
+        enrollmentTicketExpiresAt: null
+      }
+    ],
+    kiosks: [{ id: "kiosk-central-01", name: "Central" }]
+  };
 }
 
 function authenticatorListing(): AdminAuthenticatorsResponse {

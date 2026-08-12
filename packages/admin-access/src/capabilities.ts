@@ -18,9 +18,10 @@
 /**
  * The three operational layers.
  *
- * Deliberately not a hierarchy. An Admin cannot propose technical changes and a
- * Technical Admin cannot manage people, so neither role contains the other.
- * That asymmetry is what keeps one compromised account from being enough.
+ * Deliberately not a hierarchy. An Admin cannot propose technical changes, and a
+ * Technical Admin cannot suspend an account or decide which kiosks an Operator
+ * works on, so neither role contains the other. That asymmetry is what keeps one
+ * compromised account from being enough.
  */
 export const ADMIN_ROLES = ["OPERATOR", "ADMIN", "TECHNICAL_ADMIN"] as const;
 
@@ -102,11 +103,24 @@ export const ADMIN_CAPABILITIES = [
   "change.approve.technical",
   "change.approve.admin",
 
-  /** Administering Operator accounts. Never Technical Admin accounts. */
+  /**
+   * Administering Operator accounts: status and kiosk assignment.
+   *
+   * Never Technical Admin accounts, and never an account's role — an account
+   * holds the role it was created with, so no capability here can promote
+   * anybody, including its holder.
+   */
   "operator.manage",
   /** Enrolling and revoking one's own authenticators. */
   "authenticator.manage.self",
-  /** Enrolling and revoking an Operator's authenticators. */
+  /**
+   * An Operator's authenticators: issuing the ticket that lets them enrol their
+   * first one, and retiring one afterwards.
+   *
+   * It cannot enrol a key on somebody else's behalf, because WebAuthn will not
+   * let it: enrolment needs the person and their device. What it can do is
+   * authorise one enrolment ceremony on one named account.
+   */
   "authenticator.manage.operator"
 ] as const;
 
@@ -182,8 +196,22 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
 
   /**
    * Deep technical visibility and the proposing side of serious change.
-   * Deliberately holds no capability over people: it cannot manage Operators
-   * and cannot enrol anyone else's authenticator.
+   *
+   * It holds exactly one capability over people, and the boundary around it is
+   * the point. `authenticator.manage.operator` lets it get an Operator onto
+   * their first security key, and retire one, at whatever hour the system
+   * breaks — an onboarding that had to wait for an Admin would be an outage
+   * with a person in the middle of it. It does **not** hold `operator.manage`,
+   * so it cannot suspend an account, resume one, or change which kiosks an
+   * Operator may act on; and there is no capability anywhere that changes an
+   * account's role, so this cannot become a promotion.
+   *
+   * The residual risk is stated rather than hidden: a compromised Technical
+   * Admin can put a key it controls on a provisioning Operator account and act
+   * as that person. It gains no capability by doing so — every Operator
+   * capability is already in this list — but it does gain a second name to act
+   * under, so both halves of that ceremony are audited and the panel shows the
+   * account's live tickets to anyone who can see the section.
    */
   TECHNICAL_ADMIN: [
     "dashboard.read",
@@ -212,7 +240,8 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "pricing.publish.request",
     "change.propose",
     "change.approve.technical",
-    "authenticator.manage.self"
+    "authenticator.manage.self",
+    "authenticator.manage.operator"
   ]
 };
 

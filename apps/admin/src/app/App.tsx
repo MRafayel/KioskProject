@@ -13,6 +13,7 @@ import { ErrorsPanel } from "../routes/ErrorsPanel.js";
 import { KiosksPanel } from "../routes/KiosksPanel.js";
 import { MoneyPanel } from "../routes/MoneyPanel.js";
 import { OverviewScreen } from "../routes/OverviewScreen.js";
+import { PeoplePanel } from "../routes/PeoplePanel.js";
 import { PrintingPanel } from "../routes/PrintingPanel.js";
 import { RetentionPanel } from "../routes/RetentionPanel.js";
 import { SecurityKeysPanel } from "../routes/SecurityKeysPanel.js";
@@ -61,6 +62,7 @@ const SECTIONS: readonly Section[] = [
   },
   { id: "errors", label: "Errors", render: () => <ErrorsPanel /> },
   { id: "audit", label: "Audit", render: () => <AuditPanel /> },
+  { id: "people", label: "People", render: () => <PeoplePanel /> },
   { id: "security-keys", label: "Security keys", render: () => <SecurityKeysPanel /> }
 ];
 

@@ -835,6 +835,8 @@ model AdminUser {
   kioskScopes    AdminKioskScope[]
   challenges     AdminWebAuthnChallenge[]
   breakGlass     AdminBreakGlassCredential[]
+  enrollmentTickets AdminEnrollmentTicket[] @relation("AdminEnrollmentTicketTarget")
+  issuedEnrollmentTickets AdminEnrollmentTicket[] @relation("AdminEnrollmentTicketIssuer")
   recoveryResolutions PrintJobRecoveryResolution[]
   recoveryCorrections PrintJobRecoveryCorrection[]
   refundAuthorizations RefundAuthorization[]
@@ -962,16 +964,59 @@ model AdminBreakGlassCredential {
 /// `print.recovery.resolve` everywhere or nowhere, but the query that finds the
 /// job is bounded by these rows. An account with no scope rows can act on no
 /// kiosk, which is the safe default for a newly created Operator.
+///
+/// Taking a kiosk away sets `revokedAt` rather than removing the row, so who
+/// could act where at a given moment stays answerable. Re-assigning the same
+/// kiosk clears it again on the row that is already there — the primary key
+/// keeps one row per pair, so there is never a second row disagreeing about
+/// whether the assignment is live.
 model AdminKioskScope {
   adminUserId String    @map("admin_user_id") @db.Uuid
   kioskId     String    @map("kiosk_id") @db.VarChar(64)
   createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
   adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
   kiosk       Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)
 
   @@id([adminUserId, kioskId])
   @@index([kioskId])
+  @@index([adminUserId, revokedAt])
   @@map("admin_kiosk_scopes")
+}
+
+/// Authorisation for exactly one enrolment ceremony on one account.
+///
+/// An Operator with no security key cannot sign in, and no Admin can enrol one
+/// for them: WebAuthn needs the person and their device in the same place. This
+/// is the sentence that gets them started — "the next enrolment on this account,
+/// within the next fifteen minutes, is authorised" — and it is nothing more than
+/// that. It issues no session, carries no capability, and cannot perform an
+/// operational action.
+///
+/// It is not a second break-glass. Break-glass is a sealed offline artifact for
+/// an account that has lost every key it had. A ticket may only name an Operator
+/// account still PROVISIONING with no usable authenticator, which a database
+/// trigger checks, so it cannot add a key to somebody's working identity.
+///
+/// Only the digest is stored, so reading this table yields nothing redeemable.
+model AdminEnrollmentTicket {
+  id              String    @id @db.Uuid
+  adminUserId     String    @map("admin_user_id") @db.Uuid
+  /// Who authorised it. Never the same account as the target.
+  issuedByAdminId String    @map("issued_by_admin_id") @db.Uuid
+  secretDigest    String    @unique @map("secret_digest") @db.VarChar(64)
+  reason          String    @db.VarChar(280)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  expiresAt       DateTime  @map("expires_at")
+  /// Set when the ticket authorises a ceremony, not when the ceremony succeeds.
+  consumedAt      DateTime? @map("consumed_at")
+
+  adminUser AdminUser @relation("AdminEnrollmentTicketTarget", fields: [adminUserId], references: [id], onDelete: Restrict)
+  issuedBy  AdminUser @relation("AdminEnrollmentTicketIssuer", fields: [issuedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([adminUserId, consumedAt])
+  @@index([expiresAt])
+  @@map("admin_enrollment_tickets")
 }
 
 model OutboxEvent {

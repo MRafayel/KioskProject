@@ -41,6 +41,8 @@ interface SessionContextValue extends SessionState {
   /** Returns false when the required security-key prompt did not complete. */
   enrolAuthenticator: (label: string) => Promise<boolean>;
   recoverAuthenticator: (recoveryCode: string, label: string) => Promise<void>;
+  /** Enrol a first key against a ticket an Admin issued. Signs nobody in. */
+  redeemEnrollmentTicket: (enrollmentCode: string, label: string) => Promise<void>;
   /** Move back to sign-in when any child request discovers the session is gone. */
   handleAuthenticationError: (error: unknown) => boolean;
   clearError: () => void;
@@ -338,6 +340,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await adminApi.completeBreakGlassEnrolment(ceremony.ceremonyId, credential, label);
   }, []);
 
+  const redeemEnrollmentTicket = useCallback(async (enrollmentCode: string, label: string) => {
+    const ceremony = await adminApi.beginTicketEnrolment(enrollmentCode);
+    const credential = await startRegistration({ optionsJSON: ceremony.options as never });
+    await adminApi.completeTicketEnrolment(ceremony.ceremonyId, credential, label);
+  }, []);
+
   const handleAuthenticationError = useCallback((error: unknown): boolean => {
     if (!(error instanceof AdminApiError) || !error.requiresSignIn) return false;
     generation.current += 1;
@@ -381,6 +389,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       stepUp,
       enrolAuthenticator,
       recoverAuthenticator,
+      redeemEnrollmentTicket,
       handleAuthenticationError,
       clearError,
       refresh
@@ -394,6 +403,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       stepUp,
       enrolAuthenticator,
       recoverAuthenticator,
+      redeemEnrollmentTicket,
       handleAuthenticationError,
       clearError,
       refresh

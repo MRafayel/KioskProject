@@ -24,6 +24,7 @@ export const ADMIN_SECTION_IDS = [
   "retention",
   "errors",
   "audit",
+  "people",
   "security-keys"
 ] as const;
 
@@ -46,6 +47,11 @@ export const SECTION_CAPABILITY: Readonly<Record<AdminSectionId, AdminCapability
   retention: "document.retention.read",
   errors: "error.read",
   audit: "audit.read.self",
+  // The looser of the two people capabilities on purpose. A Technical Admin
+  // holds this one and not `operator.manage`, so it can see the roster it may
+  // issue an enrolment ticket against — and finds the status and kiosk controls
+  // absent when it gets there, because those are drawn from the other one.
+  people: "authenticator.manage.operator",
   "security-keys": "authenticator.manage.self"
 };
 

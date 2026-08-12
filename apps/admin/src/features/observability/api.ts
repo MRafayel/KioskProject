@@ -1,11 +1,17 @@
 import {
   adminErrorsResponseSchema,
   adminOverviewResponseSchema,
+  adminPeopleResponseSchema,
   adminRefundQueueResponseSchema,
   authorizeRefundResponseSchema,
+  changeAdminStatusResponseSchema,
   correctRecoveryResponseSchema,
+  enrollmentTicketResponseSchema,
+  kioskAssignmentResponseSchema,
   resolveRecoveryResponseSchema,
   retryRetentionResponseSchema,
+  revokeAdminSessionsResponseSchema,
+  revokeOperatorAuthenticatorResponseSchema,
   type AcknowledgeIncidentBody,
   type AcknowledgeIncidentResponse,
   type AdminAuditResponse,
@@ -22,12 +28,22 @@ import {
   type AdminTimelineResponse,
   type AuthorizeRefundBody,
   type AuthorizeRefundResponse,
+  type ChangeAdminStatusBody,
+  type ChangeAdminStatusResponse,
   type CorrectRecoveryBody,
   type CorrectRecoveryResponse,
+  type EnrollmentTicketResponse,
+  type IssueEnrollmentTicketBody,
+  type KioskAssignmentBody,
+  type KioskAssignmentResponse,
   type ResolveRecoveryBody,
   type ResolveRecoveryResponse,
   type RetryRetentionBody,
-  type RetryRetentionResponse
+  type RetryRetentionResponse,
+  type RevokeAdminSessionsBody,
+  type RevokeAdminSessionsResponse,
+  type RevokeOperatorAuthenticatorBody,
+  type RevokeOperatorAuthenticatorResponse
 } from "@printing-kiosk/admin-access";
 
 import { adminRequest, adminRequestParsed } from "../auth/api.js";
@@ -184,5 +200,68 @@ export const observabilityApi = {
     ),
 
   acknowledgeIncident: (body: AcknowledgeIncidentBody) =>
-    adminRequest<AcknowledgeIncidentResponse>("POST", "/v1/admin/incidents/acknowledge", body)
+    adminRequest<AcknowledgeIncidentResponse>("POST", "/v1/admin/incidents/acknowledge", body),
+
+  // ---------------------------------------------------------------------------
+  // People
+  // ---------------------------------------------------------------------------
+
+  // Parsed: every control on the people screen is drawn from a status, a key
+  // count and a minimum, and a shape this build guessed at would be a retire
+  // button offered on an account that cannot spare the key.
+  people: () => adminRequestParsed(adminPeopleResponseSchema, "GET", "/v1/admin/people"),
+
+  changePersonStatus: (adminUserId: string, body: ChangeAdminStatusBody) =>
+    adminRequestParsed<ChangeAdminStatusResponse>(
+      changeAdminStatusResponseSchema,
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/status`,
+      body
+    ),
+
+  assignPersonKiosk: (adminUserId: string, body: KioskAssignmentBody) =>
+    adminRequestParsed<KioskAssignmentResponse>(
+      kioskAssignmentResponseSchema,
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/kiosks`,
+      body
+    ),
+
+  revokePersonSessions: (adminUserId: string, body: RevokeAdminSessionsBody) =>
+    adminRequestParsed<RevokeAdminSessionsResponse>(
+      revokeAdminSessionsResponseSchema,
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/sessions/revoke`,
+      body
+    ),
+
+  revokePersonAuthenticator: (
+    adminUserId: string,
+    authenticatorId: string,
+    body: RevokeOperatorAuthenticatorBody
+  ) =>
+    adminRequestParsed<RevokeOperatorAuthenticatorResponse>(
+      revokeOperatorAuthenticatorResponseSchema,
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/authenticators/${encodeURIComponent(
+        authenticatorId
+      )}/revoke`,
+      body
+    ),
+
+  /**
+   * Mint one enrolment ticket. The only response in this client that contains a
+   * credential — shown once, never stored, never re-readable.
+   *
+   * Parsed rather than trusted, and for a sharper reason than the others: the
+   * schema's `grantsSession: false` literal means no response can persuade this
+   * build that redeeming a ticket signs somebody in.
+   */
+  issueEnrollmentTicket: (adminUserId: string, body: IssueEnrollmentTicketBody) =>
+    adminRequestParsed<EnrollmentTicketResponse>(
+      enrollmentTicketResponseSchema,
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/enrollment-ticket`,
+      body
+    )
 };

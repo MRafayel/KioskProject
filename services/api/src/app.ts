@@ -9,9 +9,11 @@ import { ZodError } from "zod";
 import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 import {
+  assertAdminPeopleClientIsBounded,
   assertAdminReadClientIsReadOnly,
   assertAdminRefundClientIsAppendOnly,
   assertAdminWriteClientIsAppendOnly,
+  createAdminPeopleClient,
   createAdminReadClient,
   createAdminRefundClient,
   createAdminWriteClient,
@@ -25,6 +27,9 @@ import { AdminObservabilityService } from "./modules/admin/observability.js";
 import { registerAdminObservabilityRoutes } from "./modules/admin/observability-routes.js";
 import { AdminOperationsService } from "./modules/admin/operations.js";
 import { registerAdminOperationsRoutes } from "./modules/admin/operations-routes.js";
+import { asAdminPeopleDatabase } from "./modules/admin/people-database.js";
+import { registerAdminPeopleRoutes } from "./modules/admin/people-routes.js";
+import { AdminPeopleService } from "./modules/admin/people.js";
 import { asAdminRefundDatabase } from "./modules/admin/refund-database.js";
 import { registerAdminRefundRoutes } from "./modules/admin/refund-routes.js";
 import { AdminRefundService } from "./modules/admin/refunds.js";
@@ -92,6 +97,11 @@ export interface BuildAppOptions {
    * which is how a deployment turns the capability off without code changes.
    */
   adminRefundDatabase?: PrismaClient;
+  /**
+   * The people pool. Absent means the panel cannot manage people at all, which
+   * is how a deployment turns the capability off without code changes.
+   */
+  adminPeopleDatabase?: PrismaClient;
   clock?: Clock;
   random?: RandomSource;
   objectStore?: ObjectStore;
@@ -669,6 +679,49 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     app.log.warn(
       "ADMIN_REFUND_DATABASE_URL is not set: authorizing a refund is unavailable. " +
         "Provision the role with `pnpm db:admin-refund-writer provision`."
+    );
+  }
+
+  // A fifth pool, and the only connection in this process that can change a row
+  // an account's access depends on. Separate again, for the reason the refund
+  // pool is separate: the roles before it are defined by holding no UPDATE
+  // anywhere, and the way to add "suspend this person" without discarding that
+  // is another role rather than a wider one.
+  //
+  // Unset means the panel cannot manage people. Safe and deliberate, matching
+  // the refund route: an environment without the role is one where these routes
+  // do not exist, not one where suspensions run on the application's grants.
+  if (options.environment.ADMIN_PEOPLE_DATABASE_URL || options.adminPeopleDatabase) {
+    const adminPeopleDatabase =
+      options.adminPeopleDatabase ??
+      createAdminPeopleClient(options.environment.ADMIN_PEOPLE_DATABASE_URL as string);
+    const ownsAdminPeopleDatabase = !options.adminPeopleDatabase;
+
+    if (options.environment.ADMIN_PEOPLE_DATABASE_URL) {
+      await assertAdminPeopleClientIsBounded(adminPeopleDatabase);
+    }
+
+    if (ownsAdminPeopleDatabase) {
+      app.addHook("onClose", async () => {
+        await adminPeopleDatabase.$disconnect();
+      });
+    }
+
+    registerAdminPeopleRoutes(app, {
+      admin: adminService,
+      clock,
+      stepUpTtlMilliseconds,
+      people: new AdminPeopleService({
+        database: asAdminPeopleDatabase(adminPeopleDatabase),
+        clock,
+        random,
+        breakGlassPepper: options.environment.ADMIN_BREAK_GLASS_PEPPER
+      })
+    });
+  } else {
+    app.log.warn(
+      "ADMIN_PEOPLE_DATABASE_URL is not set: managing people is unavailable. " +
+        "Provision the role with `pnpm db:admin-people-writer provision`."
     );
   }
 
