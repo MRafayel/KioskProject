@@ -18,10 +18,18 @@
 /**
  * The three operational layers.
  *
- * Deliberately not a hierarchy. An Admin cannot propose technical changes, and a
- * Technical Admin cannot suspend an account or decide which kiosks an Operator
- * works on, so neither role contains the other. That asymmetry is what keeps one
- * compromised account from being enough.
+ * **Admin is the operational authority.** Running the business — money, people,
+ * kiosks, pricing — is an Admin's job, and an Admin does not need anybody else's
+ * agreement to do it. **Technical Admin is a support role**: deep diagnostics,
+ * troubleshooting and recovery, for the problems an Admin cannot resolve from
+ * the operational surface. It is not a second operator and not a co-approver.
+ *
+ * Deliberately not a hierarchy. A Technical Admin cannot suspend an account,
+ * decide which kiosks an Operator works on, move money or change a tariff; an
+ * Admin cannot see the deep diagnostics a Technical Admin can. Neither role
+ * contains the other, which is what keeps one compromised account from being
+ * enough — but the asymmetry is a boundary, not a workflow. Nothing routine
+ * requires both.
  */
 export const ADMIN_ROLES = ["OPERATOR", "ADMIN", "TECHNICAL_ADMIN"] as const;
 
@@ -97,11 +105,20 @@ export const ADMIN_CAPABILITIES = [
   "audit.read.self",
 
   "pricing.read",
-  "pricing.publish.request",
+  /**
+   * Publishing a new tariff, which changes what every future customer is charged
+   * at every kiosk from the moment it commits.
+   *
+   * The widest-reaching act an Admin can perform, and the reason it is still a
+   * single-Admin action is that this system has one Admin: a rule that waited for
+   * a second one would not be a control, it would be a stoppage. What carries the
+   * weight instead is evidence — a confirmation digest that must match what was
+   * previewed, and a publication record the database refuses to publish without.
+   */
+  "pricing.publish",
 
-  "change.propose",
-  "change.approve.technical",
-  "change.approve.admin",
+  /** Reading the change log: what the prices did, and when. */
+  "change.read",
 
   /**
    * Administering Operator accounts: status and kiosk assignment.
@@ -161,9 +178,13 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
   ],
 
   /**
-   * Most legitimate operational workflows, plus the people who perform them.
-   * Holds the money-moving capability and the approval side of serious change,
-   * but cannot propose technical change and cannot see deep diagnostics.
+   * The operational authority. Every legitimate business workflow, plus the
+   * people who perform them: money, kiosks, retention, accounts, and the tariff.
+   *
+   * It publishes the tariff on its own authority, because there is one Admin and
+   * making the prices wait for a second one would stop the business rather than
+   * protect it. What it cannot do is see deep diagnostics, which is the one thing
+   * the support role is for.
    */
   ADMIN: [
     "dashboard.read",
@@ -188,23 +209,38 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "audit.read",
     "audit.read.self",
     "pricing.read",
-    "change.approve.admin",
+    "pricing.publish",
+    "change.read",
     "operator.manage",
     "authenticator.manage.self",
     "authenticator.manage.operator"
   ],
 
   /**
-   * Deep technical visibility and the proposing side of serious change.
+   * Deep technical visibility, for the problems an Admin cannot resolve from the
+   * operational surface. A support role, not a second operator.
    *
-   * It holds exactly one capability over people, and the boundary around it is
-   * the point. `authenticator.manage.operator` lets it get an Operator onto
-   * their first security key, and retire one, at whatever hour the system
-   * breaks — an onboarding that had to wait for an Admin would be an outage
-   * with a person in the middle of it. It does **not** hold `operator.manage`,
-   * so it cannot suspend an account, resume one, or change which kiosks an
-   * Operator may act on; and there is no capability anywhere that changes an
-   * account's role, so this cannot become a promotion.
+   * It cannot publish a tariff. Pricing is an operational decision, and putting
+   * the support role anywhere in that path — as an approver, a fallback, or a
+   * second pair of hands — would make it load-bearing for business as usual. It
+   * reads the change log, because "what did the prices do at 14:03" is a
+   * diagnostic question.
+   *
+   * Four capabilities below pre-date this role model and sit oddly with it —
+   * `refund.authorize`, `print.recovery.correct`, `document.retention.retry` and
+   * `authenticator.manage.operator` are all operational rather than diagnostic.
+   * They are listed unchanged, and as an open decision, in
+   * `docs/ADMIN_PHASE_5_STATUS.md` §4.1: narrowing them is a change to shipped
+   * behaviour and belongs to the owner, not to a passing edit.
+   *
+   * It holds one capability over people, and the boundary around it is the
+   * point. `authenticator.manage.operator` lets it get an Operator onto their
+   * first security key, and retire one, at whatever hour the system breaks — an
+   * onboarding that had to wait for an Admin would be an outage with a person in
+   * the middle of it. It does **not** hold `operator.manage`, so it cannot
+   * suspend an account, resume one, or change which kiosks an Operator may act
+   * on; and there is no capability anywhere that changes an account's role, so
+   * this cannot become a promotion.
    *
    * The residual risk is stated rather than hidden: a compromised Technical
    * Admin can put a key it controls on a provisioning Operator account and act
@@ -237,9 +273,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "audit.read",
     "audit.read.self",
     "pricing.read",
-    "pricing.publish.request",
-    "change.propose",
-    "change.approve.technical",
+    "change.read",
     "authenticator.manage.self",
     "authenticator.manage.operator"
   ]
@@ -258,9 +292,19 @@ export function hasCapability(role: AdminRole, capability: AdminCapability): boo
  *
  * R0 is answered by a live session alone. Everything above it requires a fresh
  * WebAuthn assertion, because a stolen cookie must not be enough to change
- * anything. R3 is not expressible as a capability check at all — it needs two
- * further people — so it is marked here and refused by the endpoint until the
- * approval workflow exists.
+ * anything.
+ *
+ * R3 is not expressible as a capability check at all: it means "no one account
+ * may do this alone", and no account can prove that about itself. Nothing is
+ * classified R3, and the class is kept rather than deleted so that it stays a
+ * backstop: `authorizeAdmin` refuses an R3 capability outright, so if a future
+ * capability is classed R3 the endpoint naming it fails closed instead of
+ * quietly running as a single-account action.
+ *
+ * Publishing a tariff was the one candidate, and it is R2. This deployment has a
+ * single Admin, so a two-person rule over the prices would not be a control — it
+ * would be a workflow that never completes. What stands in for the second person
+ * is evidence rather than prevention: see `changes.ts`.
  */
 export type ActionRisk = "R0" | "R1" | "R2" | "R3";
 
@@ -304,11 +348,13 @@ const CAPABILITY_RISK: Readonly<Record<AdminCapability, ActionRisk>> = {
   "audit.read.self": "R0",
 
   "pricing.read": "R0",
-  "pricing.publish.request": "R3",
+  // The same class as authorizing a refund, and for the same reason: a single
+  // Admin performs it, a fresh assertion is required, and the record of it is
+  // append-only. Its reach is wider than a refund's, which is why the database
+  // refuses to publish a tariff that no record accounts for.
+  "pricing.publish": "R2",
 
-  "change.propose": "R3",
-  "change.approve.technical": "R3",
-  "change.approve.admin": "R3",
+  "change.read": "R0",
 
   "operator.manage": "R2",
   "authenticator.manage.self": "R2",

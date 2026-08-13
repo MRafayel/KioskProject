@@ -149,8 +149,8 @@ export const FORBIDDEN_TABLES = Object.freeze({
   uploaded_files: "Customer documents.",
   file_derivatives: "Storage addresses of customer documents.",
   file_pages: "Page geometry of customer documents.",
-  pricing_rule_sets: "A published tariff is an R3 change requiring three people.",
-  pricing_rules: "A published tariff is an R3 change requiring three people.",
+  pricing_rule_sets: "Publishing a tariff has its own role: printing_kiosk_admin_pricing_writer.",
+  pricing_rules: "Publishing a tariff has its own role: printing_kiosk_admin_pricing_writer.",
   price_quotes: "What a customer was quoted is evidence of what they agreed to pay.",
   print_setting_revisions: "What was ordered.",
   print_job_events: "The device's own ledger. A human observation is not a device report.",
@@ -163,6 +163,8 @@ export const FORBIDDEN_TABLES = Object.freeze({
   admin_break_glass_credentials: "Recovery credential digests.",
   admin_enrollment_tickets:
     "Authorising somebody's first enrolment is authenticator.manage.operator, on the people role. A connection that records what an operator saw at a tray must not be able to mint an identity.",
+  admin_change_executions:
+    "Changing the tariff belongs to the pricing role and to nothing else. A connection that records what an operator saw at a tray has no business in it.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

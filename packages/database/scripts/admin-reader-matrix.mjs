@@ -300,7 +300,14 @@ export const READABLE_TABLES = Object.freeze({
     "created_at",
     "expires_at",
     "consumed_at"
-  ]
+  ],
+
+  // What has been proposed about the tariff, and what became of it. Readable in
+  // full: a change request contains numbers somebody typed into a form and the
+  // reasons two people gave, and the whole point of the workflow is that both
+  // are visible to anybody who can see the section. There is no digest here that
+  // is a credential — `payload_digest` is a checksum of public numbers.
+  admin_change_executions: "*"
 });
 
 /**

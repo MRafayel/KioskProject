@@ -72,14 +72,16 @@ export async function authorizeAdmin(
 
   const risk = riskOfCapability(capability);
 
-  // R3 cannot be authorised by any single request: it needs a second Technical
-  // Admin and an Admin. Until the approval workflow exists there is no path
-  // that can satisfy it, and pretending otherwise would be the bug.
+  // R3 cannot be authorised by any single request: it means "no one account may
+  // do this alone", and this is one account. Nothing is classified R3 today, and
+  // this stays as the backstop that makes the class safe to use: a capability
+  // promoted to R3 later refuses here rather than silently running as a
+  // single-account action on whichever endpoint names it.
   if (risk === "R3") {
     throw new ApiError(
       403,
       "ADMIN_APPROVAL_REQUIRED",
-      "This change requires a second Technical Admin and an Admin approval."
+      "This action cannot be performed by one account on its own."
     );
   }
 

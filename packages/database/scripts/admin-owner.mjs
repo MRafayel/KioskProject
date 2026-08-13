@@ -90,7 +90,13 @@ const OWNED_TABLES = Object.freeze({
   // else in this list, is the ability to drop the table or switch off the
   // trigger that makes a ticket single-use and refuses to let one name a
   // working account.
-  admin_enrollment_tickets: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+  admin_enrollment_tickets: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  // Phase 5. The application never writes either of these — proposing and
+  // approving are the change and pricing roles' work — but it keeps the same
+  // DML as the other admin tables so an integration teardown can clear them.
+  // What it loses, as with the rest, is the ability to drop them or to switch
+  // off the triggers enforcing who may approve what.
+  admin_change_executions: ["SELECT", "INSERT", "UPDATE", "DELETE"]
 });
 
 const ALL_PRIVILEGES = [

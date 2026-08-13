@@ -9,6 +9,7 @@ import {
   type AdminSectionId
 } from "../features/navigation.js";
 import { AuditPanel } from "../routes/AuditPanel.js";
+import { ChangesPanel } from "../routes/ChangesPanel.js";
 import { ErrorsPanel } from "../routes/ErrorsPanel.js";
 import { KiosksPanel } from "../routes/KiosksPanel.js";
 import { MoneyPanel } from "../routes/MoneyPanel.js";
@@ -62,6 +63,7 @@ const SECTIONS: readonly Section[] = [
   },
   { id: "errors", label: "Errors", render: () => <ErrorsPanel /> },
   { id: "audit", label: "Audit", render: () => <AuditPanel /> },
+  { id: "changes", label: "Changes", render: () => <ChangesPanel /> },
   { id: "people", label: "People", render: () => <PeoplePanel /> },
   { id: "security-keys", label: "Security keys", render: () => <SecurityKeysPanel /> }
 ];

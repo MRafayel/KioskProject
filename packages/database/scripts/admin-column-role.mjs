@@ -1,22 +1,38 @@
 /**
- * Provision and verify an append-only database role.
+ * Provision and verify a database role whose power is a column list.
  *
- * Two roles now share this: the writer that records operator observations, and
- * the refund writer that records monetary obligations. They hold different
- * grants over different tables and exist for different reasons, but the
- * property that makes each of them worth having is the same one —
+ * `admin-append-role.mjs` runs the roles defined by one sentence — INSERT on a
+ * named list, SELECT on a named list, and no privilege that changes a row that
+ * already exists. Two roles cannot be defined that way, because changing an
+ * existing row is exactly what they are for: the people role ends somebody's
+ * access, and the pricing role archives the tariff it is replacing.
  *
- *     INSERT on a named list, SELECT on a named list, and no privilege that
- *     changes or destroys an existing row anywhere in the database.
+ * They share this runner, which holds the same argument to a stricter standard:
  *
- * — so it is asserted here once. A second copy of this logic would be a second
- * place for the assertion to be weakened, and the whole argument of the control
- * plane's design is that "could this connection do X" is answerable by reading
- * one thing.
+ *   - UPDATE is held per *column*, never per table, and `verify` walks every
+ *     column of every table in the database to prove it.
+ *   - DELETE, TRUNCATE, REFERENCES and TRIGGER are held nowhere at all.
+ *   - INSERT is held on the tables the matrix names and refused everywhere else.
+ *   - SELECT is column-scoped wherever the matrix says so, and a column added by
+ *     a later migration is denied until somebody decides otherwise.
  *
- * Each role supplies its own policy module (`*-matrix.mjs`), which is the file a
- * reviewer reads to see what that role may touch. This file is the mechanism;
- * the matrix is the decision.
+ * Phase 4B shipped the people role with its own copy of this logic and recorded
+ * the duplication as a cost: "no UPDATE anywhere" had been asserted by one
+ * implementation, and column-level UPDATE was now asserted by another. Phase 5
+ * would have made that three, so the copy became this file instead. Each role
+ * supplies its own policy module (`*-matrix.mjs`), which is the file a reviewer
+ * reads to see what that role may touch. This file is the mechanism; the matrix
+ * is the decision.
+ *
+ * **This uses two connections, because no single role can do both halves.** The
+ * `admin_*` tables and `audit_events` have been owned by `printing_kiosk_migrator`
+ * since Phase 4, and only an owner may grant on what it owns — but that role is
+ * deliberately `NOCREATEROLE`, because a role-creating migrator would be a second
+ * path to manufacturing a privileged connection. So role management runs on
+ * `DATABASE_URL` and every GRANT runs on `ADMIN_OWNER_DATABASE_URL`. The owner is
+ * a member of the application role, so it can also revoke grants the application
+ * issued on the product tables — which is what keeps `FORBIDDEN_TABLES`
+ * enforceable rather than aspirational.
  */
 
 import process from "node:process";
@@ -26,48 +42,42 @@ import pg from "pg";
 import { quoteIdentifier, quoteLiteral } from "./sql-identifiers.mjs";
 
 /**
- * The privileges that would let a role change or destroy something that already
- * exists. INSERT is absent on purpose: it is the one an append-only role is
- * allowed to hold, and only on the tables its matrix names.
+ * The privileges this kind of role may never hold on anything. UPDATE is absent
+ * because it is checked separately and far more precisely: table-level UPDATE is
+ * a failure, and column-level UPDATE is a failure everywhere except the exact
+ * pairs the matrix names.
  */
-const MUTATING_PRIVILEGES = ["UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"];
-const ALL_PRIVILEGES = ["SELECT", "INSERT", ...MUTATING_PRIVILEGES];
+const DESTRUCTIVE_PRIVILEGES = ["DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"];
+const ALL_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", ...DESTRUCTIVE_PRIVILEGES];
 
 /**
- * @typedef {object} AppendRolePolicy
- * @property {string} role                     the PostgreSQL role name
- * @property {string} passwordVariable         env var holding its password
- * @property {string} urlVariable              env var the API points at it with
- * @property {string} matrixPath               the policy file, named in errors
- * @property {string} command                  the pnpm script, named in errors
- * @property {Record<string,string>} insertable tables it may append to
+ * @typedef {object} ColumnRolePolicy
+ * @property {string} role                       the PostgreSQL role name
+ * @property {string} passwordVariable           env var holding its password
+ * @property {string} urlVariable                env var the API points at it with
+ * @property {string} matrixPath                 the policy file, named in errors
+ * @property {string} command                    the pnpm script, named in errors
+ * @property {Record<string,string>} insertable  tables it may append to
+ * @property {Record<string,string[]>} updatable tables and columns it may change
  * @property {Record<string,string[]|"*">} readable tables and columns it may read
- * @property {Record<string,string>} forbidden tables it may not touch at all
- * @property {Record<string,string>} settings  connection settings pinned on it
- * @property {string} summary                  one line printed after provisioning
+ * @property {Record<string,string>} forbidden   tables it may not touch at all
+ * @property {Record<string,string>} settings    connection settings pinned on it
+ * @property {string[]} summary                  printed after provisioning
+ * @property {string} disabled                   printed after `disable`
  */
 
 /**
  * Run one command against one policy. Returns the process exit code.
  *
- * @param {AppendRolePolicy} policy
+ * @param {ColumnRolePolicy} policy
  * @param {string | undefined} command
  */
-export async function runAppendRoleCommand(policy, command) {
-  // Role management — CREATE ROLE, the password, the connection settings —
-  // needs CREATEROLE, which the owner role deliberately does not have.
+export async function runColumnRoleCommand(policy, command) {
   const roleAdminUrl = process.env.DATABASE_URL;
   if (!roleAdminUrl) {
     process.stderr.write("DATABASE_URL is required.\n");
     return 1;
   }
-
-  // Granting needs to own the table being granted on. Since Phase 4 the
-  // application owns neither `audit_events` nor any `admin_*` table, and every
-  // role here needs a grant on at least one of them — so the GRANTs run as the
-  // owner, which is also a member of the application role and can therefore
-  // grant on the product tables as well. Development, where the application is
-  // the cluster's bootstrap superuser, works either way; production does not.
   const grantUrl = process.env.ADMIN_OWNER_DATABASE_URL ?? roleAdminUrl;
 
   const client = new pg.Client({ connectionString: grantUrl });
@@ -79,7 +89,7 @@ export async function runAppendRoleCommand(policy, command) {
     : new pg.Client({ connectionString: roleAdminUrl });
   if (!sharesOneConnection) await roleAdminClient.connect();
 
-  const session = new AppendRoleSession(policy, client, roleAdminClient);
+  const session = new ColumnRoleSession(policy, client, roleAdminClient);
   try {
     switch (command) {
       case "provision":
@@ -107,9 +117,9 @@ export async function runAppendRoleCommand(policy, command) {
   return session.failures > 0 ? 1 : 0;
 }
 
-class AppendRoleSession {
+class ColumnRoleSession {
   /**
-   * @param {AppendRolePolicy} policy
+   * @param {ColumnRolePolicy} policy
    * @param {pg.Client} client          owns the tables; issues every GRANT
    * @param {pg.Client} roleAdminClient may CREATE ROLE; issues no GRANT
    */
@@ -123,9 +133,9 @@ class AppendRoleSession {
   /**
    * Create or update the role so that it matches the matrix exactly.
    *
-   * Everything is revoked first, so this is a synchronisation rather than an
-   * accumulation: a grant removed from the matrix actually goes away instead of
-   * lingering because nobody thought to revoke it.
+   * Everything is revoked first, so this synchronises rather than accumulates: a
+   * column removed from the matrix actually loses its grant instead of lingering
+   * because nobody thought to revoke it.
    */
   async provision() {
     const { policy, client } = this;
@@ -143,9 +153,6 @@ class AppendRoleSession {
     const databaseName = (await client.query("SELECT current_database() AS name")).rows[0].name;
     const roleLiteral = quoteIdentifier(policy.role);
 
-    // The role itself, on the connection that can create one. Kept outside the
-    // grant transaction below because it is on a different connection, and
-    // because a role that exists with no grants can do nothing anyway.
     const exists = await this.roleAdminClient.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
       policy.role
     ]);
@@ -196,8 +203,22 @@ class AppendRoleSession {
         await client.query(`GRANT INSERT ON public.${quoteIdentifier(table)} TO ${roleLiteral}`);
       }
 
+      // The grant this kind of role exists for. Always column-scoped: a bare
+      // `GRANT UPDATE ON admin_users` would hand over `role` along with
+      // `status`, and a bare one on `pricing_rule_sets` would hand over the
+      // amounts along with the status that archives them.
+      for (const [table, columns] of Object.entries(policy.updatable)) {
+        if (!existingTables.includes(table)) continue;
+        const columnList = columns.map(quoteIdentifier).join(", ");
+        await client.query(
+          `GRANT UPDATE (${columnList}) ON public.${quoteIdentifier(table)} TO ${roleLiteral}`
+        );
+      }
+
       // A table added by a future migration must not inherit a grant. Default
-      // privileges are the one place PostgreSQL would hand one out silently.
+      // privileges are the one place PostgreSQL would hand one out silently, and
+      // they are per grantor — so both the owner of the admin tables and the
+      // application that owns the product ones have to be told.
       await client.query(
         `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM ${roleLiteral}`
       );
@@ -214,11 +235,13 @@ class AppendRoleSession {
       [
         `Provisioned ${policy.role}.`,
         `  may INSERT into : ${Object.keys(policy.insertable).join(", ")}`,
+        ...Object.entries(policy.updatable).map(
+          ([table, columns]) => `  may UPDATE      : ${table} (${columns.join(", ")})`
+        ),
         `  may SELECT from : ${Object.keys(policy.readable).length} tables`,
-        "  may UPDATE      : nothing",
         "  may DELETE      : nothing",
         "",
-        policy.summary,
+        ...policy.summary,
         "",
         `Then confirm the result with: ${policy.command} verify`,
         ""
@@ -245,13 +268,28 @@ class AppendRoleSession {
     const existingTables = await this.listTables();
     this.assertPolicyMatchesSchema(existingTables);
 
-    // The property that defines an append-only role: no privilege that changes
-    // or destroys an existing row, anywhere in the database, whatever the
-    // matrix says.
     for (const table of existingTables) {
-      for (const privilege of MUTATING_PRIVILEGES) {
+      for (const privilege of DESTRUCTIVE_PRIVILEGES) {
         if (await this.hasTablePrivilege(table, privilege)) {
-          this.report(`${table}: role holds ${privilege}; this role may only append`);
+          this.report(`${table}: role holds ${privilege}; this role may never destroy a row`);
+        }
+      }
+
+      // Table-level UPDATE is always a failure, including on the tables the
+      // matrix names: holding it would mean holding every column, which is the
+      // difference between "may suspend an account" and "may promote one".
+      if (await this.hasTablePrivilege(table, "UPDATE")) {
+        this.report(`${table}: role holds table-level UPDATE; UPDATE must be column-scoped`);
+      }
+
+      const allowed = new Set(policy.updatable[table] ?? []);
+      for (const column of await this.listColumns(table)) {
+        const held = await this.hasColumnPrivilege(table, column, "UPDATE");
+        if (held && !allowed.has(column)) {
+          this.report(`${table}.${column}: role can UPDATE a column the policy does not name`);
+        }
+        if (!held && allowed.has(column)) {
+          this.report(`${table}.${column}: expected UPDATE, role has none`);
         }
       }
     }
@@ -263,8 +301,6 @@ class AppendRoleSession {
       }
     }
 
-    // INSERT anywhere else is the failure this list is really about: a row
-    // appearing in a table nobody authorised this role to append to.
     const insertable = new Set(Object.keys(policy.insertable));
     for (const table of existingTables) {
       if (insertable.has(table)) continue;
@@ -284,12 +320,18 @@ class AppendRoleSession {
         continue;
       }
 
+      const allowed = new Set(columns);
       for (const column of columns) {
+        if (!existingColumns.includes(column)) {
+          this.report(`${table}: policy allows a column that does not exist: ${column}`);
+          continue;
+        }
         if (!(await this.hasColumnPrivilege(table, column, "SELECT"))) {
           this.report(`${table}.${column}: expected SELECT, role has none`);
         }
       }
-      for (const column of deniedColumnsFor(policy.readable, table, existingColumns)) {
+      for (const column of existingColumns) {
+        if (allowed.has(column)) continue;
         if (await this.hasColumnPrivilege(table, column, "SELECT")) {
           this.report(`${table}.${column}: MUST NOT be readable but the role can SELECT it`);
         }
@@ -323,10 +365,15 @@ class AppendRoleSession {
       if (held) this.report(`role holds ${attribute}`);
     }
 
+    const updatable = Object.values(policy.updatable).reduce(
+      (total, columns) => total + columns.length,
+      0
+    );
     process.stdout.write(
       this.failures === 0
         ? `${policy.role}: privilege matrix verified. ` +
-            `${Object.keys(policy.insertable).length} INSERT(s), no UPDATE, no DELETE.\n`
+            `${updatable} updatable column(s) across ${Object.keys(policy.updatable).length} ` +
+            "table(s), no table-level UPDATE, no DELETE.\n"
         : `\n${this.failures} privilege problem(s). ` +
             "The control plane is not safe to point at this role.\n"
     );
@@ -341,36 +388,46 @@ class AppendRoleSession {
       return;
     }
     await this.roleAdminClient.query(`ALTER ROLE ${quoteIdentifier(policy.role)} NOLOGIN`);
-    process.stdout.write(
-      `${policy.role} can no longer connect. Reads through other roles are\n` +
-        "unaffected; the actions this role serves will fail until it is provisioned again.\n"
-    );
+    process.stdout.write(`${policy.role} can no longer connect.\n${policy.disabled}\n`);
   }
 
   /**
    * Refuse to act on a schema or a policy the tool cannot trust.
    *
-   * A table nobody has decided about, and a table claimed by both lists, are
-   * both failures rather than warnings: they stop the command instead of
-   * producing a partial grant.
+   * A table nobody has decided about stops the command rather than producing a
+   * partial grant. This is the check that notices a migration adding a table,
+   * and it is the reason every role is re-provisioned after one.
    */
   assertPolicyMatchesSchema(existingTables) {
     const { policy } = this;
 
-    const contradictory = Object.keys(policy.insertable)
+    const contradictory = [...Object.keys(policy.insertable), ...Object.keys(policy.updatable)]
       .filter((table) => table in policy.forbidden)
       .sort();
     if (contradictory.length > 0) {
       throw new FatalPolicyError(
-        "These tables are listed as both insertable and forbidden:\n" +
+        "These tables are listed as both writable and forbidden:\n" +
           contradictory.map((table) => `  - ${table}`).join("\n") +
-          `\n\nResolve the contradiction in ${policy.matrixPath} before provisioning.` +
-          "\nA table claimed by both lists is treated as forbidden."
+          `\n\nResolve the contradiction in ${policy.matrixPath} before provisioning.`
+      );
+    }
+
+    // Every table this role may change must also be one it may read: a policy
+    // that could write a column it cannot see would be one nobody could review.
+    const unreadable = Object.keys(policy.updatable)
+      .filter((table) => !(table in policy.readable))
+      .sort();
+    if (unreadable.length > 0) {
+      throw new FatalPolicyError(
+        "These tables are updatable but not readable:\n" +
+          unreadable.map((table) => `  - ${table}`).join("\n") +
+          `\n\nAdd them to READABLE_TABLES in ${policy.matrixPath}.`
       );
     }
 
     const decided = new Set([
       ...Object.keys(policy.insertable),
+      ...Object.keys(policy.updatable),
       ...Object.keys(policy.readable),
       ...Object.keys(policy.forbidden)
     ]);
@@ -380,8 +437,9 @@ class AppendRoleSession {
       throw new FatalPolicyError(
         "These tables exist but the policy does not mention them:\n" +
           undecided.map((table) => `  - ${table}`).join("\n") +
-          `\n\nAdd each one to READABLE_TABLES, INSERTABLE_TABLES or FORBIDDEN_TABLES in\n` +
-          `${policy.matrixPath}. A table is forbidden until somebody decides otherwise.`
+          `\n\nAdd each one to READABLE_TABLES, INSERTABLE_TABLES, UPDATABLE_COLUMNS or\n` +
+          `FORBIDDEN_TABLES in ${policy.matrixPath}. A table is forbidden until somebody\n` +
+          "decides otherwise."
       );
     }
 
@@ -410,12 +468,7 @@ class AppendRoleSession {
        ORDER BY ordinal_position`,
       [table]
     );
-    const columns = result.rows.map((row) => row.column_name);
-    const missing = missingColumnsFor(this.policy.readable, table, columns);
-    if (missing.length > 0) {
-      this.report(`${table}: policy allows columns that do not exist: ${missing.join(", ")}`);
-    }
-    return columns;
+    return result.rows.map((row) => row.column_name);
   }
 
   async hasTablePrivilege(table, privilege) {
@@ -441,27 +494,6 @@ class AppendRoleSession {
     this.failures += 1;
     process.stderr.write(`  FAIL  ${message}\n`);
   }
-}
-
-/**
- * Columns of a readable table the role must NOT hold a grant on.
- *
- * Derived rather than listed, so adding a column to the schema without adding
- * it to the allow-list denies it automatically.
- */
-export function deniedColumnsFor(readable, table, existingColumns) {
-  const allowed = readable[table];
-  if (allowed === undefined || allowed === "*") return [];
-  const allowedSet = new Set(allowed);
-  return existingColumns.filter((column) => !allowedSet.has(column));
-}
-
-/** Allow-listed columns the live schema does not have. */
-export function missingColumnsFor(readable, table, existingColumns) {
-  const allowed = readable[table];
-  if (allowed === undefined || allowed === "*") return [];
-  const existing = new Set(existingColumns);
-  return allowed.filter((column) => !existing.has(column));
 }
 
 /** A problem that stops the command rather than counting as a finding. */

@@ -24,6 +24,7 @@ export const ADMIN_SECTION_IDS = [
   "retention",
   "errors",
   "audit",
+  "changes",
   "people",
   "security-keys"
 ] as const;
@@ -51,6 +52,11 @@ export const SECTION_CAPABILITY: Readonly<Record<AdminSectionId, AdminCapability
   // holds this one and not `operator.manage`, so it can see the roster it may
   // issue an enrolment ticket against — and finds the status and kiosk controls
   // absent when it gets there, because those are drawn from the other one.
+  // Read, not write. A Technical Admin holds this and not `pricing.publish`, so
+  // it finds the section present and the form absent — which is the right answer
+  // for a support role: what the prices did, and when, is a diagnostic question,
+  // and changing them is not its job.
+  changes: "change.read",
   people: "authenticator.manage.operator",
   "security-keys": "authenticator.manage.self"
 };

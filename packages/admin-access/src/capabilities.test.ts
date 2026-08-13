@@ -51,8 +51,6 @@ describe("no role is a superset of another", () => {
     const missing = capabilitiesForRole("TECHNICAL_ADMIN").filter(
       (capability) => !admin.has(capability)
     );
-    expect(missing).toContain("change.propose");
-    expect(missing).toContain("change.approve.technical");
     expect(missing).toContain("print.diagnostics.read");
   });
 
@@ -60,7 +58,9 @@ describe("no role is a superset of another", () => {
     const technical = new Set<string>(capabilitiesForRole("TECHNICAL_ADMIN"));
     const missing = capabilitiesForRole("ADMIN").filter((capability) => !technical.has(capability));
     expect(missing).toContain("operator.manage");
-    expect(missing).toContain("change.approve.admin");
+    // Changing the prices is an operational decision, so it is an Admin's. The
+    // support role reads what happened and cannot cause it.
+    expect(missing).toContain("pricing.publish");
   });
 
   it("Operator holds strictly less than both", () => {
@@ -202,15 +202,24 @@ describe("risk classification", () => {
     }
   });
 
-  it("classifies serious production change as R3", () => {
-    for (const capability of [
-      "pricing.publish.request",
-      "change.propose",
-      "change.approve.technical",
-      "change.approve.admin"
-    ] as const) {
-      expect(riskOfCapability(capability)).toBe("R3");
-    }
+  // Publishing a tariff reaches further than anything else here, and it is R2
+  // rather than R3 because this deployment has one Admin: R3 means "no one
+  // account may do this alone", which no single-Admin workflow can satisfy.
+  it("classifies publishing a tariff as R2, with a fresh assertion required", () => {
+    expect(riskOfCapability("pricing.publish")).toBe("R2");
+    expect(requiresStepUp(riskOfCapability("pricing.publish"))).toBe(true);
+    expect(riskOfCapability("change.read")).toBe("R0");
+  });
+
+  // The class is kept with nothing in it, on purpose. `authorizeAdmin` refuses
+  // every R3 capability outright, so classing something R3 later fails the
+  // endpoint closed rather than letting one account perform it quietly. That
+  // branch has no test of its own precisely because this assertion holds: there
+  // is no R3 capability to exercise it with, and inventing one would test a
+  // fixture rather than the policy.
+  it("classifies nothing as R3, so the class stays a fail-closed backstop", () => {
+    const atR3 = ADMIN_CAPABILITIES.filter((capability) => riskOfCapability(capability) === "R3");
+    expect(atR3).toEqual([]);
   });
 
   it("requires step-up for everything above R1", () => {

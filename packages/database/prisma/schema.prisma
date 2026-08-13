@@ -197,6 +197,9 @@ model PricingRuleSet {
   updatedAt          DateTime      @default(now()) @updatedAt @map("updated_at")
   rules              PricingRule[]
   quotes             PriceQuote[]
+  /// The approval that published it, when a person published it. Null for a
+  /// tariff a deployment seeded.
+  changeExecution    AdminChangeExecution?
 
   @@index([status, validFrom])
   @@map("pricing_rule_sets")
@@ -841,6 +844,7 @@ model AdminUser {
   recoveryCorrections PrintJobRecoveryCorrection[]
   refundAuthorizations RefundAuthorization[]
   cleanupRetryRequests CleanupRetryRequest[]
+  changeExecutions     AdminChangeExecution[]
 
   @@index([status, role])
   @@map("admin_users")
@@ -1017,6 +1021,38 @@ model AdminEnrollmentTicket {
   @@index([adminUserId, consumedAt])
   @@index([expiresAt])
   @@map("admin_enrollment_tickets")
+}
+
+/// One published tariff, and who published it.
+///
+/// Append-only, and written in the same transaction as the tariff it names. There
+/// is no proposal and no pending state: a row here is a change that happened.
+/// A deferred constraint trigger refuses, at COMMIT, any tariff the control plane
+/// wrote that no row here accounts for byte for byte.
+model AdminChangeExecution {
+  id                 String   @id @db.Uuid
+  kind               String   @db.VarChar(40)
+  /// The change verbatim, so the row reads without reconstruction. The digest
+  /// beside it is what anything actually depends on.
+  payload            Json
+  payloadDigest      String   @map("payload_digest") @db.VarChar(64)
+  /// The tariff this replaced, so the sequence of publications is a checkable
+  /// chain rather than rows that happen to be in order.
+  baselineDigest     String   @map("baseline_digest") @db.VarChar(64)
+  reason             String   @db.VarChar(280)
+  publishedByAdminId String   @map("published_by_admin_id") @db.Uuid
+  publishedByRole    String   @map("published_by_role") @db.VarChar(24)
+  resultRuleSetId    String?  @unique @map("result_rule_set_id") @db.Uuid
+  resultRef          String?  @map("result_ref") @db.VarChar(64)
+  replacedRef        String?  @map("replaced_ref") @db.VarChar(64)
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  publishedBy   AdminUser       @relation(fields: [publishedByAdminId], references: [id], onDelete: Restrict)
+  resultRuleSet PricingRuleSet? @relation(fields: [resultRuleSetId], references: [id], onDelete: Restrict)
+
+  @@index([kind, createdAt])
+  @@index([publishedByAdminId])
+  @@map("admin_change_executions")
 }
 
 model OutboxEvent {

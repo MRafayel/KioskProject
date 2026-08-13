@@ -818,6 +818,8 @@ const secureProductionEnvironment = {
     "postgresql://printing_kiosk_admin_refund_writer:secret@localhost:5432/kiosk",
   ADMIN_PEOPLE_DATABASE_URL:
     "postgresql://printing_kiosk_admin_people_writer:secret@localhost:5432/kiosk",
+  ADMIN_PRICING_DATABASE_URL:
+    "postgresql://printing_kiosk_admin_pricing_writer:secret@localhost:5432/kiosk",
   MALWARE_SCANNER_ADAPTER: "clamav",
   S3_SERVER_SIDE_ENCRYPTION: "AES256"
 } as const;

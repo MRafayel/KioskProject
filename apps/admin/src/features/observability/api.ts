@@ -1,13 +1,16 @@
 import {
+  adminChangesResponseSchema,
   adminErrorsResponseSchema,
   adminOverviewResponseSchema,
   adminPeopleResponseSchema,
   adminRefundQueueResponseSchema,
+  previewChangeResponseSchema,
   authorizeRefundResponseSchema,
   changeAdminStatusResponseSchema,
   correctRecoveryResponseSchema,
   enrollmentTicketResponseSchema,
   kioskAssignmentResponseSchema,
+  publishChangeResponseSchema,
   resolveRecoveryResponseSchema,
   retryRetentionResponseSchema,
   revokeAdminSessionsResponseSchema,
@@ -26,6 +29,8 @@ import {
   type AdminSessionDetailResponse,
   type AdminSessionsResponse,
   type AdminTimelineResponse,
+  type PreviewChangeBody,
+  type PreviewChangeResponse,
   type AuthorizeRefundBody,
   type AuthorizeRefundResponse,
   type ChangeAdminStatusBody,
@@ -36,6 +41,8 @@ import {
   type IssueEnrollmentTicketBody,
   type KioskAssignmentBody,
   type KioskAssignmentResponse,
+  type PublishChangeBody,
+  type PublishChangeResponse,
   type ResolveRecoveryBody,
   type ResolveRecoveryResponse,
   type RetryRetentionBody,
@@ -262,6 +269,46 @@ export const observabilityApi = {
       enrollmentTicketResponseSchema,
       "POST",
       `/v1/admin/people/${encodeURIComponent(adminUserId)}/enrollment-ticket`,
+      body
+    ),
+
+  // ---------------------------------------------------------------------------
+  // Changes
+  // ---------------------------------------------------------------------------
+
+  // All three are parsed rather than trusted, and this is the section where that
+  // matters most. Every number on these screens is a price somebody is about to
+  // publish, and the digests the publish call echoes back are what tie the
+  // numbers on screen to the numbers written — a shape this build guessed at
+  // would be a publication of numbers nobody checked.
+  changes: () => adminRequestParsed(adminChangesResponseSchema, "GET", "/v1/admin/changes"),
+
+  /**
+   * Price a change out. Changes nothing.
+   *
+   * The `published: false` literal is why this is parsed: no response can
+   * persuade this build that a preview published something.
+   */
+  previewChange: (body: PreviewChangeBody) =>
+    adminRequestParsed<PreviewChangeResponse>(
+      previewChangeResponseSchema,
+      "POST",
+      "/v1/admin/changes/preview",
+      body
+    ),
+
+  /**
+   * Publish the tariff.
+   *
+   * The one call in this client whose success means prices have already changed
+   * at every kiosk. Both digests come from the preview; the server recomputes
+   * them and refuses if either no longer holds.
+   */
+  publishChange: (body: PublishChangeBody) =>
+    adminRequestParsed<PublishChangeResponse>(
+      publishChangeResponseSchema,
+      "POST",
+      "/v1/admin/changes",
       body
     )
 };

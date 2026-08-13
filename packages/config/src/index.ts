@@ -113,6 +113,17 @@ const environmentSchema = z
       .min(1)
       .refine(isPostgresUrl, "ADMIN_PEOPLE_DATABASE_URL must be a valid PostgreSQL URL")
       .optional(),
+    // The connection a tariff is published through, as the role provisioned by
+    // `pnpm db:admin-pricing-writer provision`. The only one in this system that
+    // can change what a customer will be charged, and it cannot commit a tariff
+    // that no publication record accounts for — which is what makes "who changed
+    // the prices" a fact about the database rather than a claim about the
+    // application.
+    ADMIN_PRICING_DATABASE_URL: z
+      .string()
+      .min(1)
+      .refine(isPostgresUrl, "ADMIN_PRICING_DATABASE_URL must be a valid PostgreSQL URL")
+      .optional(),
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
     OBJECT_STORAGE_DRIVER: z.literal("s3").default("s3"),
     S3_ENDPOINT: z.string().url().default("http://localhost:9000"),
@@ -573,6 +584,17 @@ const environmentSchema = z
       });
     }
 
+    if (
+      environment.ADMIN_PRICING_DATABASE_URL !== undefined &&
+      !isPostgresConnectionUrl(environment.ADMIN_PRICING_DATABASE_URL)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_PRICING_DATABASE_URL"],
+        message: "ADMIN_PRICING_DATABASE_URL must be a postgresql:// or postgres:// URL"
+      });
+    }
+
     // The refund role is the only grant in this system that can pay somebody.
     // Pointing it at any other connection string would hand that grant to
     // whatever else uses that string, which is the entire thing this separation
@@ -619,6 +641,32 @@ const environmentSchema = z
             "that can suspend an account or retire somebody's key; sharing it gives that " +
             "power to everything else. " +
             "Provision the role with `pnpm db:admin-people-writer provision`."
+        });
+      }
+    }
+
+    // The pricing role is the only grant that can change what a customer will be
+    // charged. Sharing a string with any other pool would hand that reach to
+    // every request that pool serves. Checked outside production for the same
+    // reason the money check is.
+    for (const [name, value] of [
+      ["DATABASE_URL", environment.DATABASE_URL],
+      ["ADMIN_READ_DATABASE_URL", environment.ADMIN_READ_DATABASE_URL],
+      ["ADMIN_WRITE_DATABASE_URL", environment.ADMIN_WRITE_DATABASE_URL],
+      ["ADMIN_REFUND_DATABASE_URL", environment.ADMIN_REFUND_DATABASE_URL],
+      ["ADMIN_PEOPLE_DATABASE_URL", environment.ADMIN_PEOPLE_DATABASE_URL]
+    ] as const) {
+      if (
+        environment.ADMIN_PRICING_DATABASE_URL !== undefined &&
+        environment.ADMIN_PRICING_DATABASE_URL === value
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["ADMIN_PRICING_DATABASE_URL"],
+          message:
+            `ADMIN_PRICING_DATABASE_URL must not equal ${name}. It is the only connection ` +
+            "that can publish a tariff, and nothing else should be able to. " +
+            "Provision the role with `pnpm db:admin-pricing-writer provision`."
         });
       }
     }
@@ -688,6 +736,21 @@ const environmentSchema = z
           "ADMIN_PEOPLE_DATABASE_URL must be set in production. Provision the role with " +
           "`pnpm db:admin-people-writer provision`, or disable it deliberately with " +
           "`pnpm db:admin-people-writer disable`."
+      });
+    }
+
+    // Six. Same argument as the refund and people roles': without it the panel
+    // cannot publish a tariff at all, which is safe but silent, and a deployment
+    // that meant to offer it should find out at boot rather than when an Admin
+    // tries to change a price.
+    if (environment.ADMIN_PRICING_DATABASE_URL === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["ADMIN_PRICING_DATABASE_URL"],
+        message:
+          "ADMIN_PRICING_DATABASE_URL must be set in production. Provision the role with " +
+          "`pnpm db:admin-pricing-writer provision`, or disable it deliberately with " +
+          "`pnpm db:admin-pricing-writer disable`."
       });
     }
 
@@ -855,7 +918,8 @@ const environmentSchema = z
       "ADMIN_READ_DATABASE_URL",
       "ADMIN_WRITE_DATABASE_URL",
       "ADMIN_REFUND_DATABASE_URL",
-      "ADMIN_PEOPLE_DATABASE_URL"
+      "ADMIN_PEOPLE_DATABASE_URL",
+      "ADMIN_PRICING_DATABASE_URL"
     ] as const) {
       const value = environment[name];
       if (value === undefined) continue;
@@ -939,16 +1003,18 @@ const ADMIN_ENVIRONMENT_KEYS = [
   "ADMIN_STEP_UP_TTL_SECONDS",
   "ADMIN_CHALLENGE_TTL_SECONDS",
   "ADMIN_BREAK_GLASS_TTL_HOURS",
-  // Three more database passwords. A worker or kiosk process has no admin panel
+  // Five more database passwords. A worker or kiosk process has no admin panel
   // to serve and therefore no reason to hold any of them — the write one is the
-  // only credential in this system that can append to the audit log, and the
-  // refund one is the only credential that can create an obligation to pay a
-  // customer back, and the people one is the only credential that can change
-  // whether somebody may sign in at all.
+  // only credential in this system that can append to the audit log, the refund
+  // one is the only credential that can create an obligation to pay a customer
+  // back, the people one is the only credential that can change whether somebody
+  // may sign in at all, and the pricing one is the only credential that can
+  // change what a customer will be charged.
   "ADMIN_READ_DATABASE_URL",
   "ADMIN_WRITE_DATABASE_URL",
   "ADMIN_REFUND_DATABASE_URL",
-  "ADMIN_PEOPLE_DATABASE_URL"
+  "ADMIN_PEOPLE_DATABASE_URL",
+  "ADMIN_PRICING_DATABASE_URL"
 ] as const;
 type AdminEnvironmentKey = (typeof ADMIN_ENVIRONMENT_KEYS)[number];
 const ADMIN_ENVIRONMENT_KEY_SET: ReadonlySet<string> = new Set(ADMIN_ENVIRONMENT_KEYS);
@@ -1026,14 +1092,16 @@ export function loadNonAdminEnvironment(
     ADMIN_BREAK_GLASS_TTL_HOURS: "2160",
     // Loopback so the production transport rule does not demand TLS settings
     // for connections this process will never open, and distinct from each
-    // other because production requires the five roles to differ.
+    // other because production requires the seven roles to differ.
     ADMIN_READ_DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api",
     ADMIN_WRITE_DATABASE_URL:
       "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-write",
     ADMIN_REFUND_DATABASE_URL:
       "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-refund",
     ADMIN_PEOPLE_DATABASE_URL:
-      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-people"
+      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-people",
+    ADMIN_PRICING_DATABASE_URL:
+      "postgresql://unused:unused@127.0.0.1:5432/not-loaded-outside-api-pricing"
   });
   return Object.fromEntries(
     Object.entries(parsed).filter(([name]) => !ADMIN_ENVIRONMENT_KEY_SET.has(name))

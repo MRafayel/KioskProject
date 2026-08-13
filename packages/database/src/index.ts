@@ -399,6 +399,144 @@ export async function assertAdminPeopleClientIsBounded(client: PrismaClient): Pr
   }
 }
 
+/**
+ * The pool a tariff is published through.
+ *
+ * The fifth of these, and the only connection in this system that can change
+ * what a customer will be charged. It holds UPDATE on three columns of one
+ * table — `status`, `archived_at` and `updated_at` — so it can promote the draft
+ * it just wrote and retire the tariff it replaces, and cannot edit any tariff at
+ * all.
+ *
+ * In production this points at `printing_kiosk_admin_pricing_writer`. What makes
+ * "who changed the prices" a property of the database rather than of this
+ * repository is a deferred trigger it cannot disable: at COMMIT, every tariff it
+ * wrote must be accounted for by an append-only record naming an active Admin
+ * and carrying the digest of exactly those numbers.
+ */
+export function createAdminPricingClient(connectionString: string): PrismaClient {
+  const adapter = new PrismaPg({
+    connectionString,
+    options: ADMIN_WRITE_CONNECTION_OPTIONS,
+    // Publishing a tariff happens a few times a year. Two is generous.
+    max: 2
+  });
+  return new PrismaClient({ adapter });
+}
+
+/**
+ * The privileges the pricing pool must not hold, checked at boot.
+ *
+ * `price_quotes` is the one worth reading twice: a quote is what a named
+ * customer was told they would pay and the evidence their payment is checked
+ * against, so the connection that changes future prices cannot reach it at all.
+ */
+const FORBIDDEN_ADMIN_PRICING_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.admin_change_executions", "UPDATE"],
+  ["public.admin_change_executions", "DELETE"],
+  ["public.pricing_rule_sets", "DELETE"],
+  ["public.pricing_rules", "UPDATE"],
+  ["public.pricing_rules", "DELETE"],
+  ["public.price_quotes", "SELECT"],
+  ["public.price_quotes", "INSERT"],
+  ["public.price_quotes", "UPDATE"],
+  ["public.payments", "SELECT"],
+  ["public.refunds", "INSERT"],
+  ["public.admin_users", "UPDATE"],
+  ["public.audit_events", "UPDATE"],
+  ["public.audit_events", "DELETE"]
+];
+
+/** Columns of the tariff this role must never be able to change. */
+const FORBIDDEN_ADMIN_PRICING_COLUMNS: readonly (readonly [string, string])[] = [
+  // The money itself. A published tariff is immutable; a new one replaces it.
+  ["public.pricing_rule_sets", "currency"],
+  ["public.pricing_rule_sets", "currency_exponent"],
+  ["public.pricing_rule_sets", "version"],
+  ["public.pricing_rule_sets", "valid_from"],
+  ["public.pricing_rule_sets", "valid_until"],
+  ["public.pricing_rule_sets", "published_at"],
+  ["public.pricing_rule_sets", "rounding"],
+  ["public.pricing_rule_sets", "tax_mode"],
+  ["public.pricing_rule_sets", "minimum_application"],
+  ["public.pricing_rules", "unit_amount_minor"],
+  ["public.pricing_rules", "service_fee_minor"],
+  ["public.pricing_rules", "tax_basis_points"]
+];
+
+/** The grants without which no tariff can be published. */
+const REQUIRED_ADMIN_PRICING_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.pricing_rule_sets", "INSERT"],
+  ["public.pricing_rules", "INSERT"],
+  ["public.admin_change_executions", "INSERT"],
+  ["public.audit_events", "INSERT"]
+];
+
+/** Prove the pricing pool is as small as it claims before serving anything. */
+export async function assertAdminPricingClientIsBounded(client: PrismaClient): Promise<void> {
+  await assertPrivileges(client, {
+    forbidden: FORBIDDEN_ADMIN_PRICING_PRIVILEGES,
+    forbiddenColumns: FORBIDDEN_ADMIN_PRICING_COLUMNS,
+    required: REQUIRED_ADMIN_PRICING_PRIVILEGES,
+    subject: "pricing",
+    variable: "ADMIN_PRICING_DATABASE_URL",
+    command: "pnpm db:admin-pricing-writer verify"
+  });
+}
+
+/**
+ * Ask PostgreSQL what a connection can do, and refuse to start if the answer is
+ * not the one the matrix promised.
+ *
+ * The assertions above it were written out one at a time as the roles were
+ * added, and by the fifth the repetition was the only thing a reader noticed.
+ * This is the same check: every forbidden pair, every forbidden column, every
+ * required pair, and a message naming the variable and the command that fix it.
+ */
+async function assertPrivileges(
+  client: PrismaClient,
+  policy: {
+    forbidden: readonly (readonly [string, string])[];
+    forbiddenColumns?: readonly (readonly [string, string])[];
+    required: readonly (readonly [string, string])[];
+    subject: string;
+    variable: string;
+    command: string;
+  }
+): Promise<void> {
+  const heldOnTable = async (table: string, privilege: string): Promise<boolean> => {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_table_privilege(${table}, ${privilege}) AS held`;
+    return rows[0]?.held === true;
+  };
+  const heldOnColumn = async (table: string, column: string): Promise<boolean> => {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_column_privilege(${table}, ${column}, 'UPDATE') AS held`;
+    return rows[0]?.held === true;
+  };
+
+  const violations: string[] = [];
+  for (const [table, privilege] of policy.forbidden) {
+    if (await heldOnTable(table, privilege)) violations.push(`holds ${privilege} on ${table}`);
+  }
+  for (const [table, column] of policy.forbiddenColumns ?? []) {
+    if (await heldOnColumn(table, column)) violations.push(`can UPDATE ${table}.${column}`);
+  }
+  for (const [table, privilege] of policy.required) {
+    if (!(await heldOnTable(table, privilege))) violations.push(`lacks ${privilege} on ${table}`);
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      `The admin ${policy.subject} connection does not match the control plane's privilege policy. ` +
+        `Refusing to start: ${violations.join("; ")}. ` +
+        `Check ${policy.variable} and rerun \`${policy.command}\`.`
+    );
+  }
+}
+
 export { Prisma } from "./generated/prisma/client.js";
 export type { PrismaClient };
 export { invalidateSessionPricing } from "./session-pricing.js";

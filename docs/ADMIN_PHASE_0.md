@@ -500,17 +500,25 @@ incident.acknowledge
 audit.read
 
 pricing.read
-pricing.publish.request         # R3 — publishing a tariff is a money change
+pricing.publish                 # R2 — see §14.2. Was R3 in this plan; the
+                                # deployment has one Admin, so a two-person rule
+                                # over the prices would never complete.
 
 kiosk.maintenance_mode          # only if a mechanism is built for it
 
-change.propose
-change.approve.technical
-change.approve.admin
+change.read                     # R0 — the change log, for Admin and support
 
 operator.manage                 # Admin manages Operator access only
 authenticator.manage            # enrollment/revocation; step-up always required
 ```
+
+**As built, `authenticator.manage` is two capabilities**, split in Phase 4B:
+`authenticator.manage.self` (every role, own keys) and
+`authenticator.manage.operator` (Admin and Technical Admin, an Operator's keys
+and enrolment tickets). The split is what lets a Technical Admin get an Operator
+onto their first key at 03:00 without also being able to decide whether that
+Operator may work — `operator.manage` stays Admin-only. `audit.read` is likewise
+two: `audit.read` and `audit.read.self`.
 
 **Deliberately absent by owner decision: any kiosk-credential capability.**
 Issuing, rotating, or revoking a `KioskCredential` is not reachable from the
@@ -525,30 +533,42 @@ content.
 
 ### Role bundles
 
-|                                                              | Operator      | Admin           | Technical Admin              |
-| ------------------------------------------------------------ | ------------- | --------------- | ---------------------------- |
-| `dashboard.read`, `kiosk.read`, `session.read`, `print.read` | ✅            | ✅              | ✅                           |
-| `document.metadata.read`                                     | ✅            | ✅              | ✅                           |
-| `document.retention.read`                                    | ✅            | ✅              | ✅                           |
-| `payment.read`                                               | summary only  | ✅              | ✅                           |
-| `error.read`                                                 | operator view | admin view      | technical view               |
-| `incident.acknowledge`                                       | ✅            | ✅              | ✅                           |
-| `audit.read`                                                 | own actions   | ✅              | ✅                           |
-| `print.recovery.resolve`                                     | ✅ own kiosks | ✅              | ✅                           |
-| `refund.authorize`                                           | ❌            | ✅              | ✅                           |
-| `document.retention.retry`                                   | ❌            | ✅              | ✅                           |
-| `print.diagnostics.read`                                     | ❌            | limited         | ✅                           |
-| `operator.manage`                                            | ❌            | ✅              | ❌                           |
-| `authenticator.manage`                                       | own only      | Operators + own | own only                     |
-| `change.propose`                                             | ❌            | ❌              | ✅                           |
-| `change.approve.technical`                                   | ❌            | ❌              | ✅ (different identity)      |
-| `change.approve.admin`                                       | ❌            | ✅              | ❌                           |
-| kiosk credentials                                            | ❌            | ❌              | ❌ (not in dashboard at all) |
-| document contents                                            | ❌            | ❌              | ❌                           |
+|                                                              | Operator      | Admin      | Technical Admin              |
+| ------------------------------------------------------------ | ------------- | ---------- | ---------------------------- |
+| `dashboard.read`, `kiosk.read`, `session.read`, `print.read` | ✅            | ✅         | ✅                           |
+| `document.metadata.read`                                     | ✅            | ✅         | ✅                           |
+| `document.retention.read`                                    | ✅            | ✅         | ✅                           |
+| `payment.read`                                               | summary only  | ✅         | ✅                           |
+| `error.read`                                                 | operator view | admin view | technical view               |
+| `incident.acknowledge`                                       | ✅            | ✅         | ✅                           |
+| `audit.read`                                                 | own actions   | ✅         | ✅                           |
+| `print.recovery.resolve`                                     | ✅ own kiosks | ✅         | ✅                           |
+| `refund.authorize`                                           | ❌            | ✅         | ✅                           |
+| `document.retention.retry`                                   | ❌            | ✅         | ✅                           |
+| `print.diagnostics.read`                                     | ❌            | limited    | ✅                           |
+| `operator.manage`                                            | ❌            | ✅         | ❌                           |
+| `authenticator.manage.self`                                  | ✅            | ✅         | ✅                           |
+| `authenticator.manage.operator`                              | ❌            | ✅         | ✅                           |
+| `change.read`                                                | ❌            | ✅         | ✅                           |
+| `pricing.publish`                                            | ❌            | ✅         | ❌                           |
+| kiosk credentials                                            | ❌            | ❌         | ❌ (not in dashboard at all) |
+| document contents                                            | ❌            | ❌         | ❌                           |
 
 Note the deliberate asymmetry: **Technical Admin cannot manage Operator
-accounts, and Admin cannot propose technical changes.** Neither role is a
-superset of the other, which is what makes a single compromise survivable.
+accounts or change the prices, and Admin cannot read deep diagnostics.** Neither
+role is a superset of the other, which is what makes a single compromise
+survivable.
+
+**Amended in Phase 5, by owner decision.** This plan made Technical Admin the
+proposer and co-approver of production change. As built, Technical Admin is a
+**support role**: diagnostics, troubleshooting and recovery, for the problems an
+Admin cannot resolve from the operational surface. It is not a second operator
+and not a co-approver, and nothing routine requires both roles. Running the
+business — money, people, kiosks, pricing — is an Admin's job, and an Admin does
+not need anybody else's agreement to do it. Four capabilities granted in Phases 4
+and 4B sit oddly with that model and were left unchanged rather than silently
+narrowed; they are recorded as an open decision in
+`docs/ADMIN_PHASE_5_STATUS.md` §4.1.
 
 ### 14.1 `print.recovery.resolve` — constrained, and separated from money
 
@@ -612,16 +632,31 @@ limit.
 
 **R2 — sensitive, reversible or compensable.** `print.recovery.resolve`
 (constrained; Operator and above — §14.1), `refund.authorize` (Admin and above;
-moves money), `authenticator.manage`. Confirmation + mandatory reason + step-up
-WebAuthn + current-state revalidation + idempotency key + audit with
-before/after. Operator-held R2 is additionally kiosk-scoped.
+moves money), `authenticator.manage`, and **`pricing.publish`** (see below).
+Confirmation + mandatory reason + step-up WebAuthn + current-state revalidation +
+idempotency key + audit with before/after. Operator-held R2 is additionally
+kiosk-scoped.
 
-**R3 — serious production change.** Requires proposer + a _different_ Technical
-Admin + an Admin. Allow-listed operations only:
+**R3 — serious production change.** Requires more than one account: "no single
+account may do this alone."
 
-- publish a new `PricingRuleSet` version (money);
-- change a kiosk's `status` or `capabilities`;
-- adjust retention grace configuration.
+**Amended in Phase 5, by owner decision: nothing is classified R3.** This
+deployment has one Admin, so a rule requiring a second one is not a control — it
+is a workflow that never completes, and an Admin blocked on a colleague who does
+not exist will find a way around the control plane rather than wait. Publishing a
+tariff, the one act this plan named, is therefore **R2**.
+
+The class is kept rather than deleted, and `authorizeAdmin` still refuses every
+R3 capability outright, so classifying something R3 in a future deployment fails
+the endpoint closed instead of quietly running as a single-account action.
+
+What replaces prevention-by-second-person for `pricing.publish` is evidence that
+the acting connection cannot forge or remove — a confirmation digest that must
+match what was previewed, and an append-only publication record the database
+refuses to publish a tariff without. See `docs/ADMIN_PHASE_5_STATUS.md` §4.1 for
+the full reasoning and the accepted residual risk. The other two operations this
+section listed are unbuilt: a kiosk's `status` is R2 (`kiosk.maintenance_mode`)
+and retention grace configuration is not editable from the dashboard at all.
 
 **R4 — impossible from the dashboard, permanently.** Arbitrary SQL; shell;
 arbitrary code; reading document bytes, previews, or `displayName`; retrieving
@@ -650,7 +685,11 @@ Documents           processing state, retention health, dead letters,
                     overdue-past-retention alarm      (never contents)
 Errors              grouped by code × subsystem × kiosk, role-aware detail
 Audit               append-only, filterable
-Changes             R3 requests, approvals, execution history   (phase 5)
+Changes             the tariff in force, a priced-out preview, and the
+                    append-only log of what was published   (phase 5)
+People              accounts, status, kiosk assignment, enrolment tickets
+                                                            (phase 4b)
+Security keys       one's own authenticators                 (phase 2)
 ```
 
 No Analytics section initially. Session volume over time is a real question,
@@ -703,24 +742,24 @@ Phase 2 to draw a sparkline nobody asked for would violate §3 of the brief.
 
 ## 19. Threat model
 
-| #   | Threat                                                 | Existing control                                 | Gap                                                                                                                                           |
-| --- | ------------------------------------------------------ | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| T1  | Attacker gets an Operator account                      | —                                                | No human auth exists yet                                                                                                                      |
-| T2  | Attacker gets an Admin account                         | —                                                | Must not reach documents (§12)                                                                                                                |
-| T3  | Attacker gets one Technical Admin account              | —                                                | Must not execute R3 alone                                                                                                                     |
-| T4  | Admin reads customer documents via credential issuance | —                                                | **Closed by decision**: no kiosk-credential capability exists in the dashboard at any level (§14)                                             |
-| T5  | Admin rewrites audit history                           | none                                             | `audit_events` lacks an update/delete trigger                                                                                                 |
-| T6  | Dashboard queries degrade printing                     | good indexes                                     | Needs bounded queries, timeouts, read-only role                                                                                               |
-| T7  | Session fixation / CSRF on admin UI                    | cookie plugin present                            | No human session or CSRF token yet                                                                                                            |
-| T8  | IDOR across kiosks/sessions                            | kiosk-scoped queries today                       | Admin queries are cross-tenant by design; needs explicit object-level checks + non-enumerable IDs. Operator R2 is kiosk-scoped (§14.1)        |
-| T9  | Forced session reopen / free print                     | domain state machine + DB triggers               | Already impossible; keep it that way                                                                                                          |
-| T10 | Retention disabled to preserve documents               | policy is pure and shared                        | Retention config must be R3, never editable inline                                                                                            |
-| T11 | Stolen admin session replayed                          | —                                                | Short TTL + server-side revocation + step-up WebAuthn on every R2/R3, so a stolen cookie alone cannot act                                     |
-| T12 | Compromised admin _backend_                            | split S3 creds, DB triggers, processor isolation | Triggers and IAM still bound the damage; secrets remain the weak point until a secret manager exists                                          |
-| T13 | Compromised Operator manufactures refund obligations   | —                                                | **Closed by decision**: `print.recovery.resolve` records observations only; `refund.authorize` is Admin+ (§14.1)                              |
-| T14 | Operator forces arbitrary jobs into recovery           | —                                                | Server-side eligibility revalidation inside the transaction; the operation resolves jobs already eligible, it cannot create the state (§14.1) |
-| T15 | Phishing of an admin authenticator                     | —                                                | WebAuthn origin binding makes credential phishing ineffective; this is the main reason the owner chose it over a shared-secret factor         |
-| T16 | Loss of all authenticators for a privileged account    | —                                                | Multiple mandatory enrollments + documented sealed break-glass that can only enroll, never act (§13.1)                                        |
+| #   | Threat                                                 | Existing control                                 | Gap                                                                                                                                            |
+| --- | ------------------------------------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| T1  | Attacker gets an Operator account                      | —                                                | No human auth exists yet                                                                                                                       |
+| T2  | Attacker gets an Admin account                         | —                                                | Must not reach documents (§12). **Phase 5 accepts** that it can change the prices — there is one Admin — but not without an unforgeable record |
+| T3  | Attacker gets one Technical Admin account              | —                                                | **Narrowed in Phase 5**: Technical Admin is a support role. It cannot change the prices, suspend an account, or move a kiosk assignment        |
+| T4  | Admin reads customer documents via credential issuance | —                                                | **Closed by decision**: no kiosk-credential capability exists in the dashboard at any level (§14)                                              |
+| T5  | Admin rewrites audit history                           | none                                             | `audit_events` lacks an update/delete trigger                                                                                                  |
+| T6  | Dashboard queries degrade printing                     | good indexes                                     | Needs bounded queries, timeouts, read-only role                                                                                                |
+| T7  | Session fixation / CSRF on admin UI                    | cookie plugin present                            | No human session or CSRF token yet                                                                                                             |
+| T8  | IDOR across kiosks/sessions                            | kiosk-scoped queries today                       | Admin queries are cross-tenant by design; needs explicit object-level checks + non-enumerable IDs. Operator R2 is kiosk-scoped (§14.1)         |
+| T9  | Forced session reopen / free print                     | domain state machine + DB triggers               | Already impossible; keep it that way                                                                                                           |
+| T10 | Retention disabled to preserve documents               | policy is pure and shared                        | Not editable from the dashboard at all — the stronger answer than the R3 this plan proposed                                                    |
+| T11 | Stolen admin session replayed                          | —                                                | Short TTL + server-side revocation + step-up WebAuthn on every R2/R3, so a stolen cookie alone cannot act                                      |
+| T12 | Compromised admin _backend_                            | split S3 creds, DB triggers, processor isolation | Triggers and IAM still bound the damage; secrets remain the weak point until a secret manager exists                                           |
+| T13 | Compromised Operator manufactures refund obligations   | —                                                | **Closed by decision**: `print.recovery.resolve` records observations only; `refund.authorize` is Admin+ (§14.1)                               |
+| T14 | Operator forces arbitrary jobs into recovery           | —                                                | Server-side eligibility revalidation inside the transaction; the operation resolves jobs already eligible, it cannot create the state (§14.1)  |
+| T15 | Phishing of an admin authenticator                     | —                                                | WebAuthn origin binding makes credential phishing ineffective; this is the main reason the owner chose it over a shared-secret factor          |
+| T16 | Loss of all authenticators for a privileged account    | —                                                | Multiple mandatory enrollments + documented sealed break-glass that can only enroll, never act (§13.1)                                         |
 
 ---
 
@@ -784,6 +823,12 @@ Only these. Each is justified by an absence, not a preference.
    correctly forbid. Kept distinct from any refund obligation, per §14.1.
 7. **`change_request` + `change_approval`** (Phase 5 only) — R3 workflow with
    an immutable request digest so amending a request invalidates approvals.
+   **Built as one table, `admin_change_executions`.** With no second approver
+   there is nothing to propose _to_, so a change is written by the request that
+   performs it and a row is a past tense. What survives from the plan is the
+   digest, and it does more than invalidate: a deferred constraint trigger
+   recomputes it from the tariff rows actually written and refuses the COMMIT
+   unless a record accounts for exactly those numbers.
 8. **Writing `Kiosk.lastSeenAt`** in the existing once-per-minute throttled
    heartbeat in `sessions/auth.ts`. Not a new column — the column and its index
    already exist and are simply never populated. Zero additional write cost.
@@ -805,7 +850,7 @@ derivatives, cleanup runs, pricing, or any trigger other than the audit one.
 | 2     | Read-only observability: overview, kiosks, sessions + timeline, printing, payments, documents/retention, error centre. Bounded queries, read-only DB role.                                                                                                                                                                            | No mutations exist                                                                                   |
 | 3     | Operator tools: R1 incident acknowledge; constrained R2 `print.recovery.resolve` with kiosk scoping, eligibility revalidation, step-up.                                                                                                                                                                                               | Operator cannot move money, cannot act outside assigned kiosks, cannot force a job into recovery     |
 | 4     | Admin tools: `refund.authorize` (money), `document.retention.retry`, Operator and authenticator management.                                                                                                                                                                                                                           | Reason + before/after audited; refund path separate from Operator observation path                   |
-| 5     | Technical Admin + R3 approval workflow: propose → validate → dry run → second Technical Admin → Admin → revalidate → execute → verify.                                                                                                                                                                                                | Self-approval and amendment tests pass                                                               |
+| 5     | Publishing a tariff: preview → confirm with a step-up assertion → execute atomically → append-only record. Single Admin, by owner decision — see §15 and `docs/ADMIN_PHASE_5_STATUS.md` §4.1.                                                                                                                                         | No tariff can commit that no record accounts for, or that differs from what was previewed            |
 | 6     | Hardening: authz matrix review per endpoint, IDOR, CSRF, XSS, secret leakage, query performance, audit integrity.                                                                                                                                                                                                                     | Security test suite green                                                                            |
 
 ---
@@ -836,6 +881,25 @@ with different authorization. `print.recovery.resolve` is Operator+, kiosk-
 scoped, eligibility-revalidated, and cannot move money; `refund.authorize` is
 Admin+. This is a stronger design than the single capability I proposed —
 it closes T13. Detail in §14.1.
+
+**23.4 Role model — Admin is the operational authority; Technical Admin is
+support.** _Added in Phase 5, and it changed that phase substantially._ This
+plan made Technical Admin the proposer and co-approver of production change. The
+owner's decision: an Admin performs and completes normal business workflows
+without anybody else's agreement, and Technical Admin exists for the technical
+problems an Admin cannot resolve — diagnostics, troubleshooting, recovery. It is
+not a second operator and not a co-approver, and multi-person approval is only
+for a clear, exceptional security reason. Neither role inherits the other's
+powers; the separation in §14 stands, but it is a boundary rather than a
+workflow.
+
+**23.5 One Admin — no second-approver workflows.** _Added in Phase 5._ There is
+one Admin account in this deployment. A rule requiring a second is not a control
+but a stoppage, so nothing is classified R3 (§15) and the tariff is published by
+a single Admin, atomically, on a fresh WebAuthn assertion. The protection moved
+from prevention to evidence, and the evidence is enforced by the database rather
+than by the application: see `docs/ADMIN_PHASE_5_STATUS.md` §4.1 for the
+reasoning and the accepted residual risk.
 
 ---
 

@@ -67,6 +67,16 @@ export interface AdminReadDatabase {
   adminSession: ReadOnly<PrismaClient["adminSession"]>;
   adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
   adminEnrollmentTicket: ReadOnly<PrismaClient["adminEnrollmentTicket"]>;
+  /**
+   * Phase 5. Reading the change log is a read like any other, so it runs here
+   * rather than on the role that publishes. Giving the connection that changes
+   * the prices a reason to be able to list them would have widened it for a
+   * screen.
+   */
+  adminChangeExecution: ReadOnly<PrismaClient["adminChangeExecution"]>;
+  /** The tariff in force, to compare a change against and to price it out. */
+  pricingRuleSet: ReadOnly<PrismaClient["pricingRuleSet"]>;
+  pricingRule: ReadOnly<PrismaClient["pricingRule"]>;
 }
 
 /**

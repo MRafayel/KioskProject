@@ -10,10 +10,12 @@ import type { Environment } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE, healthResponseSchema } from "@printing-kiosk/contracts";
 import {
   assertAdminPeopleClientIsBounded,
+  assertAdminPricingClientIsBounded,
   assertAdminReadClientIsReadOnly,
   assertAdminRefundClientIsAppendOnly,
   assertAdminWriteClientIsAppendOnly,
   createAdminPeopleClient,
+  createAdminPricingClient,
   createAdminReadClient,
   createAdminRefundClient,
   createAdminWriteClient,
@@ -23,6 +25,8 @@ import {
 import type { RetentionPolicy } from "@printing-kiosk/domain";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { registerAdminChangeRoutes } from "./modules/admin/change-routes.js";
+import { AdminChangeService } from "./modules/admin/changes.js";
 import { AdminObservabilityService } from "./modules/admin/observability.js";
 import { registerAdminObservabilityRoutes } from "./modules/admin/observability-routes.js";
 import { AdminOperationsService } from "./modules/admin/operations.js";
@@ -30,6 +34,7 @@ import { registerAdminOperationsRoutes } from "./modules/admin/operations-routes
 import { asAdminPeopleDatabase } from "./modules/admin/people-database.js";
 import { registerAdminPeopleRoutes } from "./modules/admin/people-routes.js";
 import { AdminPeopleService } from "./modules/admin/people.js";
+import { asAdminPricingDatabase } from "./modules/admin/pricing-database.js";
 import { asAdminRefundDatabase } from "./modules/admin/refund-database.js";
 import { registerAdminRefundRoutes } from "./modules/admin/refund-routes.js";
 import { AdminRefundService } from "./modules/admin/refunds.js";
@@ -102,6 +107,13 @@ export interface BuildAppOptions {
    * is how a deployment turns the capability off without code changes.
    */
   adminPeopleDatabase?: PrismaClient;
+  /**
+   * The pool an Admin proposes a change through, and the pool a tariff is
+   * published through. Two, because the connection that publishes must not be
+   * able to write the proposal it publishes. Absent means the panel cannot
+   * change prices at all.
+   */
+  adminPricingDatabase?: PrismaClient;
   clock?: Clock;
   random?: RandomSource;
   objectStore?: ObjectStore;
@@ -722,6 +734,41 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     app.log.warn(
       "ADMIN_PEOPLE_DATABASE_URL is not set: managing people is unavailable. " +
         "Provision the role with `pnpm db:admin-people-writer provision`."
+    );
+  }
+
+  // Changing the prices needs its own connection. Without it the panel cannot —
+  // safe and deliberate, matching the refund and people routes.
+  const pricingDatabaseUrl = options.environment.ADMIN_PRICING_DATABASE_URL;
+
+  if (pricingDatabaseUrl || options.adminPricingDatabase) {
+    const adminPricingDatabase =
+      options.adminPricingDatabase ?? createAdminPricingClient(pricingDatabaseUrl as string);
+    const ownsAdminPricingDatabase = !options.adminPricingDatabase;
+
+    if (pricingDatabaseUrl) await assertAdminPricingClientIsBounded(adminPricingDatabase);
+
+    if (ownsAdminPricingDatabase) {
+      app.addHook("onClose", async () => {
+        await adminPricingDatabase.$disconnect();
+      });
+    }
+
+    registerAdminChangeRoutes(app, {
+      admin: adminService,
+      clock,
+      stepUpTtlMilliseconds,
+      changes: new AdminChangeService({
+        pricing: asAdminPricingDatabase(adminPricingDatabase),
+        read: asAdminReadDatabase(adminReadDatabase),
+        clock,
+        random
+      })
+    });
+  } else {
+    app.log.warn(
+      "ADMIN_PRICING_DATABASE_URL is not set: changing prices is unavailable. " +
+        "Provision the role with `pnpm db:admin-pricing-writer provision`."
     );
   }
 

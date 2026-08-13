@@ -98,7 +98,22 @@ const ALLOWED_METADATA_KEYS = new Set([
   "ticketId",
   "ticketExpiresAt",
   "revokedSessions",
-  "usableAuthenticators"
+  "usableAuthenticators",
+  // Publishing a tariff. The whole tariff is written out — the amounts, not just
+  // a digest — because an audit row about the prices that needs a join to a
+  // table somebody has since replaced is one nobody can read during the argument
+  // it was kept for.
+  "changeId",
+  "changeKind",
+  "payloadDigest",
+  "baselineDigest",
+  "pricingVersion",
+  "replacedPricingVersion",
+  "unitAmountMinor",
+  "serviceFeeMinor",
+  "minimumAmountMinor",
+  "taxBasisPoints",
+  "duplexAdjustmentBasisPoints"
 ]);
 
 export type AdminAuditMetadataValue = string | number | boolean | null;

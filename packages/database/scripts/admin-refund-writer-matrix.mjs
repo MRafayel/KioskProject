@@ -143,9 +143,11 @@ export const FORBIDDEN_TABLES = Object.freeze({
   uploaded_files: "Customer documents.",
   file_derivatives: "Storage addresses of customer documents.",
   file_pages: "Page geometry of customer documents.",
-  pricing_rule_sets: "A published tariff is an R3 change requiring three people.",
-  pricing_rules: "A published tariff is an R3 change requiring three people.",
+  pricing_rule_sets: "Publishing a tariff has its own role: printing_kiosk_admin_pricing_writer.",
+  pricing_rules: "Publishing a tariff has its own role: printing_kiosk_admin_pricing_writer.",
   price_quotes: "What a customer was quoted is evidence of what they agreed to pay.",
+  admin_change_executions:
+    "Changing the tariff belongs to the pricing role. The connection that can pay a customer must not also be able to change what customers are charged.",
   print_setting_revisions: "What was ordered.",
   outbox_events: "The event publication log.",
   session_events: "The session timeline.",

@@ -109,25 +109,24 @@ describe("capability denial", () => {
   });
 });
 
-describe("R3 is never authorised by a single request", () => {
-  it("refuses every R3 capability even for the role that holds it", async () => {
-    for (const capability of [
-      "change.propose",
-      "change.approve.technical",
-      "pricing.publish.request"
-    ] as const) {
-      const error = await attempt("TECHNICAL_ADMIN", capability);
-      expect(error?.statusCode, capability).toBe(403);
-      expect(error?.code, capability).toBe("ADMIN_APPROVAL_REQUIRED");
-    }
-    const adminApproval = await attempt("ADMIN", "change.approve.admin");
-    expect(adminApproval?.code).toBe("ADMIN_APPROVAL_REQUIRED");
+describe("publishing a tariff goes through the ordinary gate", () => {
+  // Phase 5 as it ended up: publishing is R2, so it needs no special door. What
+  // makes it different from a refund is not the gate, it is what the database
+  // demands afterwards.
+  it("lets an Admin publish, with a fresh assertion", async () => {
+    expect(await attempt("ADMIN", "pricing.publish")).toBeNull();
   });
 
-  it("refuses R3 for a role that does not hold it, without leaking that it is R3", async () => {
-    // An Operator must be told they lack the capability, not that the change
-    // needs approvals — the second answer confirms the capability exists.
-    expect((await attempt("OPERATOR", "change.propose"))?.code).toBe("ADMIN_FORBIDDEN");
+  it("refuses publishing without a fresh assertion", async () => {
+    expect((await attempt("ADMIN", "pricing.publish", null))?.code).toBe("ADMIN_STEP_UP_REQUIRED");
+  });
+
+  // The support role reads the change log and cannot cause an entry in it.
+  it("refuses the support role and the Operator, and lets both read the log", async () => {
+    expect((await attempt("TECHNICAL_ADMIN", "pricing.publish"))?.code).toBe("ADMIN_FORBIDDEN");
+    expect((await attempt("OPERATOR", "pricing.publish"))?.code).toBe("ADMIN_FORBIDDEN");
+    expect(await attempt("TECHNICAL_ADMIN", "change.read")).toBeNull();
+    expect((await attempt("OPERATOR", "change.read"))?.code).toBe("ADMIN_FORBIDDEN");
   });
 });
 
