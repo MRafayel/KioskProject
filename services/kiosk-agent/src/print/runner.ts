@@ -59,6 +59,7 @@ export class PrintCommandRunner {
   private stopped = true;
   private running = false;
   private nextSweepAt = 0;
+  private active = 0;
 
   public constructor(private readonly options: PrintCommandRunnerOptions) {
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -168,10 +169,21 @@ export class PrintCommandRunner {
     return claimAgentCommandsResponseSchema.parse(await response.json()).commands;
   }
 
+  /**
+   * How many operations this agent is holding. It goes on the heartbeat so a
+   * kiosk that is quiet because it is printing can be told apart from one that
+   * is quiet because it is stuck.
+   */
+  public get activeOperations(): number {
+    return this.active;
+  }
+
   private async execute(command: AgentPrintCommand): Promise<void> {
+    this.active += 1;
     try {
       await this.runOperation(command);
     } finally {
+      this.active -= 1;
       // A backstop for every path that returns before the device is reached —
       // a redelivery the device already answered, a refused manifest, a throw.
       // The submission path discards as soon as the adapter is done rather than

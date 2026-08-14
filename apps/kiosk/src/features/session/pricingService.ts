@@ -12,7 +12,12 @@ import {
 } from "@printing-kiosk/contracts";
 
 import { clearStoredKeys, rotateStableKey, stableKey } from "./idempotencyKeys.js";
-import { selectedPageRanges, type PrintSettings, type ReadyPrototypeFile } from "./model.js";
+import {
+  fileSelection,
+  selectedPageRanges,
+  type PrintSettings,
+  type ReadyPrototypeFile
+} from "./model.js";
 
 const SETTINGS_KEY_PREFIX = "printing-kiosk.pending-settings.";
 const QUOTE_KEY_PREFIX = "printing-kiosk.pending-quote.";
@@ -32,27 +37,35 @@ export class PricingRequestError extends Error {
  * The kiosk expresses intent; the server decides what that intent costs.
  */
 export function buildSettingsBody(
-  file: ReadyPrototypeFile,
+  files: readonly ReadyPrototypeFile[],
   settings: PrintSettings
 ): UpdatePrintSettingsBody {
-  const ranges = selectedPageRanges(settings, file.pageCount);
-  // Empty page-range text means "the whole document" to the control plane, so
-  // a selection the customer emptied must fail here rather than quietly become
-  // a price — and a print job — for every page they took out.
-  if (ranges.length === 0) throw new PricingRequestError("NO_SELECTED_PAGES", 422);
+  // The control plane refuses a document set it was not told about in full —
+  // `fileOrder` must name every validated document — so the caller passes the
+  // whole set and the print order is the order they were uploaded in.
+  if (files.length === 0) throw new PricingRequestError("NO_READY_DOCUMENTS", 409);
+
+  const ordered = [...files].sort((left, right) => left.ordinal - right.ordinal);
+  const fileSelections = ordered.map((file) => {
+    const selection = fileSelection(settings, file.id);
+    const ranges = selectedPageRanges(selection, file.pageCount);
+    // Empty page-range text means "the whole document" to the control plane, so
+    // a selection the customer emptied must fail here rather than quietly become
+    // a price — and a print job — for every page they took out.
+    if (ranges.length === 0) throw new PricingRequestError("NO_SELECTED_PAGES", 422);
+    return {
+      fileId: file.id,
+      pageRanges: formatPageRanges(ranges),
+      copies: selection.copies,
+      duplex: selection.duplex ? ("LONG_EDGE" as const) : ("SIMPLEX" as const),
+      orientation: selection.orientation
+    };
+  });
 
   return {
-    fileOrder: [file.id],
-    fileSelections: [
-      {
-        fileId: file.id,
-        pageRanges: formatPageRanges(ranges)
-      }
-    ],
-    copies: settings.copies,
-    duplex: settings.duplex ? "LONG_EDGE" : "SIMPLEX",
+    fileOrder: ordered.map((file) => file.id),
+    fileSelections,
     paperSize: "A4",
-    orientation: settings.orientation,
     scaling: "FIT",
     collate: true
   };
@@ -177,13 +190,16 @@ export function clearStoredPricingKeys(sessionId: string): void {
 function settingsFingerprint(body: UpdatePrintSettingsBody): string {
   return [
     body.fileOrder.join(">"),
+    // Every per-document choice is in the key, so changing one document's
+    // copies asks for a new revision rather than replaying the previous one.
     body.fileSelections
-      .map((selection) => `${selection.fileId}=${selection.pageRanges ?? ""}`)
+      .map(
+        (selection) =>
+          `${selection.fileId}=${selection.pageRanges ?? ""}:${selection.copies}:` +
+          `${selection.duplex}:${selection.orientation}`
+      )
       .join("|"),
-    body.copies,
-    body.duplex,
     body.paperSize,
-    body.orientation,
     body.scaling,
     body.collate ? "collate" : "no-collate"
   ].join("\n");

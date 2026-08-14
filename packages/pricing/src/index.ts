@@ -49,11 +49,23 @@ export interface PricingRuleSet {
   rules: readonly PricingRule[];
 }
 
+/**
+ * One document's contribution to the job.
+ *
+ * Sides are priced at the job's single rule, but the duplex adjustment is a
+ * property of how a document is printed, so a job that is duplex for one
+ * document and simplex for another cannot be adjusted as a whole.
+ */
+export interface PricingDocumentUsage {
+  duplex: boolean;
+  printedSides: number;
+}
+
 export interface PricingUsage {
   service: string;
   paperSize: string;
   colorMode: string;
-  duplex: boolean;
+  documents: readonly PricingDocumentUsage[];
   selectedPages: number;
   printedSides: number;
   physicalSheets: number;
@@ -162,9 +174,22 @@ export function calculateQuote(input: {
   assertRule(rule);
 
   const printAmountMinor = boundedProduct(input.usage.printedSides, rule.unitAmountMinor);
-  const duplexAdjustmentMinor = input.usage.duplex
-    ? applyBasisPoints(printAmountMinor, rule.duplexAdjustmentBasisPoints, input.ruleSet.rounding)
-    : 0;
+  // The adjustment is worked out per document and summed, so a job that is
+  // duplex for one document and simplex for another is adjusted only on the
+  // sides that were actually printed double-sided. Each document is rounded on
+  // its own, which is the same arithmetic a single-document job has always had.
+  const duplexAdjustmentMinor = input.usage.documents.reduce((total, document) => {
+    if (!document.duplex) return total;
+    const documentAmountMinor = boundedProduct(document.printedSides, rule.unitAmountMinor);
+    return (
+      total +
+      applyBasisPoints(
+        documentAmountMinor,
+        rule.duplexAdjustmentBasisPoints,
+        input.ruleSet.rounding
+      )
+    );
+  }, 0);
 
   const adjustedMinor = printAmountMinor + duplexAdjustmentMinor + rule.serviceFeeMinor;
   // A negative promotion or duplex discount must never produce a refundable
@@ -262,6 +287,26 @@ function assertUsage(usage: PricingUsage): void {
     throw new PricingError("PRICING_USAGE_INVALID", {
       printedSides: usage.printedSides,
       physicalSheets: usage.physicalSheets
+    });
+  }
+
+  // The per-document breakdown decides the duplex adjustment, so it has to
+  // account for exactly the sides the job is charged for. A breakdown that
+  // disagrees with the total would price sides nobody is paying for.
+  if (usage.documents.length === 0) {
+    throw new PricingError("PRICING_USAGE_INVALID", { documents: usage.documents.length });
+  }
+  let documentSides = 0;
+  for (const document of usage.documents) {
+    if (!Number.isSafeInteger(document.printedSides) || document.printedSides < 1) {
+      throw new PricingError("PRICING_USAGE_INVALID", { printedSides: document.printedSides });
+    }
+    documentSides += document.printedSides;
+  }
+  if (documentSides !== usage.printedSides) {
+    throw new PricingError("PRICING_USAGE_INVALID", {
+      printedSides: usage.printedSides,
+      documentSides
     });
   }
 }

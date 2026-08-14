@@ -295,10 +295,7 @@ export const adminSessionsResponseSchema = z.object({
 /** The print configuration a session was priced and charged for. */
 export const adminSessionSettingsSchema = z.object({
   revision: z.number().int().positive(),
-  copies: z.number().int().positive(),
-  duplex: operationalState,
   paperSize: operationalState,
-  orientation: operationalState,
   scaling: operationalState,
   collate: z.boolean(),
   colorMode: operationalState,

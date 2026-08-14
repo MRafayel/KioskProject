@@ -33,6 +33,7 @@
     "db:verify-phase7-upgrade": "pnpm --filter @printing-kiosk/database verify:phase7-upgrade",
     "db:verify-phase8-upgrade": "pnpm --filter @printing-kiosk/database verify:phase8-upgrade",
     "db:verify-phase9-upgrade": "pnpm --filter @printing-kiosk/database verify:phase9-upgrade",
+    "db:verify-phase10-upgrade": "pnpm --filter @printing-kiosk/database verify:phase10-upgrade",
     "db:admin": "pnpm --filter @printing-kiosk/database admin",
     "db:admin-reader": "pnpm --filter @printing-kiosk/database admin-reader",
     "db:admin-writer": "pnpm --filter @printing-kiosk/database admin-writer",

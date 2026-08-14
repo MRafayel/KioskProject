@@ -48,7 +48,11 @@ const environment = loadEnvironment({
   ...process.env,
   NODE_ENV: "test",
   DEV_KIOSK_ID: integrationKioskId,
-  DEV_KIOSK_API_KEY: integrationKioskApiKey
+  DEV_KIOSK_API_KEY: integrationKioskApiKey,
+  // What is under test here is that the per-session document limit is enforced
+  // at all, not what a deployment happens to set it to. Pinning it to one keeps
+  // the assertion about the refusal rather than about the default.
+  MAX_FILES_PER_SESSION: "1"
 });
 assertSafeIntegrationEnvironment(environment);
 const database = createDatabaseClient(environment.DATABASE_URL);

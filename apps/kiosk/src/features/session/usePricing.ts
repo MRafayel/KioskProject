@@ -16,7 +16,12 @@ const EXPIRY_CHECK_INTERVAL_MS = 1_000;
 interface PricingInput {
   sessionId: string | null;
   sessionVersion: number;
-  file: ReadyPrototypeFile | null;
+  /**
+   * Every validated document in the session. The control plane prices the set
+   * as one job and refuses a partial one, so this is all of them rather than
+   * whichever is on screen.
+   */
+  files: readonly ReadyPrototypeFile[];
   settings: PrintSettings;
   pricing: PricingState;
   dispatch: Dispatch<PrototypeAction>;
@@ -44,8 +49,15 @@ export function usePricing(input: PricingInput): { retry: () => void } {
   const savedRef = useRef<SavedRevision | null>(null);
   const quoteAttemptRef = useRef(0);
   const sessionId = input.sessionId;
-  const file = input.file;
-  const fileKey = file ? `${file.id}:${file.processingRevision}:${file.pageCount}` : null;
+  const files = input.files;
+  // The whole document set, in print order, so adding, removing or reprocessing
+  // any one of them asks for a new price.
+  const fileKey = files.length
+    ? [...files]
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .map((file) => `${file.id}:${file.processingRevision}:${file.pageCount}`)
+        .join("|")
+    : null;
   const settingsKey = JSON.stringify(input.settings);
   const status = input.pricing.status;
   const debounce = input.debounceMilliseconds ?? DEFAULT_DEBOUNCE_MS;
@@ -57,13 +69,13 @@ export function usePricing(input: PricingInput): { retry: () => void } {
   const latest = useRef({
     settings: input.settings,
     sessionVersion: input.sessionVersion,
-    file,
+    files,
     requestKey
   });
   latest.current = {
     settings: input.settings,
     sessionVersion: input.sessionVersion,
-    file,
+    files,
     requestKey
   };
 
@@ -82,13 +94,13 @@ export function usePricing(input: PricingInput): { retry: () => void } {
       void (async () => {
         const current = latest.current;
         const runKey = current.requestKey;
-        const pricedFile = current.file;
-        if (!pricedFile) return;
+        const pricedFiles = current.files;
+        if (pricedFiles.length === 0) return;
         const stale = () => !mounted.current || latest.current.requestKey !== runKey;
         dispatch({ type: "PRICING_PENDING" });
 
         try {
-          const body = buildSettingsBody(pricedFile, current.settings);
+          const body = buildSettingsBody(pricedFiles, current.settings);
           const fingerprint = `${fileKey}|${JSON.stringify(body)}`;
           let saved = savedRef.current;
 

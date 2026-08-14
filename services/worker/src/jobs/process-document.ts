@@ -12,7 +12,11 @@ import {
   type UploadedFileRejectionCode
 } from "@printing-kiosk/contracts";
 import { invalidateSessionPricing, Prisma, type PrismaClient } from "@printing-kiosk/database";
-import { canTransitionSession, type SessionState } from "@printing-kiosk/domain";
+import {
+  canTransitionSession,
+  UPLOADABLE_SESSION_STATES,
+  type SessionState
+} from "@printing-kiosk/domain";
 
 import type { DocumentStore } from "../storage/document-store.js";
 import {
@@ -30,11 +34,12 @@ const MAX_DISPATCH_BATCH = 25;
  * already choosing settings. Anything further along has locked a manifest, so a
  * late arrival there is a lost lease rather than a new printable document.
  */
-const ACCEPTS_READY_FILE_STATES: SessionState[] = [
-  "WAITING_FOR_UPLOAD",
-  "FILES_UPLOADED",
-  "CONFIGURING"
-];
+/**
+ * The states a document may be processed and validated in. It is the same list
+ * the upload path admits a document under, so a document can never be accepted
+ * by one and then discarded by the other.
+ */
+const ACCEPTS_READY_FILE_STATES: readonly SessionState[] = UPLOADABLE_SESSION_STATES;
 
 export interface DocumentProcessingLogger {
   info(fields: Record<string, unknown>, message: string): void;
@@ -300,8 +305,14 @@ export class DocumentProcessingCoordinator {
         }
 
         const now = new Date();
+        // A session carries several documents, so one arriving after an earlier
+        // one was validated is ordinary rather than stray: the session is on
+        // FILES_UPLOADED, or CONFIGURING if the customer is already choosing
+        // settings. This is the same set the upload path accepted the document
+        // under, and the same set that lets it finish below; a document whose
+        // session has left it is genuinely orphaned and is deleted.
         if (
-          file.session.state !== "WAITING_FOR_UPLOAD" ||
+          !ACCEPTS_READY_FILE_STATES.includes(file.session.state as SessionState) ||
           now.getTime() >= file.session.idleExpiresAt.getTime() ||
           now.getTime() >= file.session.hardExpiresAt.getTime()
         ) {

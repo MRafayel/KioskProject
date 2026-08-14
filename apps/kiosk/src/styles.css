@@ -650,6 +650,21 @@ p {
   }
 }
 
+/* The upload screen lists every document as it arrives. The cards keep their
+   own spacing, so the list only has to drop the default list styling. */
+.file-card-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.upload-panel__more {
+  margin: 0.2rem 0 0.9rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  text-align: center;
+}
+
 .file-card {
   display: flex;
   min-width: 0;
@@ -921,6 +936,81 @@ p {
 .document-preview__status--error {
   color: #8f1f2b;
   background: #fff2f3;
+}
+
+/* One card per document. Each carries the pages that belong to it, so the
+   boundary between documents has to be visible at a glance on a touchscreen. */
+.document-list {
+  margin-bottom: 1.6rem;
+}
+
+.document-list__hint {
+  margin: 0.35rem 0 1rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.document-card {
+  margin-bottom: 1rem;
+  padding: 1rem 1.1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 1.1rem;
+  background: var(--surface);
+}
+
+.document-card:last-child {
+  margin-bottom: 0;
+}
+
+.document-card__heading {
+  display: flex;
+  margin-bottom: 0.85rem;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.document-card__identity {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.document-card__identity strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-card__identity span {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.document-card__preview {
+  margin-bottom: 0.9rem;
+}
+
+.document-card__selected {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+/* Inside a document card the range controls are already bounded by the card. */
+.document-card .page-range-field {
+  padding: 0.85rem 0.9rem;
+  border-color: #e2e9f1;
+}
+
+.settings-card__scope {
+  margin: 0.3rem 0 1rem;
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 .settings-grid {
@@ -1198,6 +1288,46 @@ p {
 .cleanup-recovery span {
   color: #7e5960;
   line-height: 1.45;
+}
+
+/* Each document on the receipt, so a customer paying for several can see what
+   they are paying for rather than only a combined page count. */
+.receipt-documents {
+  margin: 0 0 0.4rem;
+  padding: 0;
+  list-style: none;
+}
+
+.receipt-documents li {
+  display: flex;
+  padding: 0.5rem 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid #e9eef3;
+  font-size: 0.88rem;
+}
+
+.receipt-documents li > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receipt-documents li > span:last-child {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.page-preview__document {
+  margin: -0.35rem 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+  text-align: center;
 }
 
 .summary-list div,

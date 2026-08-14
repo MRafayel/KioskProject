@@ -3,7 +3,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildSettingsBody, PricingRequestError, saveKioskSettings } from "./pricingService.js";
-import { defaultPrintSettings, type PrintSettings, type ReadyPrototypeFile } from "./model.js";
+import {
+  defaultFileSelection,
+  defaultPrintSettings,
+  type FileSelection,
+  type PrintSettings,
+  type ReadyPrototypeFile
+} from "./model.js";
 
 const sessionId = "01900000-0000-7000-8000-000000000010";
 const fileId = "01900000-0000-7000-8000-000000000011";
@@ -24,10 +30,7 @@ function savedSettings(sessionVersion: number) {
   return {
     settings: {
       revision: 1,
-      copies: 1,
-      duplex: "SIMPLEX",
       paperSize: "A4",
-      orientation: "PORTRAIT",
       scaling: "FIT",
       collate: true,
       colorMode: "MONOCHROME",
@@ -38,7 +41,12 @@ function savedSettings(sessionVersion: number) {
           pageCount: 4,
           pageRanges: [[1, 4]],
           pageRangeText: "1-4",
-          selectedPages: 4
+          selectedPages: 4,
+          copies: 1,
+          duplex: "SIMPLEX",
+          orientation: "PORTRAIT",
+          printedSides: 4,
+          physicalSheets: 4
         }
       ],
       selectedPages: 4,
@@ -118,8 +126,12 @@ afterEach(() => {
 });
 
 describe("buildSettingsBody", () => {
-  const pageRangesFor = (settings: Partial<PrintSettings>) =>
-    buildSettingsBody(file, { ...defaultPrintSettings, ...settings }).fileSelections[0]?.pageRanges;
+  const settingsFor = (selection: Partial<FileSelection>): PrintSettings => ({
+    ...defaultPrintSettings,
+    selections: { [file.id]: { ...defaultFileSelection, ...selection } }
+  });
+  const pageRangesFor = (selection: Partial<FileSelection>) =>
+    buildSettingsBody([file], settingsFor(selection)).fileSelections[0]?.pageRanges;
 
   it("asks for the chosen range", () => {
     expect(pageRangesFor({})).toBe("1-4");
@@ -140,10 +152,43 @@ describe("buildSettingsBody", () => {
     expect(() => pageRangesFor({ excludedPages: [1, 2, 3, 4] })).toThrow(PricingRequestError);
     expect(() => pageRangesFor({ excludedPages: [1, 2, 3, 4] })).toThrow("NO_SELECTED_PAGES");
   });
+
+  it("names every document in upload order, each with its own pages", () => {
+    // The control plane refuses a document set it was not told about in full,
+    // so a second document has to appear in both lists even when the customer
+    // never opened its page controls.
+    const second: ReadyPrototypeFile = { ...file, id: "file-second", ordinal: 1, pageCount: 3 };
+    const body = buildSettingsBody([second, file], {
+      ...defaultPrintSettings,
+      selections: { [file.id]: { ...defaultFileSelection, excludedPages: [2] } }
+    });
+
+    expect(body.fileOrder).toEqual([file.id, second.id]);
+    expect(body.fileSelections).toEqual([
+      {
+        fileId: file.id,
+        pageRanges: "1,3-4",
+        copies: 1,
+        duplex: "SIMPLEX",
+        orientation: "PORTRAIT"
+      },
+      {
+        fileId: second.id,
+        pageRanges: "1-3",
+        copies: 1,
+        duplex: "SIMPLEX",
+        orientation: "PORTRAIT"
+      }
+    ]);
+  });
+
+  it("refuses a job with no validated document at all", () => {
+    expect(() => buildSettingsBody([], defaultPrintSettings)).toThrow("NO_READY_DOCUMENTS");
+  });
 });
 
 describe("saveKioskSettings", () => {
-  const body = () => buildSettingsBody(file, defaultPrintSettings);
+  const body = () => buildSettingsBody([file], defaultPrintSettings);
 
   it("reuses one key so an interrupted save replays instead of writing twice", async () => {
     installApi(() => json(savedSettings(6), 200));

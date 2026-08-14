@@ -444,7 +444,7 @@ export class AdminChangeService {
         service: PRICING_PUBLISH_SERVICE,
         paperSize: PRICING_PUBLISH_PAPER_SIZE,
         colorMode: PRICING_PUBLISH_COLOR_MODE,
-        duplex: basket.duplex,
+        documents: [{ duplex: basket.duplex, printedSides: basket.printedSides }],
         selectedPages: basket.selectedPages,
         printedSides: basket.printedSides,
         physicalSheets: basket.physicalSheets

@@ -43,6 +43,8 @@ import { asAdminReadDatabase } from "./modules/admin/read-database.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { AdminService } from "./modules/admin/service.js";
 import { asAdminWriteDatabase } from "./modules/admin/write-database.js";
+import { registerDeviceRoutes } from "./modules/devices/routes.js";
+import { DeviceRegistryService } from "./modules/devices/service.js";
 import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
 import { registerDocumentPreviewRoutes } from "./modules/files/previews.js";
@@ -308,6 +310,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     leaseSeconds: options.environment.PRINT_COMMAND_LEASE_SECONDS,
     retentionPolicy
   });
+  const devices = new DeviceRegistryService({
+    database,
+    clock,
+    random,
+    heartbeatIntervalSeconds: options.environment.AGENT_HEARTBEAT_SECONDS
+  });
   const janitor = new FileJanitor({
     database,
     objectStore,
@@ -553,6 +561,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     kioskAuthentication,
     maxDocumentBytes: options.environment.MAX_NORMALIZED_FILE_BYTES
   });
+  registerDeviceRoutes(app, { database, clock, devices, kioskAuthentication });
   registerDocumentPreviewRoutes(app, {
     database,
     objectStore,

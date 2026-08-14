@@ -203,15 +203,20 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     const saved = updatePrintSettingsResponseSchema.parse(savedResponse.json());
 
     // The stored selection is canonical, not the text the customer typed.
+    // Copies belong to the document, and its own totals include them.
     expect(saved.settings.files[0]).toMatchObject({
       fileId: prepared.fileId,
       pageRangeText: "1-3",
       pageRanges: [[1, 3]],
-      selectedPages: 3
+      selectedPages: 3,
+      copies: 2,
+      duplex: "SIMPLEX",
+      orientation: "AUTO",
+      printedSides: 6,
+      physicalSheets: 6
     });
     expect(saved.settings).toMatchObject({
       revision: 1,
-      copies: 2,
       colorMode: "MONOCHROME",
       paperSize: "A4",
       selectedPages: 3,
@@ -392,7 +397,7 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
       sessionId: prepared.session.id,
       version: prepared.session.version,
       idempotencyKey: "phase6-settings-replay",
-      body: { ...body, copies: 3 }
+      body: withCopies(body, 3)
     });
     expect(reused.statusCode).toBe(409);
     expect(reused.json()).toMatchObject({ error: { code: "IDEMPOTENCY_KEY_REUSED" } });
@@ -709,7 +714,7 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
       sessionId: prepared.session.id,
       version: prepared.session.version,
       idempotencyKey: "phase6-settings-copies",
-      body: { ...body, copies: environment.MAX_COPIES + 1 }
+      body: withCopies(body, environment.MAX_COPIES + 1)
     });
     expect(tooManyCopies.statusCode).toBe(422);
     expect(tooManyCopies.json()).toMatchObject({ error: { code: "COPIES_OUT_OF_RANGE" } });
@@ -924,11 +929,274 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     expect(unchanged.currency.trim()).toBe(developmentTariff.currency);
     expect(unchanged.rules[0]?.unitAmountMinor).toBe(developmentTariff.unitAmountMinor);
   }, 180_000);
+
+  it("prices several documents as one job, each with its own pages", async () => {
+    const prepared = await prepareMultiDocumentSession("phase6-multi-1", [3, 2]);
+    const [first, second] = prepared.fileIds;
+    if (!first || !second) throw new Error("EXPECTED_TWO_DOCUMENTS");
+
+    // Two of the first document's three pages, and all two of the second's.
+    const saveResponse = await saveSettings({
+      sessionId: prepared.session.id,
+      version: prepared.session.version,
+      idempotencyKey: "phase6-multi-settings-1",
+      body: {
+        fileOrder: [first, second],
+        fileSelections: [
+          { fileId: first, pageRanges: "1-2", copies: 1, duplex: "SIMPLEX", orientation: "AUTO" },
+          { fileId: second, pageRanges: null, copies: 1, duplex: "SIMPLEX", orientation: "AUTO" }
+        ],
+        paperSize: "A4",
+        scaling: "FIT",
+        collate: true
+      }
+    });
+    expect(saveResponse.statusCode, saveResponse.body).toBe(200);
+    const saved = updatePrintSettingsResponseSchema.parse(saveResponse.json());
+
+    // The snapshot keeps each document's own selection, in print order.
+    expect(saved.settings.files).toMatchObject([
+      { fileId: first, position: 0, pageCount: 3, pageRangeText: "1-2", selectedPages: 2 },
+      { fileId: second, position: 1, pageCount: 2, pageRangeText: "1-2", selectedPages: 2 }
+    ]);
+    expect(saved.settings).toMatchObject({
+      selectedPages: 4,
+      printedSides: 4,
+      physicalSheets: 4
+    });
+
+    const quote = createQuoteResponseSchema.parse(
+      (
+        await createQuote({
+          sessionId: prepared.session.id,
+          settingsRevision: saved.settings.revision,
+          idempotencyKey: "phase6-multi-quote-1"
+        })
+      ).json()
+    ).quote;
+
+    // Four printed sides at 50.00 plus 20% tax.
+    expect(quote).toMatchObject({
+      status: "ACTIVE",
+      selectedPages: 4,
+      printedSides: 4,
+      physicalSheets: 4,
+      subtotalMinor: 20_000,
+      taxMinor: 4_000,
+      totalMinor: 24_000
+    });
+  }, 180_000);
+
+  it("refuses a job that leaves one of its documents out", async () => {
+    const prepared = await prepareMultiDocumentSession("phase6-multi-2", [2, 2]);
+    const [first, second] = prepared.fileIds;
+    if (!first || !second) throw new Error("EXPECTED_TWO_DOCUMENTS");
+
+    // Naming only one of two validated documents would print a job the
+    // customer never configured, so the control plane refuses it outright
+    // rather than quietly printing whichever it was told about.
+    const partial = await saveSettings({
+      sessionId: prepared.session.id,
+      version: prepared.session.version,
+      idempotencyKey: "phase6-multi-settings-2",
+      body: {
+        fileOrder: [first],
+        fileSelections: [
+          { fileId: first, pageRanges: null, copies: 1, duplex: "SIMPLEX", orientation: "AUTO" }
+        ],
+        paperSize: "A4",
+        scaling: "FIT",
+        collate: true
+      }
+    });
+    expect(partial.statusCode).toBe(422);
+    expect(partial.json()).toMatchObject({ error: { code: "FILE_ORDER_INVALID" } });
+  }, 180_000);
+
+  it("prints and prices each document as its own settings ask", async () => {
+    const prepared = await prepareMultiDocumentSession("phase6-mixed-1", [3, 2]);
+    const [first, second] = prepared.fileIds;
+    if (!first || !second) throw new Error("EXPECTED_TWO_DOCUMENTS");
+
+    // Two double-sided copies of a three-page document, and one single-sided
+    // landscape copy of a two-page document.
+    const saveResponse = await saveSettings({
+      sessionId: prepared.session.id,
+      version: prepared.session.version,
+      idempotencyKey: "phase6-mixed-settings-1",
+      body: {
+        fileOrder: [first, second],
+        fileSelections: [
+          { fileId: first, pageRanges: null, copies: 2, duplex: "LONG_EDGE", orientation: "AUTO" },
+          {
+            fileId: second,
+            pageRanges: null,
+            copies: 1,
+            duplex: "SIMPLEX",
+            orientation: "LANDSCAPE"
+          }
+        ],
+        paperSize: "A4",
+        scaling: "FIT",
+        collate: true
+      }
+    });
+    expect(saveResponse.statusCode, saveResponse.body).toBe(200);
+    const saved = updatePrintSettingsResponseSchema.parse(saveResponse.json());
+
+    expect(saved.settings.files).toMatchObject([
+      {
+        fileId: first,
+        copies: 2,
+        duplex: "LONG_EDGE",
+        orientation: "AUTO",
+        selectedPages: 3,
+        // Three pages duplex is two sheets a copy, so six sides on four sheets.
+        printedSides: 6,
+        physicalSheets: 4
+      },
+      {
+        fileId: second,
+        copies: 1,
+        duplex: "SIMPLEX",
+        orientation: "LANDSCAPE",
+        selectedPages: 2,
+        printedSides: 2,
+        physicalSheets: 2
+      }
+    ]);
+    // The job totals are the sum of what each document produces.
+    expect(saved.settings).toMatchObject({
+      selectedPages: 5,
+      printedSides: 8,
+      physicalSheets: 6
+    });
+
+    const quote = createQuoteResponseSchema.parse(
+      (
+        await createQuote({
+          sessionId: prepared.session.id,
+          settingsRevision: saved.settings.revision,
+          idempotencyKey: "phase6-mixed-quote-1"
+        })
+      ).json()
+    ).quote;
+
+    // Eight printed sides at 50.00 plus 20% tax. The development tariff has no
+    // duplex adjustment, so a mixed job is charged per side either way.
+    expect(quote).toMatchObject({
+      status: "ACTIVE",
+      selectedPages: 5,
+      printedSides: 8,
+      physicalSheets: 6,
+      subtotalMinor: 40_000,
+      taxMinor: 8_000,
+      totalMinor: 48_000
+    });
+    expect(quote.breakdown.duplexAdjustmentMinor).toBe(0);
+  }, 180_000);
+
+  it("counts duplex sheets per document rather than across the job", async () => {
+    const prepared = await prepareMultiDocumentSession("phase6-multi-3", [3, 3]);
+    const [first, second] = prepared.fileIds;
+    if (!first || !second) throw new Error("EXPECTED_TWO_DOCUMENTS");
+
+    const saveResponse = await saveSettings({
+      sessionId: prepared.session.id,
+      version: prepared.session.version,
+      idempotencyKey: "phase6-multi-settings-3",
+      body: {
+        fileOrder: [first, second],
+        fileSelections: [
+          {
+            fileId: first,
+            pageRanges: null,
+            copies: 1,
+            duplex: "LONG_EDGE",
+            orientation: "AUTO"
+          },
+          {
+            fileId: second,
+            pageRanges: null,
+            copies: 1,
+            duplex: "LONG_EDGE",
+            orientation: "AUTO"
+          }
+        ],
+        paperSize: "A4",
+        scaling: "FIT",
+        collate: true
+      }
+    });
+    expect(saveResponse.statusCode, saveResponse.body).toBe(200);
+    const saved = updatePrintSettingsResponseSchema.parse(saveResponse.json());
+
+    // Two three-page documents duplex: two sheets each, never three for the
+    // six sides together. A sheet is never shared between two documents.
+    expect(saved.settings).toMatchObject({
+      selectedPages: 6,
+      printedSides: 6,
+      physicalSheets: 4
+    });
+  }, 180_000);
 });
 
 interface PreparedSession {
   session: { id: string; version: number; state: string };
   fileId: string;
+}
+
+interface PreparedMultiDocumentSession {
+  session: { id: string; version: number; state: string };
+  fileIds: string[];
+}
+
+/**
+ * Drive the same path until two documents are validated in one session, which
+ * is what a customer who sends more than one file from their phone produces.
+ */
+async function prepareMultiDocumentSession(
+  idempotencyKey: string,
+  pageCounts: readonly number[]
+): Promise<PreparedMultiDocumentSession> {
+  const createdResponse = await app.inject({
+    method: "POST",
+    url: `/v1/kiosks/${kioskId}/sessions`,
+    headers: { authorization, "idempotency-key": idempotencyKey },
+    payload: { locale: "hy" }
+  });
+  expect(createdResponse.statusCode, createdResponse.body).toBe(201);
+  const created = createSessionResponseSchema.parse(createdResponse.json());
+  const mobile = await exchangeMobile(
+    created.session.publicId,
+    requireUploadToken(created.upload.qrUrl)
+  );
+
+  const fileIds: string[] = [];
+  for (const [index, pageCount] of pageCounts.entries()) {
+    const uploadResponse = await uploadDocument({
+      sessionId: created.session.id,
+      cookieHeader: mobile.cookieHeader,
+      csrfToken: mobile.csrfToken,
+      clientFileId: `01900000-0000-7000-8000-00000000062${index}`,
+      idempotencyKey: `${idempotencyKey}-upload-${index}`,
+      contents: createMultiPagePdf(pageCount)
+    });
+    expect(uploadResponse.statusCode, uploadResponse.body).toBe(202);
+    const uploaded = uploadFileResponseSchema.parse(uploadResponse.json());
+    await coordinator.dispatchOnce();
+    await waitForFileStatus(uploaded.file.id, "READY");
+    fileIds.push(uploaded.file.id);
+  }
+
+  const session = await database.printSession.findUniqueOrThrow({
+    where: { id: created.session.id }
+  });
+
+  return {
+    session: { id: session.id, version: session.stateVersion, state: session.state },
+    fileIds
+  };
 }
 
 /**
@@ -972,6 +1240,16 @@ async function prepareConfigurableSession(idempotencyKey: string): Promise<Prepa
   };
 }
 
+/** The same body with the first document asking for a different copy count. */
+function withCopies(body: ReturnType<typeof settingsBody>, copies: number) {
+  return {
+    ...body,
+    fileSelections: body.fileSelections.map((selection, index) =>
+      index === 0 ? { ...selection, copies } : selection
+    )
+  };
+}
+
 function settingsBody(
   fileId: string,
   overrides: {
@@ -982,11 +1260,16 @@ function settingsBody(
 ) {
   return {
     fileOrder: [fileId],
-    fileSelections: [{ fileId, pageRanges: overrides.pageRanges ?? null }],
-    copies: overrides.copies ?? 1,
-    duplex: overrides.duplex ?? "SIMPLEX",
+    fileSelections: [
+      {
+        fileId,
+        pageRanges: overrides.pageRanges ?? null,
+        copies: overrides.copies ?? 1,
+        duplex: overrides.duplex ?? "SIMPLEX",
+        orientation: "AUTO"
+      }
+    ],
     paperSize: "A4",
-    orientation: "AUTO",
     scaling: "FIT",
     collate: true
   };

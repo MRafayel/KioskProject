@@ -10,7 +10,7 @@ import {
   type UploadFileResponse
 } from "@printing-kiosk/contracts";
 import { invalidateSessionPricing, Prisma, type PrismaClient } from "@printing-kiosk/database";
-import { canTransitionSession } from "@printing-kiosk/domain";
+import { canTransitionSession, UPLOADABLE_SESSION_STATES } from "@printing-kiosk/domain";
 import {
   PreliminaryFileValidationError,
   validatePreliminaryFile
@@ -35,7 +35,7 @@ const ACTIVE_FILE_STATUSES = [
 const VISIBLE_FILE_STATUSES = [...ACTIVE_FILE_STATUSES, "REJECTED"] as const;
 // A customer may add a document while earlier ones are already validated or
 // configured. Nothing may arrive once a manifest has been quoted and locked.
-const UPLOADABLE_STATES: SessionState[] = ["WAITING_FOR_UPLOAD", "FILES_UPLOADED", "CONFIGURING"];
+const UPLOADABLE_STATES: readonly SessionState[] = UPLOADABLE_SESSION_STATES;
 const CONFIGURED_STATES: SessionState[] = ["FILES_UPLOADED", "CONFIGURING"];
 const MAX_TRANSACTION_ATTEMPTS = 4;
 

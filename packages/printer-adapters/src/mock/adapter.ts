@@ -1,14 +1,19 @@
 import { constants as fsConstants } from "node:fs";
 import { access, copyFile, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { resolve, sep } from "node:path";
 
+import { assertSubmittable, operationStatus as status } from "../submission.js";
 import {
   canonicalPrintManifestJson,
+  PRINT_CAPABILITY_SNAPSHOT_VERSION,
   PrinterAdapterError,
   type PrintOperationStatus,
   type PrinterAdapter,
+  type PrinterBinding,
   type PrinterCapabilitiesSnapshot,
   type PrinterHealth,
+  type PrinterQueueDescriptor,
+  type PrinterQueueDiscovery,
   type PrintSubmission
 } from "../types.js";
 
@@ -65,12 +70,44 @@ export interface MockPrinterAdapterOptions {
  * Customer filenames never appear here. Every path is derived from the
  * operation identifier and the document's position in the job.
  */
-export class MockPrinterAdapter implements PrinterAdapter {
+export class MockPrinterAdapter implements PrinterAdapter, PrinterQueueDiscovery {
   public readonly name = "MOCK";
+  public static readonly QUEUE_NAME = "Mock Kiosk Printer";
   private readonly outputDirectory: string;
 
   public constructor(private readonly options: MockPrinterAdapterOptions) {
     this.outputDirectory = resolve(options.outputDirectory);
+  }
+
+  /**
+   * The simulated machine offers exactly one queue, and it is not shared. The
+   * development path therefore goes through the same approval check a Windows
+   * kiosk does rather than around it.
+   */
+  public listQueues(): Promise<readonly PrinterQueueDescriptor[]> {
+    const offline = this.options.defaultScenario === "OFFLINE";
+    return Promise.resolve([
+      {
+        queueName: MockPrinterAdapter.QUEUE_NAME,
+        deviceUri: "file:" + this.outputDirectory,
+        driverName: "Mock Printer Driver",
+        portName: "MOCK:",
+        state: offline ? "OFFLINE" : "READY",
+        isDefault: true,
+        shared: false
+      }
+    ]);
+  }
+
+  public describe(): Promise<PrinterBinding> {
+    return Promise.resolve({
+      adapter: this.name,
+      queueName: MockPrinterAdapter.QUEUE_NAME,
+      deviceId: "mock-printer",
+      makeAndModel: "Printing Kiosk Mock Printer",
+      driverName: "Mock Printer Driver",
+      firmware: "0.0.0"
+    });
   }
 
   public getHealth(): Promise<PrinterHealth> {
@@ -86,10 +123,12 @@ export class MockPrinterAdapter implements PrinterAdapter {
 
   public getCapabilities(): Promise<PrinterCapabilitiesSnapshot> {
     return Promise.resolve({
-      version: 2,
+      version: PRINT_CAPABILITY_SNAPSHOT_VERSION,
       paperSizes: ["A4"],
       duplexModes: ["SIMPLEX", "LONG_EDGE"],
       colorModes: ["MONOCHROME"],
+      orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
+      scalingModes: ["FIT", "ACTUAL_SIZE"],
       maxCopies: 20
     });
   }
@@ -337,62 +376,6 @@ function resolveScenario(
 ): MockPrinterScenario {
   const known = MOCK_PRINTER_SCENARIOS.find((scenario) => scenario === requested);
   return known ?? fallback ?? "SUCCESS";
-}
-
-function assertSubmittable(submission: PrintSubmission): void {
-  const manifest = submission.manifest;
-  if (
-    manifest.documents.length !== submission.artifacts.length ||
-    submission.artifacts.length === 0 ||
-    manifest.physicalSheets < 1 ||
-    manifest.copies < 1
-  ) {
-    throw new PrinterAdapterError("MANIFEST_INVALID");
-  }
-  const expectedByDocument = new Map(
-    manifest.documents.map((document) => [document.documentId, document] as const)
-  );
-  if (expectedByDocument.size !== manifest.documents.length) {
-    throw new PrinterAdapterError("MANIFEST_INVALID");
-  }
-  const seenDocuments = new Set<string>();
-  const seenPositions = new Set<number>();
-  for (const artifact of submission.artifacts) {
-    const expected = expectedByDocument.get(artifact.documentId);
-    if (
-      !expected ||
-      seenDocuments.has(artifact.documentId) ||
-      seenPositions.has(artifact.position) ||
-      expected.position !== artifact.position ||
-      expected.sha256 !== artifact.sha256 ||
-      expected.sizeBytes !== artifact.sizeBytes ||
-      !isAbsolute(artifact.path) ||
-      artifact.sizeBytes < 1 ||
-      !/^[0-9a-f]{64}$/u.test(artifact.sha256) ||
-      !Number.isSafeInteger(artifact.position) ||
-      artifact.position < 0 ||
-      artifact.position > 999
-    ) {
-      throw new PrinterAdapterError("ARTIFACT_UNAVAILABLE");
-    }
-    seenDocuments.add(artifact.documentId);
-    seenPositions.add(artifact.position);
-  }
-}
-
-function status(
-  operationId: string,
-  input: Omit<PrintOperationStatus, "operationId" | "warningCode"> &
-    Partial<Pick<PrintOperationStatus, "warningCode">>
-): PrintOperationStatus {
-  return {
-    operationId,
-    state: input.state,
-    confidence: input.confidence,
-    failureCode: input.failureCode,
-    warningCode: input.warningCode ?? null,
-    sheetsProduced: input.sheetsProduced
-  };
 }
 
 function padPosition(position: number): string {

@@ -2,32 +2,29 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
+import { DocumentCard, pageButtonKey, type EnlargedPage } from "../components/DocumentCard.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
-import type { MessageCatalog } from "../features/i18n/messages.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
   calculatePrintSummary,
   fileExtension,
-  formatFileSize,
+  fileSelection,
   formatMinorAmount,
   isQuotePayable,
-  isReadyFile,
   pageExclusionRefusal,
   pagePrintState,
-  type Orientation,
+  pageRangeBounds,
+  readyFiles,
+  type FileSelection,
   type PagePrintState,
-  type PrintSettings
+  type ReadyPrototypeFile
 } from "../features/session/model.js";
 import {
   readKioskPrintCapabilities,
   readKioskSessionVersion
 } from "../features/session/pricingService.js";
 import { usePricing } from "../features/session/usePricing.js";
-import {
-  deleteKioskSessionFile,
-  kioskPagePreviewUrl,
-  listKioskFilePages
-} from "../features/session/sessionService.js";
+import { deleteKioskSessionFile, kioskPagePreviewUrl } from "../features/session/sessionService.js";
 
 const FALLBACK_MAX_COPIES = 20;
 
@@ -36,23 +33,15 @@ export function ConfigureScreen() {
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
   const queryClient = useQueryClient();
-  const [removing, setRemoving] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const [removeFailed, setRemoveFailed] = useState(false);
-  const [enlargedPage, setEnlargedPage] = useState<number | null>(null);
-  const pageButtons = useRef(new Map<number, HTMLButtonElement>());
-  const file = state.files[0];
+  const [enlarged, setEnlarged] = useState<EnlargedPage | null>(null);
+  const pageButtons = useRef(new Map<string, HTMLButtonElement>());
   const sessionId = state.session?.id;
-  const readyFile = isReadyFile(file) ? file : null;
-  const pagesQuery = useQuery({
-    queryKey: ["kiosk-file-pages", sessionId, readyFile?.id, readyFile?.processingRevision ?? null],
-    queryFn: () => {
-      if (!sessionId || !readyFile) throw new Error("READY_FILE_REQUIRED");
-      return listKioskFilePages(sessionId, readyFile.id);
-    },
-    enabled: Boolean(sessionId && readyFile),
-    staleTime: 30_000,
-    retry: false
-  });
+
+  // Print order is upload order, and it is the order the control plane is told
+  // about, so the screen shows the documents in the order they will print.
+  const documents = readyFiles(state.files);
 
   const capabilitiesQuery = useQuery({
     queryKey: ["kiosk-print-capabilities", sessionId],
@@ -90,40 +79,51 @@ export function ConfigureScreen() {
     dispatch({ type: "SESSION_VERSION_OBSERVED", version: sessionVersionQuery.data });
   }, [dispatch, sessionVersionQuery.data]);
 
-  // A reprocessed or replaced document renumbers the pages underneath the
-  // enlarged view, so it closes rather than keeping a page from the old one.
-  const previewKey = readyFile ? `${readyFile.id}:${readyFile.processingRevision}` : null;
+  // A reprocessed, replaced or removed document renumbers the pages underneath
+  // the enlarged view, so it closes rather than keeping a page from the old one.
+  const documentKey = documents
+    .map((file) => `${file.id}:${file.processingRevision}:${file.pageCount}`)
+    .join("|");
   useEffect(() => {
-    setEnlargedPage(null);
-  }, [previewKey]);
+    setEnlarged(null);
+  }, [documentKey]);
 
   // Closing hands the touch back to the page that was tapped, so the customer
   // returns to where they were in a preview strip that may be scrolled well
-  // past its first page.
-  const closeEnlarged = useCallback((pageNumber: number) => {
-    pageButtons.current.get(pageNumber)?.focus();
-    setEnlargedPage(null);
+  // past its first page — and, with several documents, well down the screen.
+  const closeEnlarged = useCallback(() => {
+    setEnlarged((current) => {
+      if (current) {
+        pageButtons.current.get(pageButtonKey(current.file.id, current.page.pageNumber))?.focus();
+      }
+      return null;
+    });
+  }, []);
+
+  const registerPageButton = useCallback((key: string, node: HTMLButtonElement | null) => {
+    if (node) pageButtons.current.set(key, node);
+    else pageButtons.current.delete(key);
   }, []);
 
   useEffect(() => {
-    if (enlargedPage === null) return;
+    if (!enlarged) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeEnlarged(enlargedPage);
+      if (event.key === "Escape") closeEnlarged();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [closeEnlarged, enlargedPage]);
+  }, [closeEnlarged, enlarged]);
 
   const pricing = usePricing({
     sessionId: sessionId ?? null,
     sessionVersion: state.session?.version ?? 1,
-    file: readyFile,
+    files: documents,
     settings: state.settings,
     pricing: state.pricing,
     dispatch
   });
 
-  if (!readyFile || !sessionId) return <KioskRedirect to="/upload" />;
+  if (documents.length === 0 || !sessionId) return <KioskRedirect to="/upload" />;
 
   const capabilities = state.capabilities;
   const duplexAvailable =
@@ -146,76 +146,48 @@ export function ConfigureScreen() {
         totalSides: localSummary.totalSides,
         totalSheets: localSummary.totalSheets
       };
-  const update = (settings: Partial<PrintSettings>) =>
-    dispatch({ type: "SETTINGS_CHANGED", settings });
-  const pageEnd = state.settings.pageEnd ?? readyFile.pageCount;
-
-  const setPageStart = (value: number) => {
-    const nextPage = clamp(value, 1, readyFile.pageCount);
-    const nextEnd = Math.max(pageEnd, nextPage);
-    update({
-      pageStart: nextPage,
-      pageEnd: nextEnd === readyFile.pageCount ? null : nextEnd
-    });
-  };
-
-  const setPageEnd = (value: number) => {
-    const nextPage = clamp(value, 1, readyFile.pageCount);
-    update({
-      pageStart: Math.min(state.settings.pageStart, nextPage),
-      pageEnd: nextPage === readyFile.pageCount ? null : nextPage
-    });
-  };
-
-  const removeFile = async () => {
-    if (removing) return;
-    setRemoving(true);
+  const removeFile = async (file: ReadyPrototypeFile) => {
+    if (removingId) return;
+    setRemovingId(file.id);
     setRemoveFailed(false);
     try {
-      await deleteKioskSessionFile(sessionId, readyFile.id);
+      await deleteKioskSessionFile(sessionId, file.id);
+      dispatch({ type: "FILE_REMOVED", fileId: file.id });
       await queryClient.invalidateQueries({
         queryKey: ["kiosk-session-files", sessionId],
         exact: true
       });
-      void navigate("/upload");
+      // Removing the last document leaves nothing to configure, so the customer
+      // goes back to add one rather than sitting on an empty screen. With
+      // documents left the screen simply reprices what remains.
+      if (documents.length <= 1) void navigate("/upload");
     } catch {
       // Keep the authoritative file and settings on screen. The stable
       // idempotency key is retained so the customer can safely retry.
       setRemoveFailed(true);
     } finally {
-      setRemoving(false);
+      setRemovingId(null);
     }
   };
 
-  const preview =
-    pagesQuery.data?.fileId === readyFile.id &&
-    pagesQuery.data.processingRevision === readyFile.processingRevision &&
-    pagesQuery.data.pageCount === readyFile.pageCount
-      ? pagesQuery.data
+  const enlargedSelection = enlarged ? fileSelection(state.settings, enlarged.file.id) : null;
+  const enlargedState =
+    enlarged && enlargedSelection
+      ? pagePrintState(enlargedSelection, enlarged.file.pageCount, enlarged.page.pageNumber)
       : null;
-
-  const pageState = (pageNumber: number) =>
-    pagePrintState(state.settings, readyFile.pageCount, pageNumber);
-  const excludedCount = state.settings.excludedPages.filter(
-    (page) => pageState(page) === "EXCLUDED"
-  ).length;
-
-  const choosePage = (pageNumber: number, excluded: boolean) => {
-    dispatch({ type: "PAGE_EXCLUSION_CHANGED", pageNumber, excluded });
-    closeEnlarged(pageNumber);
-  };
-
-  // The enlarged view only ever shows a page the authoritative preview still
-  // lists, so a document that changed underneath it closes it instead.
-  const enlarged = preview?.items.find((page) => page.pageNumber === enlargedPage) ?? null;
-  const enlargedState = enlarged ? pageState(enlarged.pageNumber) : null;
   const enlargedRefusal =
-    enlarged && enlargedState === "PRINTED"
-      ? pageExclusionRefusal(state.settings, readyFile.pageCount, enlarged.pageNumber)
+    enlarged && enlargedSelection && enlargedState === "PRINTED"
+      ? pageExclusionRefusal(enlargedSelection, enlarged.file.pageCount, enlarged.page.pageNumber)
+      : null;
+  // The range the customer set for this document, resolved against its own page
+  // count, so the notice names the pages that are actually printing.
+  const enlargedBounds =
+    enlarged && enlargedSelection
+      ? pageRangeBounds(enlargedSelection, enlarged.file.pageCount)
       : null;
   const enlargedNotice =
-    enlargedState === "OUT_OF_RANGE"
-      ? messages.configure.previewSkippedNotice(localSummary.pageStart, localSummary.pageEnd)
+    enlargedState === "OUT_OF_RANGE" && enlargedBounds
+      ? messages.configure.previewSkippedNotice(enlargedBounds.pageStart, enlargedBounds.pageEnd)
       : enlargedState === "EXCLUDED"
         ? messages.configure.previewExcludedNotice
         : enlargedRefusal === "LAST_SELECTED_PAGE"
@@ -224,39 +196,41 @@ export function ConfigureScreen() {
             ? messages.configure.previewTooComplexNotice
             : messages.configure.previewPrintedNotice;
 
+  const choosePage = (excludedPage: boolean) => {
+    if (!enlarged) return;
+    dispatch({
+      type: "PAGE_EXCLUSION_CHANGED",
+      fileId: enlarged.file.id,
+      pageNumber: enlarged.page.pageNumber,
+      excluded: excludedPage
+    });
+    closeEnlarged();
+  };
+
+  const enlargedName = enlarged
+    ? (enlarged.file.name ??
+      messages.upload.fileName(enlarged.file.ordinal + 1, fileExtension(enlarged.file.kind)))
+    : "";
+
   return (
     <div className="configuration-page">
       <header className="screen-heading">
         <div>
           <p className="eyebrow">{messages.configure.step}</p>
           <h1>{messages.configure.title}</h1>
-          <p>{messages.configure.description}</p>
+          <p>
+            {documents.length > 1
+              ? messages.configure.descriptionMany(documents.length)
+              : messages.configure.description}
+          </p>
         </div>
-        <article className="file-card file-card--compact">
-          <div className="file-card__icon" aria-hidden="true">
-            {readyFile.kind ?? "FILE"}
-          </div>
-          <div>
-            <strong>
-              {readyFile.name ??
-                messages.upload.fileName(readyFile.ordinal + 1, fileExtension(readyFile.kind))}
-            </strong>
-            <span>
-              {messages.upload.fileMeta(
-                readyFile.pageCount,
-                formatFileSize(readyFile.sizeBytes, numberLocale, messages.units.megabytes)
-              )}
-            </span>
-          </div>
-          <button
-            className="text-button"
-            type="button"
-            disabled={removing}
-            onClick={() => void removeFile()}
-          >
-            {removing ? messages.configure.removing : messages.configure.remove}
-          </button>
-        </article>
+        <button
+          className="button button--quiet"
+          type="button"
+          onClick={() => void navigate("/upload")}
+        >
+          {messages.configure.addDocument}
+        </button>
       </header>
       {removeFailed ? (
         <p className="configuration-error" role="alert">
@@ -265,188 +239,42 @@ export function ConfigureScreen() {
       ) : null}
 
       <div className="configuration-grid">
-        <section className="settings-card" aria-labelledby="settings-title">
-          <section className="document-preview" aria-labelledby="preview-title">
-            <h2 id="preview-title">{messages.configure.previewTitle}</h2>
-            {pagesQuery.isPending ? (
-              <p className="document-preview__status" role="status">
-                {messages.configure.previewLoading}
-              </p>
-            ) : pagesQuery.isError || !preview ? (
-              <p className="document-preview__status document-preview__status--error" role="alert">
-                {messages.configure.previewUnavailable}
-              </p>
-            ) : (
-              <>
-                <p className="document-preview__hint">{messages.configure.previewHint}</p>
-                <div className="document-preview__grid">
-                  {preview.items.map((page) => {
-                    const printState = pageState(page.pageNumber);
-                    return (
-                      <button
-                        className={pageClassName(printState)}
-                        key={page.pageNumber}
-                        type="button"
-                        aria-label={pageLabel(messages.configure, printState, page.pageNumber)}
-                        ref={(node) => {
-                          if (node) pageButtons.current.set(page.pageNumber, node);
-                          else pageButtons.current.delete(page.pageNumber);
-                        }}
-                        onClick={() => setEnlargedPage(page.pageNumber)}
-                      >
-                        <span className="document-preview__thumb">
-                          {page.previewAvailable ? (
-                            <img
-                              alt={messages.configure.previewPage(page.pageNumber)}
-                              decoding="async"
-                              height={page.heightPixels}
-                              loading="lazy"
-                              src={kioskPagePreviewUrl(
-                                sessionId,
-                                readyFile.id,
-                                page.pageNumber,
-                                readyFile.processingRevision
-                              )}
-                              width={page.widthPixels}
-                            />
-                          ) : (
-                            <span className="document-preview__missing" aria-hidden="true" />
-                          )}
-                          {printState === "PRINTED" ? null : (
-                            <span className="document-preview__badge" aria-hidden="true">
-                              {printState === "EXCLUDED"
-                                ? messages.configure.previewExcludedBadge
-                                : messages.configure.previewSkippedBadge}
-                            </span>
-                          )}
-                        </span>
-                        <span className="document-preview__caption" aria-hidden="true">
-                          {messages.configure.previewPage(page.pageNumber)}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                {excludedCount > 0 ? (
-                  <p className="document-preview__excluded-note" role="status">
-                    {messages.configure.previewExcludedCount(excludedCount)}
-                  </p>
-                ) : null}
-              </>
-            )}
+        <section className="settings-card" aria-labelledby="documents-title">
+          <section className="document-list" aria-labelledby="documents-title">
+            <h2 id="documents-title">{messages.configure.documentsTitle(documents.length)}</h2>
+            <p className="document-list__hint">{messages.configure.documentsHint}</p>
+            {documents.map((file, position) => (
+              <DocumentCard
+                key={file.id}
+                file={file}
+                position={position}
+                total={documents.length}
+                sessionId={sessionId}
+                selection={fileSelection(state.settings, file.id)}
+                duplexAvailable={duplexAvailable}
+                maxCopies={maxCopies}
+                removing={removingId === file.id}
+                onSelectionChange={(selection: Partial<FileSelection>) =>
+                  dispatch({ type: "FILE_SELECTION_CHANGED", fileId: file.id, selection })
+                }
+                onEnlarge={setEnlarged}
+                onRegisterPage={registerPageButton}
+                onRemove={() => void removeFile(file)}
+              />
+            ))}
           </section>
-
-          <h2 id="settings-title">{messages.configure.settingsTitle}</h2>
-          <div className="settings-grid">
-            <fieldset className="page-range-field">
-              <div className="page-range-field__heading">
-                <legend>{messages.configure.pages}</legend>
-                <button
-                  className="text-button"
-                  type="button"
-                  disabled={
-                    state.settings.pageStart === 1 &&
-                    pageEnd === readyFile.pageCount &&
-                    state.settings.excludedPages.length === 0
-                  }
-                  onClick={() => update({ pageStart: 1, pageEnd: null, excludedPages: [] })}
-                >
-                  {messages.configure.allPages(readyFile.pageCount)}
-                </button>
-              </div>
-              <div className="page-range-controls">
-                <PageNumberControl
-                  label={messages.configure.fromPage}
-                  value={state.settings.pageStart}
-                  minimum={1}
-                  maximum={readyFile.pageCount}
-                  decreaseLabel={messages.configure.decreaseFromPage}
-                  increaseLabel={messages.configure.increaseFromPage}
-                  onChange={setPageStart}
-                />
-                <span className="page-range-controls__separator" aria-hidden="true">
-                  —
-                </span>
-                <PageNumberControl
-                  label={messages.configure.toPage}
-                  value={pageEnd}
-                  minimum={1}
-                  maximum={readyFile.pageCount}
-                  decreaseLabel={messages.configure.decreaseToPage}
-                  increaseLabel={messages.configure.increaseToPage}
-                  onChange={setPageEnd}
-                />
-              </div>
-            </fieldset>
-
-            <label className="field">
-              <span>{messages.configure.orientation}</span>
-              <select
-                value={state.settings.orientation}
-                onChange={(event) => update({ orientation: event.target.value as Orientation })}
-              >
-                <option value="PORTRAIT">{messages.configure.portrait}</option>
-                <option value="LANDSCAPE">{messages.configure.landscape}</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="settings-row">
-            <fieldset className="segmented-field">
-              <legend>{messages.configure.paperSides}</legend>
-              <div className="segmented-control">
-                <label>
-                  <input
-                    type="radio"
-                    name="sides"
-                    checked={!state.settings.duplex}
-                    onChange={() => update({ duplex: false })}
-                  />
-                  <span>{messages.configure.singleSided}</span>
-                </label>
-                <label>
-                  <input
-                    type="radio"
-                    name="sides"
-                    checked={state.settings.duplex}
-                    disabled={!duplexAvailable}
-                    onChange={() => update({ duplex: true })}
-                  />
-                  <span>{messages.configure.doubleSided}</span>
-                </label>
-              </div>
-            </fieldset>
-
-            <div className="counter-field">
-              <span>{messages.configure.copies}</span>
-              <div className="counter" aria-label={messages.configure.copiesAria}>
-                <button
-                  type="button"
-                  aria-label={messages.configure.decreaseCopies}
-                  disabled={state.settings.copies <= 1}
-                  onClick={() => update({ copies: state.settings.copies - 1 })}
-                >
-                  −
-                </button>
-                <output aria-live="polite">{state.settings.copies}</output>
-                <button
-                  type="button"
-                  aria-label={messages.configure.increaseCopies}
-                  disabled={state.settings.copies >= maxCopies}
-                  onClick={() => update({ copies: state.settings.copies + 1 })}
-                >
-                  +
-                </button>
-              </div>
-            </div>
-          </div>
         </section>
 
         <aside className="summary-card" aria-labelledby="summary-title">
           <div className="paper-preview" aria-hidden="true">
+            {/* The first document's orientation. Each document sets its own,
+                so this is an illustration of the job's first sheet rather than
+                a statement about all of them. */}
             <div
               className={
-                state.settings.orientation === "LANDSCAPE" ? "paper paper--landscape" : "paper"
+                fileSelection(state.settings, documents[0]?.id ?? "").orientation === "LANDSCAPE"
+                  ? "paper paper--landscape"
+                  : "paper"
               }
             >
               <span /> <span /> <span /> <span />
@@ -454,6 +282,10 @@ export function ConfigureScreen() {
           </div>
           <h2 id="summary-title">{messages.configure.summaryTitle}</h2>
           <dl className="summary-list">
+            <div>
+              <dt>{messages.configure.documents}</dt>
+              <dd>{documents.length}</dd>
+            </div>
             <div>
               <dt>{messages.configure.selectedPages}</dt>
               <dd>{summary.selectedPages}</dd>
@@ -522,7 +354,7 @@ export function ConfigureScreen() {
           className="modal-backdrop"
           role="presentation"
           onPointerDown={(event) => {
-            if (event.target === event.currentTarget) closeEnlarged(enlarged.pageNumber);
+            if (event.target === event.currentTarget) closeEnlarged();
           }}
         >
           <section
@@ -535,25 +367,30 @@ export function ConfigureScreen() {
               className="page-preview__close"
               type="button"
               aria-label={messages.configure.previewClose}
-              onClick={() => closeEnlarged(enlarged.pageNumber)}
+              onClick={closeEnlarged}
               autoFocus
             >
               <span aria-hidden="true">×</span>
             </button>
-            <h2 id="page-preview-title">{messages.configure.previewPage(enlarged.pageNumber)}</h2>
+            <h2 id="page-preview-title">
+              {messages.configure.previewPage(enlarged.page.pageNumber)}
+            </h2>
+            {/* Which document this page belongs to. With several on screen the
+                page number alone does not say. */}
+            <p className="page-preview__document">{enlargedName}</p>
             <div className={pagePreviewClassName(enlargedState)}>
-              {enlarged.previewAvailable ? (
+              {enlarged.page.previewAvailable ? (
                 <img
-                  alt={messages.configure.previewPage(enlarged.pageNumber)}
+                  alt={messages.configure.previewPage(enlarged.page.pageNumber)}
                   decoding="async"
-                  height={enlarged.heightPixels}
+                  height={enlarged.page.heightPixels}
                   src={kioskPagePreviewUrl(
                     sessionId,
-                    readyFile.id,
-                    enlarged.pageNumber,
-                    readyFile.processingRevision
+                    enlarged.file.id,
+                    enlarged.page.pageNumber,
+                    enlarged.file.processingRevision
                   )}
-                  width={enlarged.widthPixels}
+                  width={enlarged.page.widthPixels}
                 />
               ) : (
                 <p
@@ -584,7 +421,7 @@ export function ConfigureScreen() {
                   className="button button--danger"
                   type="button"
                   disabled={enlargedRefusal !== null}
-                  onClick={() => choosePage(enlarged.pageNumber, true)}
+                  onClick={() => choosePage(true)}
                 >
                   {messages.configure.previewDontPrint}
                 </button>
@@ -594,7 +431,7 @@ export function ConfigureScreen() {
                 <button
                   className="button button--primary"
                   type="button"
-                  onClick={() => choosePage(enlarged.pageNumber, false)}
+                  onClick={() => choosePage(false)}
                 >
                   {messages.configure.previewPrint}
                 </button>
@@ -607,85 +444,8 @@ export function ConfigureScreen() {
   );
 }
 
-function pageClassName(printState: PagePrintState): string {
-  if (printState === "EXCLUDED") return "document-preview__page document-preview__page--excluded";
-  if (printState === "OUT_OF_RANGE") {
-    return "document-preview__page document-preview__page--skipped";
-  }
-  return "document-preview__page";
-}
-
 function pagePreviewClassName(printState: PagePrintState | null): string {
   if (printState === "EXCLUDED") return "page-preview page-preview--excluded";
   if (printState === "OUT_OF_RANGE") return "page-preview page-preview--skipped";
   return "page-preview";
-}
-
-function pageLabel(
-  configure: MessageCatalog["configure"],
-  printState: PagePrintState,
-  pageNumber: number
-): string {
-  if (printState === "EXCLUDED") return configure.previewExcludedPage(pageNumber);
-  if (printState === "OUT_OF_RANGE") return configure.previewSkippedPage(pageNumber);
-  return configure.previewPage(pageNumber);
-}
-
-function PageNumberControl({
-  label,
-  value,
-  minimum,
-  maximum,
-  decreaseLabel,
-  increaseLabel,
-  onChange
-}: {
-  label: string;
-  value: number;
-  minimum: number;
-  maximum: number;
-  decreaseLabel: string;
-  increaseLabel: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <div className="page-number-control">
-      <span>{label}</span>
-      <span className="page-number-control__input">
-        <button
-          type="button"
-          aria-label={decreaseLabel}
-          disabled={value <= minimum}
-          onClick={() => onChange(value - 1)}
-        >
-          −
-        </button>
-        <input
-          type="number"
-          inputMode="numeric"
-          min={minimum}
-          max={maximum}
-          value={value}
-          aria-label={label}
-          onFocus={(event) => event.currentTarget.select()}
-          onChange={(event) => {
-            const nextValue = Number(event.target.value);
-            if (Number.isInteger(nextValue)) onChange(nextValue);
-          }}
-        />
-        <button
-          type="button"
-          aria-label={increaseLabel}
-          disabled={value >= maximum}
-          onClick={() => onChange(value + 1)}
-        >
-          +
-        </button>
-      </span>
-    </div>
-  );
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, Math.trunc(value)));
 }

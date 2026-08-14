@@ -519,10 +519,7 @@ export class AdminObservabilityService {
             where: { sessionId, revision: session.currentSettingsRevision },
             select: {
               revision: true,
-              copies: true,
-              duplex: true,
               paperSize: true,
-              orientation: true,
               scaling: true,
               collate: true,
               colorMode: true,
@@ -597,10 +594,7 @@ export class AdminObservabilityService {
       settings: settings
         ? {
             revision: settings.revision,
-            copies: settings.copies,
-            duplex: settings.duplex,
             paperSize: settings.paperSize,
-            orientation: settings.orientation,
             scaling: settings.scaling,
             collate: settings.collate,
             colorMode: settings.colorMode,

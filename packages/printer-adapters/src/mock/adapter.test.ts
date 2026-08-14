@@ -35,10 +35,7 @@ function buildManifest(): PrintJobManifest {
     settingsManifestHash: "b".repeat(64),
     quoteId: "01900000-0000-7000-8000-0000000000e1",
     paymentId: "01900000-0000-7000-8000-0000000000f1",
-    copies: 1,
-    duplex: "SIMPLEX",
     paperSize: "A4",
-    orientation: "PORTRAIT",
     scaling: "FIT",
     collate: true,
     colorMode: "MONOCHROME",
@@ -53,7 +50,12 @@ function buildManifest(): PrintJobManifest {
         sizeBytes: 9,
         pageCount: 4,
         pageRanges: [[1, 4]],
-        selectedPages: 4
+        selectedPages: 4,
+        copies: 1,
+        duplex: "SIMPLEX",
+        orientation: "PORTRAIT",
+        printedSides: 4,
+        physicalSheets: 4
       }
     ]
   };

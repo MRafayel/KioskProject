@@ -15,6 +15,29 @@ export const SESSION_STATES = [
 
 export type SessionState = (typeof SESSION_STATES)[number];
 
+/**
+ * The states in which a session still accepts documents.
+ *
+ * A session carries several documents, so the phone stays useful after the
+ * first one is validated: the customer may send another while the kiosk sits on
+ * `FILES_UPLOADED`, or after they have started choosing settings. The boundary
+ * is payment — once a price is being paid, the set of documents it was quoted
+ * for is fixed, and every later state is either paid, terminal or expired.
+ *
+ * Both the upload path and the phone's own session check read this, so the two
+ * cannot drift into a phone that is told it may upload by one and refused by
+ * the other.
+ */
+export const UPLOADABLE_SESSION_STATES: readonly SessionState[] = [
+  "WAITING_FOR_UPLOAD",
+  "FILES_UPLOADED",
+  "CONFIGURING"
+];
+
+export function isUploadableSessionState(state: string): state is SessionState {
+  return (UPLOADABLE_SESSION_STATES as readonly string[]).includes(state);
+}
+
 export interface VersionedSessionState {
   state: SessionState;
   version: number;

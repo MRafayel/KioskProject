@@ -42,8 +42,17 @@ export function UploadScreen() {
     dispatch({ type: "FILES_SYNCED", files: filesQuery.data });
   }, [dispatch, filesQuery.data]);
 
-  const file = state.files[0];
-  const readyFile = isReadyFile(file);
+  const visibleFiles = state.files.filter((file) => file.status !== "DELETED");
+  const readyCount = state.files.filter(isReadyFile).length;
+  // Any validated document is enough to continue. The rest may still be
+  // uploading, and the customer can come back and add more.
+  const canContinue = readyCount > 0;
+  // What the status pill reports: the first thing that still needs attention,
+  // otherwise the set as a whole.
+  const pending = visibleFiles.find((file) => file.status !== "READY");
+  // A rejection is the one thing worth explaining in full, so the first one
+  // gets the explanation even while other documents are still arriving.
+  const firstRejected = visibleFiles.find((file) => file.status === "REJECTED");
 
   if (!state.session) return null;
 
@@ -83,36 +92,47 @@ export function UploadScreen() {
             title={messages.upload.qrTitle}
           />
           <span
-            className={`status-pill status-pill--${file && statusTone(file) === "danger" ? "danger" : "waiting"}`}
+            className={`status-pill status-pill--${pending && statusTone(pending) === "danger" ? "danger" : "waiting"}`}
           >
             <span aria-hidden="true">●</span>{" "}
-            {file ? fileStatusLabel(file, messages.upload) : messages.upload.waitingForPhone}
+            {visibleFiles.length === 0
+              ? messages.upload.waitingForPhone
+              : pending
+                ? fileStatusLabel(pending, messages.upload)
+                : messages.upload.documentsReady(readyCount)}
           </span>
         </div>
 
-        {file ? (
-          <article className="file-card" aria-label={messages.upload.uploadedDocument}>
-            <div className="file-card__icon" aria-hidden="true">
-              {file.kind ?? "FILE"}
-            </div>
-            <div>
-              <strong>
-                {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
-              </strong>
-              <span>
-                {fileStatusLabel(file, messages.upload)}
-                {file.sizeBytes === null
-                  ? ""
-                  : ` · ${formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)}`}
-              </span>
-            </div>
-            <span
-              className={`file-card__check file-card__check--${statusTone(file)}`}
-              aria-label={fileStatusLabel(file, messages.upload)}
-            >
-              {statusMark(file)}
-            </span>
-          </article>
+        {visibleFiles.length > 0 ? (
+          <ul className="file-card-list" aria-label={messages.upload.uploadedDocuments}>
+            {visibleFiles.map((file) => (
+              <li key={file.id}>
+                <article className="file-card" aria-label={messages.upload.uploadedDocument}>
+                  <div className="file-card__icon" aria-hidden="true">
+                    {file.kind ?? "FILE"}
+                  </div>
+                  <div>
+                    <strong>
+                      {file.name ??
+                        messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+                    </strong>
+                    <span>
+                      {fileStatusLabel(file, messages.upload)}
+                      {file.sizeBytes === null
+                        ? ""
+                        : ` · ${formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)}`}
+                    </span>
+                  </div>
+                  <span
+                    className={`file-card__check file-card__check--${statusTone(file)}`}
+                    aria-label={fileStatusLabel(file, messages.upload)}
+                  >
+                    {statusMark(file)}
+                  </span>
+                </article>
+              </li>
+            ))}
+          </ul>
         ) : (
           <div className="upload-placeholder" aria-live="polite">
             <span className="pulse" aria-hidden="true" />
@@ -120,19 +140,32 @@ export function UploadScreen() {
           </div>
         )}
 
+        {/* The phone can keep sending while this screen is open, so the hint
+            stays up as long as there is room for another document. */}
+        {visibleFiles.length > 0 ? (
+          <p className="upload-panel__more" role="status">
+            {messages.upload.addMoreHint}
+          </p>
+        ) : null}
+
         <button
           className="button button--primary button--wide"
           type="button"
-          disabled={!readyFile}
+          disabled={!canContinue}
           onClick={() => void navigate("/configure")}
         >
-          {messages.upload.continue} <span aria-hidden="true">→</span>
+          {canContinue && readyCount > 1
+            ? messages.upload.continueWithCount(readyCount)
+            : messages.upload.continue}{" "}
+          <span aria-hidden="true">→</span>
         </button>
-        {file && !readyFile ? (
+        {firstRejected ? (
           <p className="upload-panel__pending" role="status">
-            {file.status === "REJECTED"
-              ? `${rejectionExplanation(file.rejectionCode, messages.upload)} ${messages.upload.rejectedHelp}`
-              : messages.upload.continueUnavailable}
+            {`${rejectionExplanation(firstRejected.rejectionCode, messages.upload)} ${messages.upload.rejectedHelp}`}
+          </p>
+        ) : !canContinue && visibleFiles.length > 0 ? (
+          <p className="upload-panel__pending" role="status">
+            {messages.upload.continueUnavailable}
           </p>
         ) : null}
       </section>

@@ -17,7 +17,14 @@
  *    ask the device what it already knows instead of printing twice.
  */
 
-export const PRINT_MANIFEST_VERSION = 1;
+export const PRINT_MANIFEST_VERSION = 2;
+
+/**
+ * The shape of a capability snapshot. Version 3 added the host-side options —
+ * orientation and scaling — that a device never sees because the print-ready
+ * PDF already carries them.
+ */
+export const PRINT_CAPABILITY_SNAPSHOT_VERSION = 3;
 
 /** A validated document as the print job froze it. */
 export interface PrintJobDocument {
@@ -29,6 +36,16 @@ export interface PrintJobDocument {
   pageCount: number;
   pageRanges: number[][];
   selectedPages: number;
+  /**
+   * How the device prints this document. Copies, sides and orientation belong
+   * to a document, so one job may print two double-sided copies of one and a
+   * single landscape copy of the next.
+   */
+  copies: number;
+  duplex: string;
+  orientation: string;
+  printedSides: number;
+  physicalSheets: number;
 }
 
 /**
@@ -45,10 +62,7 @@ export interface PrintJobManifest {
   settingsManifestHash: string;
   quoteId: string;
   paymentId: string;
-  copies: number;
-  duplex: string;
   paperSize: string;
-  orientation: string;
   scaling: string;
   collate: boolean;
   colorMode: string;
@@ -132,16 +146,67 @@ export interface PrinterHealth {
   warningCode: PrintWarningCode | null;
 }
 
+/**
+ * What the control plane may offer a customer.
+ *
+ * Paper, duplex, colour and copy count are the device's answer. Orientation and
+ * scaling are not: the document processor bakes both into the print-ready PDF
+ * long before a queue sees it, so they are reported as host capabilities rather
+ * than asked of hardware that would only be guessed at.
+ */
 export interface PrinterCapabilitiesSnapshot {
   version: number;
   paperSizes: readonly string[];
   duplexModes: readonly string[];
   colorModes: readonly string[];
+  orientations: readonly string[];
+  scalingModes: readonly string[];
   maxCopies: number;
+}
+
+export type PrinterQueueState = "READY" | "PAUSED" | "OFFLINE" | "ERROR";
+
+/**
+ * One print queue as the operating system's print subsystem describes it.
+ *
+ * This is discovery output, not an approval. A kiosk prints only to a queue an
+ * operator certified by name; everything else here exists so that refusal can be
+ * explained and so a swapped printer is visible rather than silent.
+ */
+export interface PrinterQueueDescriptor {
+  queueName: string;
+  /** Where the queue sends work — a device URI, never a customer string. */
+  deviceUri: string | null;
+  driverName: string | null;
+  portName: string | null;
+  state: PrinterQueueState;
+  /** True when the operating system treats this queue as the machine default. */
+  isDefault: boolean;
+  /** True when the queue is published to other machines on the network. */
+  shared: boolean;
+}
+
+/**
+ * The identity of the device an adapter is bound to.
+ *
+ * A pilot fleet is certified per printer, driver and firmware combination, so
+ * these fields are the record that says which combination actually printed. All
+ * of them are nullable: a device that will not say is reported as not saying.
+ */
+export interface PrinterBinding {
+  adapter: string;
+  queueName: string | null;
+  /** A stable device identity, so a swapped printer is detectable. */
+  deviceId: string | null;
+  makeAndModel: string | null;
+  driverName: string | null;
+  firmware: string | null;
 }
 
 export interface PrinterAdapter {
   readonly name: string;
+  /** Which device this adapter speaks to, for the fleet and certification record. */
+  describe(): Promise<PrinterBinding>;
   getHealth(): Promise<PrinterHealth>;
   getCapabilities(): Promise<PrinterCapabilitiesSnapshot>;
   /**
@@ -172,6 +237,23 @@ export interface PrinterAdapter {
   discardOutputsBefore(cutoff: Date): Promise<number>;
 }
 
+/**
+ * Enumerating the print queues this machine can see.
+ *
+ * It is deliberately separate from `PrinterAdapter`: discovery is what an
+ * operator uses to certify a queue, and an adapter already bound to one has no
+ * reason to be able to look at the others.
+ */
+export interface PrinterQueueDiscovery {
+  listQueues(): Promise<readonly PrinterQueueDescriptor[]>;
+}
+
+export function supportsQueueDiscovery(
+  adapter: PrinterAdapter
+): adapter is PrinterAdapter & PrinterQueueDiscovery {
+  return typeof (adapter as Partial<PrinterQueueDiscovery>).listQueues === "function";
+}
+
 export type PrinterAdapterErrorCode =
   | "PRINTER_OFFLINE"
   | "OPERATION_ID_INVALID"
@@ -179,6 +261,12 @@ export type PrinterAdapterErrorCode =
   | "ARTIFACT_UNAVAILABLE"
   | "OUTPUT_WRITE_FAILED"
   | "SUBMISSION_UNCONFIRMED"
+  /** The queue named in configuration is not one this machine offers. */
+  | "QUEUE_NOT_FOUND"
+  /** The queue exists but no operator certified it for this kiosk. */
+  | "QUEUE_NOT_APPROVED"
+  /** The device host or the device itself could not be reached at all. */
+  | "DEVICE_UNREACHABLE"
   | "DEVICE_ERROR";
 
 export class PrinterAdapterError extends Error {

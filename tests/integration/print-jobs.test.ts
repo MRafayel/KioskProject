@@ -986,11 +986,16 @@ async function expectSessionState(sessionId: string, state: string): Promise<voi
 function settingsBody(fileId: string) {
   return {
     fileOrder: [fileId],
-    fileSelections: [{ fileId, pageRanges: null }],
-    copies: 1,
-    duplex: "SIMPLEX",
+    fileSelections: [
+      {
+        fileId,
+        pageRanges: null,
+        copies: 1,
+        duplex: "SIMPLEX",
+        orientation: "AUTO"
+      }
+    ],
     paperSize: "A4",
-    orientation: "AUTO",
     scaling: "FIT",
     collate: true
   };

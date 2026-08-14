@@ -50,10 +50,7 @@ const readyFixture = {
 // working any of them out locally.
 const settingsFixture = {
   revision: 1,
-  copies: 2,
-  duplex: "LONG_EDGE" as const,
   paperSize: "A4" as const,
-  orientation: "PORTRAIT" as const,
   scaling: "FIT" as const,
   collate: true,
   colorMode: "MONOCHROME" as const,
@@ -64,7 +61,12 @@ const settingsFixture = {
       pageCount: 8,
       pageRanges: [[3, 7] as [number, number]],
       pageRangeText: "3-7",
-      selectedPages: 5
+      selectedPages: 5,
+      copies: 2,
+      duplex: "LONG_EDGE" as const,
+      orientation: "PORTRAIT" as const,
+      printedSides: 10,
+      physicalSheets: 6
     }
   ],
   selectedPages: 5,
@@ -156,18 +158,16 @@ function readRequestBody(body: BodyInit | null | undefined): string {
  */
 function settingsResponseFor(requestBody: string) {
   const request = JSON.parse(requestBody || "{}") as UpdatePrintSettingsBody;
-  const pageRanges = parsePageRangeText(
-    request.fileSelections[0]?.pageRanges ?? null,
-    readyFixture.pageCount
-  );
+  const selection = request.fileSelections[0];
+  if (!selection) throw new Error("EXPECTED_FILE_SELECTION");
+  const pageRanges = parsePageRangeText(selection.pageRanges ?? null, readyFixture.pageCount);
   const selectedPages = countSelectedPages(pageRanges);
-  const usage = calculateSheetUsage({ selectedPages, duplex: request.duplex });
+  const usage = calculateSheetUsage({ selectedPages, duplex: selection.duplex });
+  const printedSides = usage.printedSidesPerCopy * selection.copies;
+  const physicalSheets = usage.physicalSheetsPerCopy * selection.copies;
 
   return {
     ...settingsFixture,
-    copies: request.copies,
-    duplex: request.duplex,
-    orientation: request.orientation,
     files: [
       {
         fileId: readyFixture.id,
@@ -175,12 +175,17 @@ function settingsResponseFor(requestBody: string) {
         pageCount: readyFixture.pageCount,
         pageRanges: pageRanges.map(([start, end]) => [start, end] as [number, number]),
         pageRangeText: formatPageRanges(pageRanges),
-        selectedPages
+        selectedPages,
+        copies: selection.copies,
+        duplex: selection.duplex,
+        orientation: selection.orientation,
+        printedSides,
+        physicalSheets
       }
     ],
     selectedPages,
-    printedSides: usage.printedSidesPerCopy * request.copies,
-    physicalSheets: usage.physicalSheetsPerCopy * request.copies
+    printedSides,
+    physicalSheets
   };
 }
 
@@ -588,7 +593,8 @@ describe("kiosk prototype journey", () => {
     await user.click(screen.getByRole("button", { name: "Start printing" }));
 
     expect(await screen.findByText("Document 1.pdf")).toBeVisible();
-    expect(screen.getAllByText("Upload complete").length).toBeGreaterThan(0);
+    // The pill reports the document set; the card reports the one document.
+    expect(screen.getByText("1 document ready")).toBeVisible();
     const continueButton = screen.getByRole("button", { name: /Continue to print settings/i });
     expect(continueButton).toBeEnabled();
     await user.click(continueButton);
@@ -621,7 +627,8 @@ describe("kiosk prototype journey", () => {
       target: { value: "7" }
     });
 
-    await user.click(screen.getByRole("button", { name: "Increase copies" }));
+    // Copies belong to a document, so the control names the one it changes.
+    await user.click(screen.getByRole("button", { name: "Increase copies of safe-fixture.pdf" }));
     await user.click(screen.getByLabelText("Double-sided"));
 
     // Payment stays unavailable until an authoritative price arrives.
@@ -637,11 +644,18 @@ describe("kiosk prototype journey", () => {
     const lastQuote = quoteRequests.at(-1);
     expect(lastSettings?.ifMatch).toBe('"1"');
     expect(lastSettings?.idempotencyKey).toMatch(/^kiosk-/);
+    // Copies, sides and orientation travel with the document they belong to.
     expect(JSON.parse(lastSettings?.body ?? "{}")).toMatchObject({
-      copies: 2,
-      duplex: "LONG_EDGE",
       paperSize: "A4",
-      fileSelections: [{ fileId: readyFixture.id, pageRanges: "3-7" }]
+      fileSelections: [
+        {
+          fileId: readyFixture.id,
+          pageRanges: "3-7",
+          copies: 2,
+          duplex: "LONG_EDGE",
+          orientation: "PORTRAIT"
+        }
+      ]
     });
     // No request the kiosk sends may contain an amount, a currency, or a total.
     for (const request of [...settingsRequests, ...quoteRequests]) {
@@ -815,12 +829,8 @@ describe("kiosk prototype journey", () => {
       }
     });
 
-    expect(container.querySelector(".file-card--compact .file-card__icon")).toHaveTextContent(
-      "JPEG"
-    );
-    expect(container.querySelector(".file-card--compact .file-card__icon")).not.toHaveTextContent(
-      "PDF"
-    );
+    expect(container.querySelector(".document-card .file-card__icon")).toHaveTextContent("JPEG");
+    expect(container.querySelector(".document-card .file-card__icon")).not.toHaveTextContent("PDF");
   });
 
   it("keeps the authoritative ready file until kiosk deletion is confirmed and retries safely", async () => {
@@ -836,7 +846,7 @@ describe("kiosk prototype journey", () => {
     });
     await user.click(screen.getByRole("button", { name: "English" }));
 
-    await user.click(screen.getByRole("button", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove safe-fixture.pdf" }));
     expect(
       await screen.findByText("The file could not be removed. Try again before continuing.")
     ).toBeVisible();
@@ -846,7 +856,7 @@ describe("kiosk prototype journey", () => {
     );
     expect(retainedKey).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Remove safe-fixture.pdf" }));
     expect(await screen.findByRole("heading", { name: "Upload your document" })).toBeVisible();
     expect(fileDeleteIdempotencyKeys).toEqual([retainedKey, retainedKey]);
     expect(

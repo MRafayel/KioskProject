@@ -212,7 +212,7 @@ describe("mobile upload application", () => {
           status === "READY" ? /պատրաստ է տպման/ : /պատրաստում ենք էջերի նախադիտումը/
         )
       ).toBeVisible();
-      expect(screen.getByRole("button", { name: "Ընտրել ևս մեկ ֆայլ" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Ավելացնել ևս ֆայլեր" })).toBeDisabled();
     }
   );
 
@@ -261,7 +261,7 @@ describe("mobile upload application", () => {
     expect(await screen.findByText("Տպման գործընթացն ավարտված է")).toBeVisible();
     expect(screen.getByText(/այլևս հնարավոր չէ ֆայլ ավելացնել/)).toBeVisible();
     expect(screen.queryByText(/Կարող եք ֆայլ վերբեռնել մինչև/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Ընտրել ֆայլ" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Ընտրել ֆայլեր" })).toBeDisabled();
     expect(xhrConstructor).not.toHaveBeenCalled();
   });
 
@@ -295,7 +295,7 @@ describe("mobile upload application", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Չհաջողվեց վերբեռնել ֆայլը");
     expect(screen.getByText("Հեռախոսը միացված է տերմինալին")).toBeVisible();
     expect(screen.getByText(/Կարող եք ֆայլ վերբեռնել մինչև/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Ընտրել ֆայլ" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Ընտրել ֆայլեր" })).toBeEnabled();
     expect(screen.queryByText("Տպման գործընթացն ավարտված է")).not.toBeInTheDocument();
   });
 
@@ -520,7 +520,7 @@ describe("mobile upload application", () => {
 
     expect(await screen.findByText(/Ֆայլը վնասված է/)).toBeVisible();
     expect(screen.queryByText(/վնասակար ծրագրերի/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Ընտրել ֆայլ" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Ընտրել ֆայլեր" })).toBeEnabled();
     expect(listRequests).toBe(2);
   });
 

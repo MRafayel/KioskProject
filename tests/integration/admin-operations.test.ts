@@ -1064,16 +1064,29 @@ async function seedPaidSession(
       id: randomUUID(),
       sessionId,
       revision: 1,
-      copies: 1,
-      duplex: "SIMPLEX",
       paperSize: "A4",
-      orientation: "PORTRAIT",
       scaling: "FIT",
       collate: true,
       colorMode: "MONOCHROME",
       // A trigger refuses a settings revision without per-document digests, so
       // the seed carries one exactly as the real upload path would.
-      selections: [{ fileId, contentSha256: randomBytes(32).toString("hex"), pages: "1-3" }],
+      selections: [
+        {
+          fileId,
+          position: 0,
+          pageCount: 3,
+          processingRevision: 1,
+          contentSha256: randomBytes(32).toString("hex"),
+          pageRanges: [[1, 3]],
+          pageRangeText: "1-3",
+          selectedPages: 3,
+          copies: 1,
+          duplex: "SIMPLEX",
+          orientation: "PORTRAIT",
+          printedSides: 3,
+          physicalSheets: 3
+        }
+      ],
       selectedPages: 3,
       printedSides: 3,
       physicalSheets: 3,

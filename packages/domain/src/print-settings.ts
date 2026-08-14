@@ -18,8 +18,13 @@ export const SCALING_MODES = ["FIT", "ACTUAL_SIZE"] as const;
 export const COLOR_MODES = ["MONOCHROME"] as const;
 
 export const PRINT_COLOR_MODE = "MONOCHROME";
-/** Version 2 dropped pages-per-sheet: one selected page is always one side. */
-export const SETTINGS_MANIFEST_VERSION = 2;
+/**
+ * Version 2 dropped pages-per-sheet: one selected page is always one side.
+ * Version 3 moved copies, duplex and orientation from the job onto each
+ * document, so a manifest describes what every document is printed as rather
+ * than one setting the whole run had to share.
+ */
+export const SETTINGS_MANIFEST_VERSION = 3;
 
 /** A page-range text longer than this is refused before parsing. */
 export const MAX_PAGE_RANGE_TEXT_LENGTH = 200;
@@ -34,13 +39,19 @@ export type ColorMode = (typeof COLOR_MODES)[number];
 
 export type PageRange = readonly [number, number];
 
-export interface PrintSettingsInput {
-  fileOrder: readonly string[];
-  fileSelections: readonly { fileId: string; pageRanges: string | null }[];
+/** What one document is printed as. See the settings contract for why. */
+export interface FileSelectionInput {
+  fileId: string;
+  pageRanges: string | null;
   copies: number;
   duplex: DuplexMode;
-  paperSize: PaperSize;
   orientation: Orientation;
+}
+
+export interface PrintSettingsInput {
+  fileOrder: readonly string[];
+  fileSelections: readonly FileSelectionInput[];
+  paperSize: PaperSize;
   scaling: ScalingMode;
   collate: boolean;
 }
@@ -89,22 +100,28 @@ export interface NormalizedFileSelection {
   pageRanges: PageRange[];
   pageRangeText: string;
   selectedPages: number;
+  copies: number;
+  duplex: DuplexMode;
+  orientation: Orientation;
   printedSidesPerCopy: number;
   physicalSheetsPerCopy: number;
+  /** This document's own contribution to the job, its copies included. */
+  printedSides: number;
+  physicalSheets: number;
 }
 
 export interface NormalizedPrintSettings {
-  copies: number;
-  duplex: DuplexMode;
   paperSize: PaperSize;
-  orientation: Orientation;
   scaling: ScalingMode;
   collate: boolean;
   colorMode: ColorMode;
   capabilityVersion: number;
   files: NormalizedFileSelection[];
+  /**
+   * Job totals. `selectedPages` counts each document's distinct chosen pages
+   * once; the printed side and sheet totals include every document's copies.
+   */
   selectedPages: number;
-  printedSidesPerCopy: number;
   printedSides: number;
   physicalSheets: number;
 }
@@ -113,11 +130,8 @@ export interface SettingsManifest {
   manifestVersion: number;
   colorMode: ColorMode;
   paperSize: PaperSize;
-  orientation: Orientation;
-  duplex: DuplexMode;
   scaling: ScalingMode;
   collate: boolean;
-  copies: number;
   capabilityVersion: number;
   files: Array<{
     fileId: string;
@@ -127,6 +141,9 @@ export interface SettingsManifest {
     pageCount: number;
     pageRanges: number[][];
     selectedPages: number;
+    copies: number;
+    duplex: DuplexMode;
+    orientation: Orientation;
   }>;
 }
 
@@ -237,18 +254,12 @@ export function normalizePrintSettings(
   context: NormalizePrintSettingsContext
 ): NormalizedPrintSettings {
   assertSupported(context.capabilities.paperSizes.includes(input.paperSize), "paperSize");
-  assertSupported(context.capabilities.duplexModes.includes(input.duplex), "duplex");
-  assertSupported(context.capabilities.orientations.includes(input.orientation), "orientation");
   assertSupported(context.capabilities.scalingModes.includes(input.scaling), "scaling");
   // Monochrome is the only output this product sells. A device that cannot
   // promise it must not receive a settings revision at all.
   assertSupported(context.capabilities.colorModes.includes(PRINT_COLOR_MODE), "colorMode");
 
   const maxCopies = Math.min(context.limits.maxCopies, context.capabilities.maxCopies);
-  if (!Number.isSafeInteger(input.copies) || input.copies < 1 || input.copies > maxCopies) {
-    throw new PrintSettingsError("COPIES_OUT_OF_RANGE", { copies: input.copies, maxCopies });
-  }
-
   const available = new Map(context.files.map((file) => [file.id, file]));
   if (input.fileOrder.length !== available.size) {
     throw new PrintSettingsError("FILE_ORDER_INVALID", {
@@ -266,24 +277,45 @@ export function normalizePrintSettings(
     });
   }
 
-  const selectionByFile = new Map<string, string | null>();
+  const selectionByFile = new Map<string, FileSelectionInput>();
   for (const selection of input.fileSelections) {
     if (selectionByFile.has(selection.fileId)) {
       throw new PrintSettingsError("FILE_SELECTION_INVALID", { reason: "DUPLICATE_SELECTION" });
     }
-    selectionByFile.set(selection.fileId, selection.pageRanges);
+    selectionByFile.set(selection.fileId, selection);
   }
 
   const files: NormalizedFileSelection[] = input.fileOrder.map((fileId, index) => {
     const file = available.get(fileId);
     if (!file) throw new PrintSettingsError("FILE_ORDER_INVALID", { reason: "UNKNOWN_FILE" });
-    if (!selectionByFile.has(fileId)) {
+    const selection = selectionByFile.get(fileId);
+    if (!selection) {
       throw new PrintSettingsError("FILE_SELECTION_INVALID", { reason: "MISSING_SELECTION" });
     }
 
-    const pageRanges = parsePageRangeText(selectionByFile.get(fileId) ?? null, file.pageCount);
+    // Every document is checked against the device on its own. One document
+    // asking for something the printer cannot do refuses the whole revision
+    // rather than being quietly printed as something else.
+    assertSupported(context.capabilities.duplexModes.includes(selection.duplex), "duplex");
+    assertSupported(
+      context.capabilities.orientations.includes(selection.orientation),
+      "orientation"
+    );
+    if (
+      !Number.isSafeInteger(selection.copies) ||
+      selection.copies < 1 ||
+      selection.copies > maxCopies
+    ) {
+      throw new PrintSettingsError("COPIES_OUT_OF_RANGE", {
+        fileId,
+        copies: selection.copies,
+        maxCopies
+      });
+    }
+
+    const pageRanges = parsePageRangeText(selection.pageRanges, file.pageCount);
     const selectedPages = countSelectedPages(pageRanges);
-    const usage = calculateSheetUsage({ selectedPages, duplex: input.duplex });
+    const usage = calculateSheetUsage({ selectedPages, duplex: selection.duplex });
 
     return {
       fileId,
@@ -294,7 +326,12 @@ export function normalizePrintSettings(
       pageRanges,
       pageRangeText: formatPageRanges(pageRanges),
       selectedPages,
-      ...usage
+      copies: selection.copies,
+      duplex: selection.duplex,
+      orientation: selection.orientation,
+      ...usage,
+      printedSides: usage.printedSidesPerCopy * selection.copies,
+      physicalSheets: usage.physicalSheetsPerCopy * selection.copies
     };
   });
 
@@ -307,9 +344,10 @@ export function normalizePrintSettings(
     });
   }
 
-  const printedSidesPerCopy = sum(files.map((file) => file.printedSidesPerCopy));
-  const printedSides = printedSidesPerCopy * input.copies;
-  const physicalSheets = sum(files.map((file) => file.physicalSheetsPerCopy)) * input.copies;
+  // Copies are per document, so the job totals are the sum of what each
+  // document actually produces rather than one multiplication at the end.
+  const printedSides = sum(files.map((file) => file.printedSides));
+  const physicalSheets = sum(files.map((file) => file.physicalSheets));
   if (printedSides > context.limits.maxPrintedSides) {
     throw new PrintSettingsError("PRINTED_SIDE_LIMIT_EXCEEDED", {
       printedSides,
@@ -318,17 +356,13 @@ export function normalizePrintSettings(
   }
 
   return {
-    copies: input.copies,
-    duplex: input.duplex,
     paperSize: input.paperSize,
-    orientation: input.orientation,
     scaling: input.scaling,
     collate: input.collate,
     colorMode: PRINT_COLOR_MODE,
     capabilityVersion: context.capabilities.version,
     files,
     selectedPages,
-    printedSidesPerCopy,
     printedSides,
     physicalSheets
   };
@@ -344,11 +378,8 @@ export function buildSettingsManifest(settings: NormalizedPrintSettings): Settin
     manifestVersion: SETTINGS_MANIFEST_VERSION,
     colorMode: settings.colorMode,
     paperSize: settings.paperSize,
-    orientation: settings.orientation,
-    duplex: settings.duplex,
     scaling: settings.scaling,
     collate: settings.collate,
-    copies: settings.copies,
     capabilityVersion: settings.capabilityVersion,
     files: settings.files.map((file) => ({
       fileId: file.fileId,
@@ -357,7 +388,13 @@ export function buildSettingsManifest(settings: NormalizedPrintSettings): Settin
       contentSha256: file.contentSha256,
       pageCount: file.pageCount,
       pageRanges: file.pageRanges.map(([start, end]) => [start, end]),
-      selectedPages: file.selectedPages
+      selectedPages: file.selectedPages,
+      // Inside the hash: what a document is printed as is part of what was
+      // priced, so changing one document's copies or sides is a different
+      // manifest and therefore a different price.
+      copies: file.copies,
+      duplex: file.duplex,
+      orientation: file.orientation
     }))
   };
 }

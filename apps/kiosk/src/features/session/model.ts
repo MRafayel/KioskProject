@@ -66,8 +66,15 @@ export type ReadyPrototypeFile = PrototypeFile & {
   sizeBytes: number;
 };
 
-export interface PrintSettings {
-  orientation: Orientation;
+/**
+ * What one document is printed as.
+ *
+ * Every choice here belongs to the document rather than to the job: a page
+ * range means nothing without the document it counts pages in, and copies,
+ * sides and orientation are what that one document is printed as. The control
+ * plane models it the same way — one `fileSelections` entry per file.
+ */
+export interface FileSelection {
   pageStart: number;
   pageEnd: number | null;
   /**
@@ -80,6 +87,20 @@ export interface PrintSettings {
   excludedPages: number[];
   copies: number;
   duplex: boolean;
+  orientation: Orientation;
+}
+
+/**
+ * What the customer chose, document by document.
+ *
+ * Everything a customer picks belongs to a document: pages, copies, sides and
+ * orientation all mean something only against the document they apply to. Paper
+ * size, scaling and collation are the job's, and the kiosk does not offer them,
+ * so this holds nothing but the per-document choices.
+ */
+export interface PrintSettings {
+  /** Every choice, keyed by file id. */
+  selections: Readonly<Record<string, FileSelection>>;
 }
 
 /**
@@ -141,8 +162,8 @@ export type PrototypeAction =
   | { type: "SESSION_VERSION_OBSERVED"; version: number }
   | { type: "FILES_SYNCED"; files: PrototypeFile[] }
   | { type: "FILE_REMOVED"; fileId: string }
-  | { type: "SETTINGS_CHANGED"; settings: Partial<PrintSettings> }
-  | { type: "PAGE_EXCLUSION_CHANGED"; pageNumber: number; excluded: boolean }
+  | { type: "FILE_SELECTION_CHANGED"; fileId: string; selection: Partial<FileSelection> }
+  | { type: "PAGE_EXCLUSION_CHANGED"; fileId: string; pageNumber: number; excluded: boolean }
   | { type: "CAPABILITIES_LOADED"; capabilities: PrintCapabilitiesResponse }
   | { type: "PRICING_PENDING" }
   | { type: "PRICING_RESOLVED"; settings: PrintSettingsSnapshot; quote: PriceQuote }
@@ -161,14 +182,26 @@ export type PrototypeAction =
   | { type: "OUTCOME_CHANGED"; outcome: PrototypeOutcome }
   | { type: "RESET" };
 
-export const defaultPrintSettings: PrintSettings = {
-  orientation: "PORTRAIT",
+export const defaultFileSelection: FileSelection = {
   pageStart: 1,
   pageEnd: null,
   excludedPages: [],
   copies: 1,
-  duplex: false
+  duplex: false,
+  orientation: "PORTRAIT"
 };
+
+export const defaultPrintSettings: PrintSettings = { selections: {} };
+
+/**
+ * The selection for one document, or the untouched default for a document the
+ * customer has not configured yet. Reading through this rather than indexing
+ * the record keeps "not configured" and "every page" the same thing, which is
+ * what a customer who never opens the page controls expects.
+ */
+export function fileSelection(settings: PrintSettings, fileId: string): FileSelection {
+  return settings.selections[fileId] ?? defaultFileSelection;
+}
 
 export const idlePricingState: PricingState = {
   status: "IDLE",
@@ -209,13 +242,18 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         (a, b) => fileDisplayPriority(a) - fileDisplayPriority(b) || a.ordinal - b.ordinal
       );
       // A changed document set retires the stored price with the same finality
-      // the server applies to it, and takes the page exclusions with it: those
-      // page numbers described a document that is no longer the one on screen.
+      // the server applies to it.
       const sameMaterial = readyFileFingerprint(files) === readyFileFingerprint(state.files);
+      // Selections are pruned per document rather than wholesale: adding a
+      // second document must not throw away the pages the customer already
+      // chose in the first, but a document that was reprocessed or removed
+      // takes its own page numbers with it, because they described a document
+      // that is no longer the one on screen.
+      const selections = retainSelections(state.settings.selections, state.files, files);
       return {
         ...state,
         files,
-        settings: sameMaterial ? state.settings : { ...state.settings, excludedPages: [] },
+        settings: { ...state.settings, selections },
         pricing: sameMaterial ? state.pricing : idlePricingState,
         // A price that no longer applies cannot be the one being paid, so the
         // payment on screen goes with it. The control plane holds the same
@@ -223,33 +261,52 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
         payment: sameMaterial ? state.payment : nextPaymentAttempt(state.payment)
       };
     }
-    case "FILE_REMOVED":
+    case "FILE_REMOVED": {
+      const files = state.files.filter((file) => file.id !== action.fileId);
       return {
         ...state,
-        files: state.files.filter((file) => file.id !== action.fileId),
-        settings: { ...state.settings, excludedPages: [] },
+        files,
+        settings: {
+          ...state.settings,
+          selections: retainSelections(state.settings.selections, state.files, files)
+        },
         pricing: idlePricingState,
         payment: nextPaymentAttempt(state.payment)
       };
-    case "SETTINGS_CHANGED":
+    }
+    case "FILE_SELECTION_CHANGED": {
+      const current = fileSelection(state.settings, action.fileId);
+      const next = { ...current, ...action.selection };
+      if (sameSelection(current, next)) return state;
       return {
         ...state,
-        settings: { ...state.settings, ...action.settings },
+        settings: {
+          ...state.settings,
+          selections: { ...state.settings.selections, [action.fileId]: next }
+        },
         pricing: idlePricingState,
         payment: nextPaymentAttempt(state.payment)
       };
+    }
     case "PAGE_EXCLUSION_CHANGED": {
+      const current = fileSelection(state.settings, action.fileId);
       const excludedPages = action.excluded
-        ? [...new Set([...state.settings.excludedPages, action.pageNumber])].sort(
+        ? [...new Set([...current.excludedPages, action.pageNumber])].sort(
             (left, right) => left - right
           )
-        : state.settings.excludedPages.filter((page) => page !== action.pageNumber);
+        : current.excludedPages.filter((page) => page !== action.pageNumber);
       // Asking for the state a page is already in changes nothing, and must not
       // throw away a live price to say so.
-      if (excludedPages.length === state.settings.excludedPages.length) return state;
+      if (excludedPages.length === current.excludedPages.length) return state;
       return {
         ...state,
-        settings: { ...state.settings, excludedPages },
+        settings: {
+          ...state.settings,
+          selections: {
+            ...state.settings.selections,
+            [action.fileId]: { ...current, excludedPages }
+          }
+        },
         pricing: idlePricingState,
         payment: nextPaymentAttempt(state.payment)
       };
@@ -303,9 +360,14 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
   }
 }
 
+/**
+ * The job totals across every document.
+ *
+ * There is deliberately no aggregate page range here: a range belongs to one
+ * document, and "pages 2-5" spanning a set of documents would describe nothing
+ * the customer chose. Per-document bounds come from {@link pageRangeBounds}.
+ */
 export interface PrintSummary {
-  pageStart: number;
-  pageEnd: number;
   selectedPages: number;
   totalSides: number;
   totalSheets: number;
@@ -320,32 +382,35 @@ export function calculatePrintSummary(
   files: PrototypeFile[],
   settings: PrintSettings
 ): PrintSummary {
-  const availablePages = files.reduce((total, file) => total + (file.pageCount ?? 0), 0);
-  if (availablePages === 0) {
-    return { pageStart: 0, pageEnd: 0, selectedPages: 0, totalSides: 0, totalSheets: 0 };
+  const ready = files.filter(isReadyFile);
+  if (ready.length === 0) return { selectedPages: 0, totalSides: 0, totalSheets: 0 };
+
+  // Each document contributes the pages its own selection prints. Sheets are
+  // counted per document rather than from the job total because a duplex sheet
+  // never carries two different documents: an odd document leaves the back of
+  // its last sheet blank, exactly as the control plane prices it.
+  let selectedPages = 0;
+  let totalSides = 0;
+  let totalSheets = 0;
+  for (const file of ready) {
+    const selection = fileSelection(settings, file.id);
+    const pages = countPagesInRanges(selectedPageRanges(selection, file.pageCount));
+    const sheetsPerCopy = selection.duplex ? Math.ceil(pages / 2) : pages;
+    selectedPages += pages;
+    totalSides += pages * selection.copies;
+    totalSheets += sheetsPerCopy * selection.copies;
   }
 
-  const { pageStart, pageEnd } = pageRangeBounds(settings, availablePages);
-  const selectedPages = countPagesInRanges(selectedPageRanges(settings, availablePages));
-  const sidesPerCopy = selectedPages;
-  const sheetsPerCopy = settings.duplex ? Math.ceil(sidesPerCopy / 2) : sidesPerCopy;
-
-  return {
-    pageStart,
-    pageEnd,
-    selectedPages,
-    totalSides: sidesPerCopy * settings.copies,
-    totalSheets: sheetsPerCopy * settings.copies
-  };
+  return { selectedPages, totalSides, totalSheets };
 }
 
 /** Where the customer's chosen range actually falls in a document this long. */
 export function pageRangeBounds(
-  settings: PrintSettings,
+  selection: FileSelection,
   pageCount: number
 ): { pageStart: number; pageEnd: number } {
-  const pageStart = clampPage(settings.pageStart, 1, pageCount);
-  const pageEnd = clampPage(settings.pageEnd ?? pageCount, pageStart, pageCount);
+  const pageStart = clampPage(selection.pageStart, 1, pageCount);
+  const pageEnd = clampPage(selection.pageEnd ?? pageCount, pageStart, pageCount);
   return { pageStart, pageEnd };
 }
 
@@ -354,9 +419,9 @@ export function pageRangeBounds(
  * page taken out, as the contiguous groups the control plane is told about.
  * An empty result means the customer has excluded everything they selected.
  */
-export function selectedPageRanges(settings: PrintSettings, pageCount: number): PageRange[] {
-  const { pageStart, pageEnd } = pageRangeBounds(settings, pageCount);
-  const excluded = new Set(settings.excludedPages);
+export function selectedPageRanges(selection: FileSelection, pageCount: number): PageRange[] {
+  const { pageStart, pageEnd } = pageRangeBounds(selection, pageCount);
+  const excluded = new Set(selection.excludedPages);
   const ranges: Array<[number, number]> = [];
 
   for (let page = pageStart; page <= pageEnd; page += 1) {
@@ -377,13 +442,13 @@ export function countPagesInRanges(ranges: readonly PageRange[]): number {
 export type PagePrintState = "PRINTED" | "EXCLUDED" | "OUT_OF_RANGE";
 
 export function pagePrintState(
-  settings: PrintSettings,
+  selection: FileSelection,
   pageCount: number,
   pageNumber: number
 ): PagePrintState {
-  const { pageStart, pageEnd } = pageRangeBounds(settings, pageCount);
+  const { pageStart, pageEnd } = pageRangeBounds(selection, pageCount);
   if (pageNumber < pageStart || pageNumber > pageEnd) return "OUT_OF_RANGE";
-  return settings.excludedPages.includes(pageNumber) ? "EXCLUDED" : "PRINTED";
+  return selection.excludedPages.includes(pageNumber) ? "EXCLUDED" : "PRINTED";
 }
 
 /**
@@ -393,16 +458,21 @@ export function pagePrintState(
  * the control plane refuse the settings afterwards: both would leave the
  * customer looking at a configuration that cannot be priced, with nothing on
  * screen explaining which tap caused it.
+ *
+ * Both are per document. The control plane requires every document in the job
+ * to select at least one page, so emptying one document's selection is refused
+ * here even when other documents still print; removing the document is the way
+ * to print none of it.
  */
 export type PageExclusionRefusal = "LAST_SELECTED_PAGE" | "SELECTION_TOO_COMPLEX";
 
 export function pageExclusionRefusal(
-  settings: PrintSettings,
+  selection: FileSelection,
   pageCount: number,
   pageNumber: number
 ): PageExclusionRefusal | null {
   const ranges = selectedPageRanges(
-    { ...settings, excludedPages: [...settings.excludedPages, pageNumber] },
+    { ...selection, excludedPages: [...selection.excludedPages, pageNumber] },
     pageCount
   );
   if (ranges.length === 0) return "LAST_SELECTED_PAGE";
@@ -417,6 +487,17 @@ export function pageExclusionRefusal(
 
 export function isReadyFile(file: PrototypeFile | undefined): file is ReadyPrototypeFile {
   return file?.status === "READY" && file.pageCount !== null && file.sizeBytes !== null;
+}
+
+/**
+ * Every validated document, in the order it prints.
+ *
+ * Upload order is print order, and it is the order `fileOrder` is sent in, so
+ * sorting here keeps what the customer sees and what the control plane is told
+ * about the same sequence.
+ */
+export function readyFiles(files: readonly PrototypeFile[]): ReadyPrototypeFile[] {
+  return files.filter(isReadyFile).sort((left, right) => left.ordinal - right.ordinal);
 }
 
 /**
@@ -456,6 +537,53 @@ function readyFileFingerprint(files: PrototypeFile[]): string {
     .filter(isReadyFile)
     .map((file) => `${file.id}:${file.processingRevision}:${file.pageCount}`)
     .join("|");
+}
+
+/** What each ready document is, so a change to one can be told from a change to the set. */
+function fileMaterial(files: PrototypeFile[]): Map<string, string> {
+  return new Map(
+    files
+      .filter(isReadyFile)
+      .map((file) => [file.id, `${file.processingRevision}:${file.pageCount}`])
+  );
+}
+
+/**
+ * Carry page selections across a change to the document set.
+ *
+ * A selection survives only while the document it counts pages in is still
+ * there and still the same document. One that was removed, or reprocessed into
+ * a different page count, drops its selection rather than applying page numbers
+ * to content the customer never saw.
+ */
+function retainSelections(
+  selections: Readonly<Record<string, FileSelection>>,
+  previousFiles: PrototypeFile[],
+  nextFiles: PrototypeFile[]
+): Readonly<Record<string, FileSelection>> {
+  const previous = fileMaterial(previousFiles);
+  const next = fileMaterial(nextFiles);
+  const retained: Record<string, FileSelection> = {};
+
+  for (const [fileId, selection] of Object.entries(selections)) {
+    const material = next.get(fileId);
+    if (material === undefined || material !== previous.get(fileId)) continue;
+    retained[fileId] = selection;
+  }
+
+  return retained;
+}
+
+function sameSelection(left: FileSelection, right: FileSelection): boolean {
+  return (
+    left.pageStart === right.pageStart &&
+    left.pageEnd === right.pageEnd &&
+    left.copies === right.copies &&
+    left.duplex === right.duplex &&
+    left.orientation === right.orientation &&
+    left.excludedPages.length === right.excludedPages.length &&
+    left.excludedPages.every((page, index) => page === right.excludedPages[index])
+  );
 }
 
 /**

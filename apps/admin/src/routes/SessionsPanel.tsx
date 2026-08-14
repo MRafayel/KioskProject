@@ -226,10 +226,10 @@ function SessionDetail({
             <>
               <h3>What was configured</h3>
               <p className="panel__status">
-                {detail.data.settings.copies} × {detail.data.settings.paperSize},{" "}
-                {detail.data.settings.colorMode.toLowerCase()},{" "}
-                {detail.data.settings.duplex.toLowerCase()} — {detail.data.settings.selectedPages}{" "}
-                pages selected, {detail.data.settings.physicalSheets} sheets.
+                {detail.data.settings.paperSize}, {detail.data.settings.colorMode.toLowerCase()} —{" "}
+                {detail.data.settings.selectedPages} pages selected across{" "}
+                {detail.data.documents.total} documents, {detail.data.settings.physicalSheets}{" "}
+                sheets.
                 {detail.data.settings.selectionsRedactedAt
                   ? " Per-document digests have been destroyed by retention."
                   : ""}

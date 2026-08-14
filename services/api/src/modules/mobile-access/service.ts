@@ -4,7 +4,7 @@ import {
   type SessionState
 } from "@printing-kiosk/contracts";
 import { Prisma, type PrismaClient } from "@printing-kiosk/database";
-import { isSessionExpired } from "@printing-kiosk/domain";
+import { isSessionExpired, UPLOADABLE_SESSION_STATES } from "@printing-kiosk/domain";
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { digestUploadValue, safelyEqualHexDigests } from "../sessions/crypto.js";
@@ -19,7 +19,12 @@ import {
 
 const MAX_TRANSACTION_ATTEMPTS = 4;
 const MOBILE_COOKIE_PATTERN = /^m_[A-Za-z0-9_-]{43}$/;
-const MOBILE_ALLOWED_STATES: SessionState[] = ["WAITING_FOR_UPLOAD"];
+/**
+ * A phone stays connected for as long as the session still takes documents.
+ * One session may carry several, so this deliberately outlives the first
+ * validated upload; the shared list is what the upload path itself enforces.
+ */
+const MOBILE_ALLOWED_STATES: readonly SessionState[] = UPLOADABLE_SESSION_STATES;
 
 interface MobileAccessServiceOptions {
   database: PrismaClient;

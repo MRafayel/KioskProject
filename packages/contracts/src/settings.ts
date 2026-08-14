@@ -17,10 +17,22 @@ export const pageRangeTextSchema = z
   .max(200)
   .regex(/^$|^\d{1,6}(?:-\d{1,6})?(?:\s*,\s*\d{1,6}(?:-\d{1,6})?)*$/);
 
+/**
+ * What one document is printed as.
+ *
+ * Copies, sides and orientation belong to a document rather than to the job:
+ * a customer sending a two-page contract and a photo prints two copies of one
+ * double-sided and one copy of the other in landscape, and a job-wide value
+ * could only be wrong for one of them. Paper size, scaling and collation stay
+ * on the job because the device applies them to the whole run.
+ */
 export const fileSelectionRequestSchema = z
   .object({
     fileId: z.string().uuid(),
-    pageRanges: pageRangeTextSchema.nullable().default(null)
+    pageRanges: pageRangeTextSchema.nullable().default(null),
+    copies: z.number().int().min(1).max(100),
+    duplex: duplexModeSchema,
+    orientation: orientationSchema
   })
   .strict();
 
@@ -28,10 +40,7 @@ export const updatePrintSettingsBodySchema = z
   .object({
     fileOrder: z.array(z.string().uuid()).min(1).max(10),
     fileSelections: z.array(fileSelectionRequestSchema).min(1).max(10),
-    copies: z.number().int().min(1).max(100),
-    duplex: duplexModeSchema,
     paperSize: paperSizeSchema,
-    orientation: orientationSchema,
     scaling: scalingModeSchema,
     collate: z.boolean()
   })
@@ -49,21 +58,25 @@ export const fileSelectionSnapshotSchema = z
     pageCount: z.number().int().positive(),
     pageRanges: z.array(normalizedPageRangeSchema).min(1),
     pageRangeText: z.string().min(1).max(400),
-    selectedPages: z.number().int().positive()
+    selectedPages: z.number().int().positive(),
+    copies: z.number().int().positive(),
+    duplex: duplexModeSchema,
+    orientation: orientationSchema,
+    /** This document's own contribution to the job, copies included. */
+    printedSides: z.number().int().positive(),
+    physicalSheets: z.number().int().positive()
   })
   .strict();
 
 export const printSettingsSnapshotSchema = z
   .object({
     revision: z.number().int().positive(),
-    copies: z.number().int().positive(),
-    duplex: duplexModeSchema,
     paperSize: paperSizeSchema,
-    orientation: orientationSchema,
     scaling: scalingModeSchema,
     collate: z.boolean(),
     colorMode: colorModeSchema,
     files: z.array(fileSelectionSnapshotSchema).min(1),
+    /** Job totals. Every per-document copy count is already counted in here. */
     selectedPages: z.number().int().positive(),
     printedSides: z.number().int().positive(),
     physicalSheets: z.number().int().positive(),
