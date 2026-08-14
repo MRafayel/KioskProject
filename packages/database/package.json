@@ -38,13 +38,13 @@
   },
   "dependencies": {
     "@printing-kiosk/domain": "workspace:*",
-    "@prisma/adapter-pg": "7.9.0",
-    "@prisma/client": "7.9.0",
+    "@prisma/adapter-pg": "7.9.1",
+    "@prisma/client": "7.9.1",
     "dotenv": "17.4.2",
-    "pg": "8.22.0"
+    "pg": "8.23.0"
   },
   "devDependencies": {
-    "@types/pg": "8.20.0",
+    "@types/pg": "8.21.0",
     "prisma": "7.9.0",
     "tsx": "4.23.0"
   }
