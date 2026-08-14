@@ -12,40 +12,18 @@ what it accepts.
 | ------------------- | ---------------------------------------------------------------------------- |
 | A4                  | The only paper size the product prices                                       |
 | Monochrome          | The product prints monochrome only; colour is not a setting                  |
-| PDF input           | The document processor produces one normalized PDF                           |
-| Long-edge duplex    | Optional, but duplex pricing depends on it                                   |
+| Windows PDF render  | The host renders the normalized PDF before the Canon driver sees it          |
+| Long-edge duplex    | The only two-sided mode the product offers                                   |
 | Per-job sheet count | Optional, and the difference between a confirmed print and operator recovery |
 
 The last row is the one that surprises people. A device that accepts a job and
 reports it complete without saying how many sheets it produced is not broken —
-but every print through it settles as `RECOVERY_REQUIRED` rather than
-`COMPLETED`, because a queue that has stopped complaining is not evidence that
-paper emerged. Prefer a device that reports `job-media-sheets-completed`
-(IPP) or `PagesPrinted` (Windows).
+but that print settles as `RECOVERY_REQUIRED` rather than `COMPLETED`, because
+a queue that has stopped complaining is not evidence that paper emerged. The
+Windows host records `PagesPrinted` when the Canon queue exposes it; otherwise
+an operator settles the result from the admin panel.
 
 ## Adapters
-
-### IPP (`PRINTER_ADAPTER=ipp`)
-
-The preferred path for a networked printer, and the one that works from any
-operating system. It speaks IPP/1.1 directly: `Get-Printer-Attributes`,
-`Print-Job`, `Get-Jobs`, `Cancel-Job`.
-
-Requirements:
-
-- `document-format-supported` includes `application/pdf`. A queue that does not
-  is refused before anything is sent, rather than printing the file as text.
-- `media-ready` reports the loaded tray. What is loaded beats what is
-  supported: a model that supports A4 cannot print it out of a tray holding
-  Letter, and offering it would sell a job the hardware refuses.
-- `ipps://` off the kiosk machine. Print traffic carries the customer's
-  document; configuration validation refuses plain `ipp://` in production unless
-  the endpoint is on the kiosk's own loopback.
-
-One IPP job is created per document, because copies and duplex belong to a
-document in this product and to a job in IPP. Each is named
-`<operationId>#<position>of<count>`, which is how a queue listing alone resolves
-an interrupted print.
 
 ### Windows (`PRINTER_ADAPTER=windows`)
 
@@ -53,16 +31,15 @@ For a printer attached to a Windows kiosk through the print subsystem. The
 platform work lives in a device host process; see
 [windows-device-host.md](./windows-device-host.md).
 
-The shipped reference host spools PDF bytes with datatype `RAW`. That is the
-right thing for a **PDF-direct** queue — any modern network MFP, a PostScript
-queue with a PDF interpreter, an IPP Everywhere or Universal Print queue — and
-the wrong thing for a queue that expects rendered output.
+This product profile is USB-only. Network, WSD, shared and virtual queues are
+refused before submission. The host renders selected PDF pages with
+`Windows.Data.Pdf` and sends rendered pages through the installed Canon driver;
+it never hands RAW PDF bytes to the UFR II queue.
 
-**Microsoft Print to PDF and other GDI/XPS-only queues are not driven by the
-reference host.** They accept XPS, not PDF, so printing to them requires a host
-that renders the PDF into the spooler (`Windows.Data.Pdf` in a .NET host is the
-intended route). The protocol does not change; only the host does. This is the
-remaining hardware-side item — see the Phase 10 status document.
+The certified profile is Canon i-SENSYS LBP361dw with Canon Generic Plus UFR II
+V3.40. A future kiosk using the same model is configured by queue name and is
+accepted on any local `USBnnn` port; neither `USB001` nor the first machine's
+queue name is hardcoded.
 
 ### Mock (`PRINTER_ADAPTER=mock`)
 
@@ -114,7 +91,8 @@ everything else and duplicates output after a spooler restart is not certified.
 
 | Queue                                       | Why                                                                   |
 | ------------------------------------------- | --------------------------------------------------------------------- |
-| Microsoft Print to PDF                      | XPS only; needs a rendering device host                               |
-| Microsoft XPS Document Writer               | Same, and produces no paper                                           |
+| Microsoft Print to PDF                      | Virtual output, not the certified USB device                          |
+| Microsoft XPS Document Writer               | Virtual output, not the certified USB device                          |
+| WSD, TCP/IP and IPP queues                  | Network printer paths are disabled for this product                   |
 | Any shared queue on another host            | Refused by policy; the kiosk cannot certify a device it does not have |
 | Colour-only devices with no monochrome mode | The product prices monochrome; nothing would be offerable             |

@@ -154,6 +154,7 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
         position: artifact.position,
         path: artifact.path,
         copies: settings.copies,
+        pageRanges: settings.pageRanges.map((range) => [range[0]!, range[1]!] as const),
         sides,
         jobName: deviceJobName(submission.operationId, artifact.position, artifacts.length)
       };

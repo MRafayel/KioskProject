@@ -127,9 +127,9 @@ export class MockPrinterAdapter implements PrinterAdapter, PrinterQueueDiscovery
       paperSizes: ["A4"],
       duplexModes: ["SIMPLEX", "LONG_EDGE"],
       colorModes: ["MONOCHROME"],
-      orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
-      scalingModes: ["FIT", "ACTUAL_SIZE"],
-      maxCopies: 20
+      orientations: ["AUTO"],
+      scalingModes: ["FIT"],
+      maxCopies: 10
     });
   }
 

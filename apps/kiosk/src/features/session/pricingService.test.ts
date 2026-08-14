@@ -44,7 +44,7 @@ function savedSettings(sessionVersion: number) {
           selectedPages: 4,
           copies: 1,
           duplex: "SIMPLEX",
-          orientation: "PORTRAIT",
+          orientation: "AUTO",
           printedSides: 4,
           physicalSheets: 4
         }
@@ -170,14 +170,14 @@ describe("buildSettingsBody", () => {
         pageRanges: "1,3-4",
         copies: 1,
         duplex: "SIMPLEX",
-        orientation: "PORTRAIT"
+        orientation: "AUTO"
       },
       {
         fileId: second.id,
         pageRanges: "1-3",
         copies: 1,
         duplex: "SIMPLEX",
-        orientation: "PORTRAIT"
+        orientation: "AUTO"
       }
     ]);
   });

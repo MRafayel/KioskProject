@@ -564,14 +564,6 @@ describe("loadEnvironment", () => {
     expect(() =>
       loadEnvironment({
         NODE_ENV: "test",
-        PRINTER_ADAPTER: "ipp",
-        PRINTER_IPP_URL: "printer.local",
-        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
-      })
-    ).toThrow();
-    expect(() =>
-      loadEnvironment({
-        NODE_ENV: "test",
         PRINTER_ADAPTER: "windows",
         PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
       })
@@ -579,11 +571,11 @@ describe("loadEnvironment", () => {
     expect(
       loadEnvironment({
         NODE_ENV: "test",
-        PRINTER_ADAPTER: "ipp",
-        PRINTER_IPP_URL: "ipp://printer.local/ipp/print",
+        PRINTER_ADAPTER: "windows",
+        PRINTER_WINDOWS_HOST_PATH: "C:\\PrintingKiosk\\print-host.ps1",
         PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
       })
-    ).toMatchObject({ PRINTER_ADAPTER: "ipp" });
+    ).toMatchObject({ PRINTER_ADAPTER: "windows" });
   });
 
   /**
@@ -596,8 +588,8 @@ describe("loadEnvironment", () => {
     expect(() =>
       loadEnvironment({
         NODE_ENV: "test",
-        PRINTER_ADAPTER: "ipp",
-        PRINTER_IPP_URL: "ipp://printer.local/ipp/print"
+        PRINTER_ADAPTER: "windows",
+        PRINTER_WINDOWS_HOST_PATH: "C:\\PrintingKiosk\\print-host.ps1"
       })
     ).toThrow();
     expect(() =>
@@ -616,25 +608,18 @@ describe("loadEnvironment", () => {
     ).toMatchObject({ PRINTER_QUEUE_NAME: "kiosk a4 spare" });
   });
 
-  it("refuses the simulated printer and unencrypted print traffic in production", () => {
+  it("refuses simulated and network printer adapters in production", () => {
     // The simulated printer takes a customer's money and writes their document
     // to a folder. A production build cannot be configured to be one.
     expect(() =>
       loadEnvironment({ ...secureProductionEnvironment, PRINTER_ADAPTER: "mock" })
     ).toThrow();
     expect(() =>
-      loadEnvironment({
-        ...secureProductionEnvironment,
-        PRINTER_IPP_URL: "ipp://printer.example.test/ipp/print"
-      })
+      loadEnvironment({ ...secureProductionEnvironment, PRINTER_ADAPTER: "ipp" })
     ).toThrow();
-    // The customer's document never leaves the kiosk machine on this path.
-    expect(
-      loadEnvironment({
-        ...secureProductionEnvironment,
-        PRINTER_IPP_URL: "ipp://127.0.0.1/ipp/print"
-      })
-    ).toMatchObject({ PRINTER_ADAPTER: "ipp" });
+    expect(loadEnvironment(secureProductionEnvironment)).toMatchObject({
+      PRINTER_ADAPTER: "windows"
+    });
   });
 
   it("keeps the heartbeat inside the print command lease", () => {
@@ -921,7 +906,7 @@ const secureProductionEnvironment = {
   S3_SERVER_SIDE_ENCRYPTION: "AES256",
   // A production kiosk drives a real device, and the queue it prints to is one
   // an operator certified by name.
-  PRINTER_ADAPTER: "ipp",
-  PRINTER_IPP_URL: "ipps://printer.example.test/ipp/print",
+  PRINTER_ADAPTER: "windows",
+  PRINTER_WINDOWS_HOST_PATH: "C:\\PrintingKiosk\\print-host.ps1",
   PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
 } as const;

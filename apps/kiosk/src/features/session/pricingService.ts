@@ -58,7 +58,7 @@ export function buildSettingsBody(
       pageRanges: formatPageRanges(ranges),
       copies: selection.copies,
       duplex: selection.duplex ? ("LONG_EDGE" as const) : ("SIMPLEX" as const),
-      orientation: selection.orientation
+      orientation: "AUTO" as const
     };
   });
 

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { extname } from "node:path";
 
 import type { DeviceHostTransport } from "./adapter.js";
 import type { DeviceHostRequest } from "./protocol.js";
@@ -13,6 +14,41 @@ export interface ChildProcessDeviceHostOptions {
   arguments?: readonly string[];
   /** The working directory the host runs in. */
   workingDirectory?: string;
+}
+
+export interface DeviceHostCommand {
+  executablePath: string;
+  arguments: readonly string[];
+}
+
+/**
+ * A PowerShell script is a source file rather than a Windows executable. Launch
+ * it explicitly so a configured `print-host.ps1` works under the service
+ * account without relying on file associations or an interactive shell.
+ */
+export function deviceHostCommand(
+  options: ChildProcessDeviceHostOptions,
+  platform: NodeJS.Platform = process.platform
+): DeviceHostCommand {
+  if (platform === "win32" && extname(options.executablePath).toLowerCase() === ".ps1") {
+    return {
+      executablePath: "powershell.exe",
+      arguments: [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        options.executablePath,
+        ...(options.arguments ?? [])
+      ]
+    };
+  }
+  return {
+    executablePath: options.executablePath,
+    arguments: [...(options.arguments ?? [])]
+  };
 }
 
 /**
@@ -37,7 +73,8 @@ export class ChildProcessDeviceHost implements DeviceHostTransport {
     options: { timeoutMilliseconds: number }
   ): Promise<unknown> {
     return new Promise((resolvePromise, rejectPromise) => {
-      const child = spawn(this.options.executablePath, [...(this.options.arguments ?? [])], {
+      const command = deviceHostCommand(this.options);
+      const child = spawn(command.executablePath, [...command.arguments], {
         ...(this.options.workingDirectory ? { cwd: this.options.workingDirectory } : {}),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true

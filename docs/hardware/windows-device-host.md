@@ -98,6 +98,10 @@ is not one a customer may be sold a job on.
       "position": 0,
       "path": "C:\\ProgramData\\PrintingKiosk\\spool\\…\\a1b2.pdf",
       "copies": 3,
+      "pageRanges": [
+        [1, 2],
+        [5, 5]
+      ],
       "sides": "two-sided-long-edge",
       "jobName": "…uuid…#000of002"
     }
@@ -105,8 +109,9 @@ is not one a customer may be sold a job on.
 }
 ```
 
-Copies and duplex are per document: one job may print three double-sided copies
-of the first and one single-sided copy of the next.
+Page ranges, copies and duplex are per document: one job may print selected
+pages as three double-sided copies of the first document and one single-sided
+copy of the next. Ranges are one-based, inclusive, ordered and non-overlapping.
 
 `jobName` is the durable link between the operation and the spooler's own jobs.
 It carries the operation identifier, the document's position, and how many
@@ -166,13 +171,13 @@ Two rules the host does not get to bend:
 ## The reference host
 
 `infrastructure/windows/print-host.ps1` implements this protocol with
-`Get-Printer`, `Get-PrintConfiguration`, `Get-PrintJob`, and raw spooling
-through `winspool.drv` (`StartDocPrinter` with datatype `RAW`, which returns the
-operating-system job identifier before any byte is written).
+`Get-Printer`, `Get-PrintConfiguration`, `Get-PrintJob`, `Windows.Data.Pdf` and
+a GDI printer device context. The selected PDF pages are rendered locally, then
+drawn through the installed Canon UFR II driver. `StartDoc` supplies the
+operating-system job identifier before the first rendered page is drawn.
 
-It spools PDF bytes directly, which is correct for a PDF-direct queue and wrong
-for a queue that expects rendered output. A queue whose driver does not
-advertise PDF is refused with `DEVICE_ERROR` and `ambiguous: false` rather than
-sent bytes it would print as text. See
-[printer-compatibility.md](./printer-compatibility.md) for which queues qualify
-and what a rendering host would need to add.
+The reference profile refuses anything except a local, non-shared `USBnnn`
+queue using `Canon Generic Plus UFR II`. It also refuses a queue whose current
+defaults are not A4 and monochrome. The exact queue name and USB port number are
+deployment data, not source-code constants, so another certified installation
+of the same printer may use `USB002` or a different operator-chosen queue name.

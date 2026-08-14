@@ -52,10 +52,7 @@ const DUPLEX_TERMS: Record<string, string> = {
   simplex: "SIMPLEX",
   twosidedlongedge: "LONG_EDGE",
   duplextumblelong: "LONG_EDGE",
-  longedgebinding: "LONG_EDGE",
-  twosidedshortedge: "SHORT_EDGE",
-  duplextumbleshort: "SHORT_EDGE",
-  shortedgebinding: "SHORT_EDGE"
+  longedgebinding: "LONG_EDGE"
 };
 
 const COLOR_TERMS: Record<string, string> = {
@@ -68,13 +65,13 @@ const COLOR_TERMS: Record<string, string> = {
   greyscale: "MONOCHROME"
 };
 
-/** Baked into the PDF upstream, so every device supports every value. */
-const HOST_ORIENTATIONS = ["AUTO", "PORTRAIT", "LANDSCAPE"] as const;
-const HOST_SCALING_MODES = ["FIT", "ACTUAL_SIZE"] as const;
+/** Product policy: the normalized A4 PDF decides orientation and is fitted safely. */
+const HOST_ORIENTATIONS = ["AUTO"] as const;
+const HOST_SCALING_MODES = ["FIT"] as const;
 
 /** The order options are reported in, so an unchanged device hashes the same. */
 const PAPER_SIZE_ORDER = ["A4"];
-const DUPLEX_ORDER = ["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"];
+const DUPLEX_ORDER = ["SIMPLEX", "LONG_EDGE"];
 const COLOR_ORDER = ["MONOCHROME"];
 
 export function mapDeviceCapabilities(

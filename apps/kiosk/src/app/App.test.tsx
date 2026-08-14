@@ -64,7 +64,7 @@ const settingsFixture = {
       selectedPages: 5,
       copies: 2,
       duplex: "LONG_EDGE" as const,
-      orientation: "PORTRAIT" as const,
+      orientation: "AUTO" as const,
       printedSides: 10,
       physicalSheets: 6
     }
@@ -138,10 +138,10 @@ const capabilitiesFixture = {
   capabilityVersion: 2,
   paperSizes: ["A4"],
   duplexModes: ["SIMPLEX", "LONG_EDGE"],
-  orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
-  scalingModes: ["FIT", "ACTUAL_SIZE"],
+  orientations: ["AUTO"],
+  scalingModes: ["FIT"],
   colorModes: ["MONOCHROME"],
-  maxCopies: 20,
+  maxCopies: 10,
   maxSelectedPages: 200,
   maxPrintedSides: 1_000
 };
@@ -619,6 +619,7 @@ describe("kiosk prototype journey", () => {
 
     expect(screen.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
     expect(screen.queryByText("Paper size", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("Orientation", { exact: true })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "From page" }), {
       target: { value: "3" }
@@ -644,7 +645,7 @@ describe("kiosk prototype journey", () => {
     const lastQuote = quoteRequests.at(-1);
     expect(lastSettings?.ifMatch).toBe('"1"');
     expect(lastSettings?.idempotencyKey).toMatch(/^kiosk-/);
-    // Copies, sides and orientation travel with the document they belong to.
+    // Copies and sides travel with the document; orientation is fixed to AUTO.
     expect(JSON.parse(lastSettings?.body ?? "{}")).toMatchObject({
       paperSize: "A4",
       fileSelections: [
@@ -653,7 +654,7 @@ describe("kiosk prototype journey", () => {
           pageRanges: "3-7",
           copies: 2,
           duplex: "LONG_EDGE",
-          orientation: "PORTRAIT"
+          orientation: "AUTO"
         }
       ]
     });

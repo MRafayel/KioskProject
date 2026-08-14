@@ -139,7 +139,7 @@ describe("prototype session model", () => {
           selectedPages: 8,
           copies: 1,
           duplex: "SIMPLEX" as const,
-          orientation: "PORTRAIT" as const,
+          orientation: "AUTO" as const,
           printedSides: 8,
           physicalSheets: 8
         }

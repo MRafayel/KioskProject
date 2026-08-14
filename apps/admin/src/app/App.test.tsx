@@ -347,6 +347,60 @@ describe("admin Phase 2 operational sections", () => {
     expect(await screen.findByText(/Nothing is waiting on a person/)).toBeVisible();
   });
 
+  it("shows the Windows agent and approved USB printer readiness", async () => {
+    vi.mocked(adminApi.me).mockResolvedValue({
+      ...identity(),
+      capabilities: ["dashboard.read", "kiosk.read", "authenticator.manage.self"]
+    });
+    vi.spyOn(observabilityApi, "kiosks").mockResolvedValue({
+      scoped: false,
+      items: [
+        {
+          id: "kiosk-001",
+          publicCode: "KIOSK-001",
+          name: "Development kiosk",
+          status: "ACTIVE",
+          timezone: "Asia/Yerevan",
+          lastSeenAt: new Date().toISOString(),
+          liveness: "ONLINE",
+          agent: {
+            liveness: "ONLINE",
+            version: "0.0.0",
+            platform: "win32",
+            platformRelease: "10.0",
+            adapter: "WINDOWS",
+            queueName: "CanonLBP361_UFR_II",
+            printerHealth: "READY",
+            activeOperations: 0,
+            lastHeartbeatAt: new Date().toISOString()
+          },
+          printer: {
+            queueName: "CanonLBP361_UFR_II",
+            approval: "APPROVED",
+            queueState: "READY",
+            health: "READY",
+            warningCode: null,
+            driverName: "Canon Generic Plus UFR II",
+            portName: "USB001",
+            shared: false,
+            lastSeenAt: new Date().toISOString()
+          },
+          liveSessions: 0,
+          openPrintJobs: 0,
+          recoveryRequiredJobs: 0
+        }
+      ]
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Kiosks" }));
+
+    expect(await screen.findByText("CanonLBP361_UFR_II")).toBeVisible();
+    expect(screen.getByText(/USB001 · Canon Generic Plus UFR II/)).toBeVisible();
+    expect(screen.getByText(/win32 10.0 · v0.0.0/)).toBeVisible();
+  });
+
   it("hides a section the signed-in role has no capability for", async () => {
     // Visibility only — the server refuses the request regardless, which is
     // covered by the API's own boundary tests.

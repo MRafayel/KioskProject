@@ -372,7 +372,7 @@ export class AdminObservabilityService {
     });
 
     const kioskIds = kiosks.map((kiosk) => kiosk.id);
-    const [liveSessions, openJobs, recoveryJobs] = await Promise.all([
+    const [liveSessions, openJobs, recoveryJobs, agents, printers] = await Promise.all([
       this.options.database.printSession.groupBy({
         by: ["kioskId"],
         where: { kioskId: { in: kioskIds }, state: { in: [...LIVE_SESSION_STATES] } },
@@ -387,27 +387,95 @@ export class AdminObservabilityService {
         by: ["kioskId"],
         where: { kioskId: { in: kioskIds }, status: "RECOVERY_REQUIRED" },
         _count: true
+      }),
+      this.options.database.kioskAgent.findMany({
+        where: { kioskId: { in: kioskIds } },
+        orderBy: [{ lastHeartbeatAt: "desc" }, { updatedAt: "desc" }],
+        take: 400,
+        select: {
+          kioskId: true,
+          agentVersion: true,
+          platform: true,
+          platformRelease: true,
+          adapter: true,
+          queueName: true,
+          printerHealth: true,
+          activeOperations: true,
+          lastHeartbeatAt: true
+        }
+      }),
+      this.options.database.printer.findMany({
+        where: { kioskId: { in: kioskIds }, approval: "APPROVED" },
+        orderBy: { updatedAt: "desc" },
+        take: 200,
+        select: {
+          kioskId: true,
+          queueName: true,
+          approval: true,
+          queueState: true,
+          health: true,
+          warningCode: true,
+          driverName: true,
+          portName: true,
+          shared: true,
+          lastSeenAt: true
+        }
       })
     ]);
 
     const live = countsByKey(liveSessions, "kioskId");
     const open = countsByKey(openJobs, "kioskId");
     const recovery = countsByKey(recoveryJobs, "kioskId");
+    const agentByKiosk = new Map<string, (typeof agents)[number]>();
+    for (const agent of agents) {
+      if (!agentByKiosk.has(agent.kioskId)) agentByKiosk.set(agent.kioskId, agent);
+    }
+    const printerByKiosk = new Map(printers.map((printer) => [printer.kioskId, printer]));
 
     return {
       scoped: scope.kioskIds !== null,
-      items: kiosks.map((kiosk) => ({
-        id: kiosk.id,
-        publicCode: kiosk.publicCode,
-        name: kiosk.name,
-        status: kiosk.status,
-        timezone: kiosk.timezone,
-        lastSeenAt: kiosk.lastSeenAt?.toISOString() ?? null,
-        liveness: classifyKioskLiveness(kiosk.lastSeenAt, now),
-        liveSessions: live[kiosk.id] ?? 0,
-        openPrintJobs: open[kiosk.id] ?? 0,
-        recoveryRequiredJobs: recovery[kiosk.id] ?? 0
-      }))
+      items: kiosks.map((kiosk) => {
+        const agent = agentByKiosk.get(kiosk.id);
+        const printer = printerByKiosk.get(kiosk.id);
+        return {
+          id: kiosk.id,
+          publicCode: kiosk.publicCode,
+          name: kiosk.name,
+          status: kiosk.status,
+          timezone: kiosk.timezone,
+          lastSeenAt: kiosk.lastSeenAt?.toISOString() ?? null,
+          liveness: classifyKioskLiveness(kiosk.lastSeenAt, now),
+          agent: agent
+            ? {
+                liveness: classifyKioskLiveness(agent.lastHeartbeatAt, now),
+                version: agent.agentVersion,
+                platform: agent.platform,
+                platformRelease: agent.platformRelease,
+                adapter: agent.adapter,
+                queueName: agent.queueName,
+                printerHealth: agent.printerHealth,
+                activeOperations: agent.activeOperations,
+                lastHeartbeatAt: agent.lastHeartbeatAt?.toISOString() ?? null
+              }
+            : null,
+          printer: printer
+            ? {
+                queueName: printer.queueName,
+                approval: printer.approval,
+                queueState: printer.queueState,
+                health: printer.health,
+                warningCode: printer.warningCode,
+                driverName: printer.driverName,
+                portName: printer.portName,
+                shared: printer.shared,
+                lastSeenAt: printer.lastSeenAt.toISOString()
+              }
+            : null,
+          liveSessions: live[kiosk.id] ?? 0,
+          openPrintJobs: open[kiosk.id] ?? 0,
+          recoveryRequiredJobs: recovery[kiosk.id] ?? 0
+        };
+      })
     };
   }
 

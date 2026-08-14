@@ -39,7 +39,9 @@ export interface DeviceHostDocumentRequest {
   /** An absolute local path to a print-ready PDF. Never a customer filename. */
   path: string;
   copies: number;
-  /** `one-sided`, `two-sided-long-edge`, `two-sided-short-edge`. */
+  /** One-based inclusive ranges from the immutable paid manifest. */
+  pageRanges: readonly (readonly [number, number])[];
+  /** `one-sided` or `two-sided-long-edge`. */
   sides: string;
   /** The name the operating-system job is created under. */
   jobName: string;

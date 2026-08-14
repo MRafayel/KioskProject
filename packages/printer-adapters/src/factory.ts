@@ -1,10 +1,9 @@
-import { IppPrinterAdapter } from "./ipp/adapter.js";
 import { MockPrinterAdapter, type MockPrinterScenario } from "./mock/adapter.js";
 import { PrinterAdapterError, type PrinterAdapter } from "./types.js";
 import { WindowsPrinterAdapter } from "./windows/adapter.js";
 import { ChildProcessDeviceHost } from "./windows/child-process-host.js";
 
-export const PRINTER_ADAPTER_KINDS = ["mock", "ipp", "windows"] as const;
+export const PRINTER_ADAPTER_KINDS = ["mock", "windows"] as const;
 export type PrinterAdapterKind = (typeof PRINTER_ADAPTER_KINDS)[number];
 
 export interface PrinterAdapterFactoryOptions {
@@ -18,10 +17,6 @@ export interface PrinterAdapterFactoryOptions {
   mock?: {
     outputDirectory: string;
     defaultScenario?: MockPrinterScenario;
-  };
-  ipp?: {
-    printerUri: string;
-    queueName: string;
   };
   windows?: {
     hostExecutablePath: string;
@@ -48,19 +43,6 @@ export function createPrinterAdapter(options: PrinterAdapterFactoryOptions): Pri
     return new MockPrinterAdapter({
       outputDirectory: options.mock.outputDirectory,
       ...(options.mock.defaultScenario ? { defaultScenario: options.mock.defaultScenario } : {})
-    });
-  }
-
-  if (options.adapter === "ipp") {
-    if (!options.ipp) throw new PrinterAdapterError("DEVICE_ERROR");
-    return new IppPrinterAdapter({
-      printerUri: options.ipp.printerUri,
-      queueName: options.ipp.queueName,
-      journalDirectory: options.journalDirectory,
-      maxCopies: options.maxCopies,
-      ...(options.jobTimeoutMilliseconds
-        ? { completionTimeoutMilliseconds: options.jobTimeoutMilliseconds }
-        : {})
     });
   }
 

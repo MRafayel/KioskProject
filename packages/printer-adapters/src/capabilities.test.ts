@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { capabilitySnapshotHash, mapDeviceCapabilities } from "./capabilities.js";
 import { PRINT_CAPABILITY_SNAPSHOT_VERSION } from "./types.js";
 
-const limits = { maxCopies: 20 };
+const limits = { maxCopies: 10 };
 
 describe("mapDeviceCapabilities", () => {
   it("reads the IPP vocabulary a network printer answers with", () => {
@@ -20,11 +20,11 @@ describe("mapDeviceCapabilities", () => {
     expect(snapshot).toEqual({
       version: PRINT_CAPABILITY_SNAPSHOT_VERSION,
       paperSizes: ["A4"],
-      duplexModes: ["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"],
+      duplexModes: ["SIMPLEX", "LONG_EDGE"],
       colorModes: ["MONOCHROME"],
-      orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
-      scalingModes: ["FIT", "ACTUAL_SIZE"],
-      maxCopies: 20
+      orientations: ["AUTO"],
+      scalingModes: ["FIT"],
+      maxCopies: 10
     });
   });
 
@@ -73,9 +73,9 @@ describe("mapDeviceCapabilities", () => {
   });
 
   it("never lets a device raise the deployment copy ceiling", () => {
-    expect(mapDeviceCapabilities({ maxCopies: 5_000 }, limits).maxCopies).toBe(20);
-    expect(mapDeviceCapabilities({ maxCopies: 0 }, limits).maxCopies).toBe(20);
-    expect(mapDeviceCapabilities({ maxCopies: null }, limits).maxCopies).toBe(20);
+    expect(mapDeviceCapabilities({ maxCopies: 5_000 }, limits).maxCopies).toBe(10);
+    expect(mapDeviceCapabilities({ maxCopies: 0 }, limits).maxCopies).toBe(10);
+    expect(mapDeviceCapabilities({ maxCopies: null }, limits).maxCopies).toBe(10);
   });
 
   /**
@@ -87,8 +87,8 @@ describe("mapDeviceCapabilities", () => {
   it("reports orientation and scaling as host capabilities", () => {
     const snapshot = mapDeviceCapabilities({}, limits);
 
-    expect(snapshot.orientations).toEqual(["AUTO", "PORTRAIT", "LANDSCAPE"]);
-    expect(snapshot.scalingModes).toEqual(["FIT", "ACTUAL_SIZE"]);
+    expect(snapshot.orientations).toEqual(["AUTO"]);
+    expect(snapshot.scalingModes).toEqual(["FIT"]);
   });
 });
 

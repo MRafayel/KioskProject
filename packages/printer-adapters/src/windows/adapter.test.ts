@@ -57,7 +57,7 @@ function buildAdapter(host: FakeDeviceHost, overrides: Record<string, unknown> =
     queueName: "Kiosk A4",
     approvedQueues: ["Kiosk A4"],
     journalDirectory,
-    maxCopies: 20,
+    maxCopies: 10,
     ...overrides
   });
 }
@@ -102,7 +102,7 @@ async function submission(): Promise<PrintSubmission> {
         selectedPages: 2,
         copies: 3,
         duplex: "LONG_EDGE",
-        orientation: "PORTRAIT",
+        orientation: "AUTO",
         printedSides: 6,
         physicalSheets: 3
       }
@@ -176,7 +176,7 @@ describe("WindowsPrinterAdapter discovery", () => {
       paperSizes: ["A4"],
       duplexModes: ["SIMPLEX", "LONG_EDGE"],
       colorModes: ["MONOCHROME"],
-      maxCopies: 20
+      maxCopies: 10
     });
   });
 
@@ -217,6 +217,7 @@ describe("WindowsPrinterAdapter submission", () => {
         {
           position: 0,
           copies: 3,
+          pageRanges: [[1, 2]],
           sides: "two-sided-long-edge",
           jobName: deviceJobName(operationId, 0, 1)
         }

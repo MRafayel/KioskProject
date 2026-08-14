@@ -49,9 +49,9 @@ const baseCapabilities: PrinterCapabilitiesSnapshot = {
   paperSizes: ["A4"],
   duplexModes: ["SIMPLEX", "LONG_EDGE"],
   colorModes: ["MONOCHROME"],
-  orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
-  scalingModes: ["FIT", "ACTUAL_SIZE"],
-  maxCopies: 20
+  orientations: ["AUTO"],
+  scalingModes: ["FIT"],
+  maxCopies: 10
 };
 
 let app: Awaited<ReturnType<typeof buildApp>>;
@@ -227,7 +227,8 @@ describe("printer reporting", () => {
 
     expect(response.json()).toMatchObject({ capabilitiesUpdated: true, capabilityVersion: 3 });
     const capabilities = await readSessionCapabilities();
-    expect(capabilities.duplexModes).toEqual(["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"]);
+    // The certified product profile narrows broader driver support.
+    expect(capabilities.duplexModes).toEqual(["SIMPLEX", "LONG_EDGE"]);
   });
 
   it("bumps the capability version only when the device actually changed", async () => {
@@ -396,9 +397,9 @@ describe("the agent driving the device plane end to end", () => {
     });
 
     const capabilities = await readSessionCapabilities();
-    expect(capabilities.duplexModes).toEqual(["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"]);
+    expect(capabilities.duplexModes).toEqual(["SIMPLEX", "LONG_EDGE"]);
     // The deployment ceiling still wins over what the driver offers.
-    expect(capabilities.maxCopies).toBe(12);
+    expect(capabilities.maxCopies).toBe(10);
   });
 
   it("publishes nothing when the machine offers no certified queue", async () => {
@@ -428,11 +429,9 @@ describe("the agent driving the device plane end to end", () => {
 /**
  * Windows integration against the real print subsystem.
  *
- * The plan certifies this against Microsoft Print to PDF, which needs a
- * rendering device host rather than the raw-spooling reference one — see the
- * boundary noted in docs/PHASE_10_STATUS.md. The test therefore runs only where
- * a host and a certified queue have actually been configured, and is skipped
- * everywhere else rather than passing vacuously.
+ * The production profile uses the Canon USB rendering host. The test runs only
+ * where that host has actually been configured, and is skipped everywhere else
+ * rather than passing vacuously.
  */
 describe.skipIf(process.platform !== "win32" || !process.env.PRINTER_WINDOWS_HOST_PATH)(
   "windows device host",
@@ -590,9 +589,9 @@ const fixtureCapabilities = {
   paperSizes: ["A4"],
   duplex: true,
   duplexModes: ["SIMPLEX", "LONG_EDGE"],
-  orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
-  scalingModes: ["FIT", "ACTUAL_SIZE"],
-  maxCopies: 20,
+  orientations: ["AUTO"],
+  scalingModes: ["FIT"],
+  maxCopies: 10,
   approvedQueues: [approvedQueue],
   scanningEnabled: false,
   photocopyEnabled: false

@@ -35,8 +35,8 @@ export function KiosksPanel() {
           columns={[
             "Kiosk",
             "Status",
-            "Liveness",
-            "Last seen",
+            "Agent",
+            "USB printer",
             "Live sessions",
             "Open jobs",
             "Recovery"
@@ -52,10 +52,37 @@ export function KiosksPanel() {
                 <StateBadge value={kiosk.status} />
               </td>
               <td>
-                <StateBadge value={kiosk.liveness} />
+                {kiosk.agent ? (
+                  <>
+                    <StateBadge value={kiosk.agent.liveness} />
+                    <span className="key-list__meta">
+                      {kiosk.agent.platform} {kiosk.agent.platformRelease ?? ""} · v
+                      {kiosk.agent.version}
+                    </span>
+                    <span className="key-list__meta">
+                      Last heartbeat <When value={kiosk.agent.lastHeartbeatAt} />
+                    </span>
+                  </>
+                ) : (
+                  <StateBadge value="NOT_REGISTERED" />
+                )}
               </td>
               <td>
-                <When value={kiosk.lastSeenAt} />
+                {kiosk.printer ? (
+                  <>
+                    <StateBadge value={kiosk.printer.health} />
+                    <strong>{kiosk.printer.queueName}</strong>
+                    <span className="key-list__meta">
+                      {kiosk.printer.portName ?? "no port"} ·{" "}
+                      {kiosk.printer.driverName ?? "no driver"}
+                    </span>
+                    {kiosk.printer.warningCode ? (
+                      <span className="badge badge--bad">{kiosk.printer.warningCode}</span>
+                    ) : null}
+                  </>
+                ) : (
+                  <StateBadge value="NOT_APPROVED" />
+                )}
               </td>
               <td>{kiosk.liveSessions}</td>
               <td>{kiosk.openPrintJobs}</td>

@@ -1,7 +1,7 @@
 # Phase 10 status
 
 - Date: 2026-08-10
-- Status: complete for the software boundary; hardware certification outstanding
+- Status: Canon USB rendering path implemented; physical certification outstanding
 - Scope: a kiosk drives a real printer through the same contract the simulated
   one used, prints only to a queue an operator certified, and publishes what
   that printer can actually do as the settings a customer may choose
@@ -14,9 +14,9 @@ specific printer, driver and firmware, and the items under
 
 ## What Phase 10 adds
 
-1. The printer is no longer a directory. Two real adapters implement the Phase 8
-   contract unchanged: `IPP` speaks IPP/1.1 to a network printer, and `WINDOWS`
-   drives the print subsystem through a small local device host. The runner, the
+1. The printer is no longer a directory. The deployable real adapter is
+   `WINDOWS`, driving a local USB printer through a small device host. Network
+   printer selection is disabled. The runner, the
    retention watchdog and the capability reporter all hold a `PrinterAdapter`
    and cannot tell which one it is.
 2. A kiosk prints only to a queue an operator certified by name. A machine sees
@@ -39,10 +39,10 @@ specific printer, driver and firmware, and the items under
    replaced is noticed within one beat rather than at the next paid print — and
    a device that answered in a different attribute order does not look like a
    device that was swapped.
-6. One operation becomes one device job per document, named
+6. One operation becomes one Windows spooler job per document, named
    `<operationId>#<position>of<count>`. Copies and duplex belong to a document
-   in this product and to a job in both IPP and the Windows spooler, so a
-   manifest whose documents differ could not have travelled as one job. The name
+   in this product and to a Windows spooler job, so a manifest whose documents
+   differ could not have travelled as one job. The name
    is the durable link: a bare queue listing tells a complete operation from a
    partial one after a restart on either side.
 7. A local journal is written before any device is touched. A spooler purges job
@@ -153,20 +153,19 @@ what a kiosk nobody has certified a printer for should look like.
 ## Configuration
 
 ```text
-PRINTER_ADAPTER=mock|ipp|windows        # production refuses mock
-PRINTER_QUEUE_ALLOWLIST=Kiosk A4        # empty approves nothing
-PRINTER_QUEUE_NAME=                     # required when two are certified
+PRINTER_ADAPTER=mock|windows            # production refuses mock
+PRINTER_QUEUE_ALLOWLIST=CanonLBP361_UFR_II
+PRINTER_QUEUE_NAME=CanonLBP361_UFR_II
 PRINTER_ALLOW_SHARED_QUEUE=false
-PRINTER_IPP_URL=                        # ipps:// off the kiosk machine
-PRINTER_WINDOWS_HOST_PATH=              # docs/hardware/windows-device-host.md
+PRINTER_WINDOWS_HOST_PATH=C:\\PrintingKiosk\\infrastructure\\windows\\print-host.ps1
 PRINTER_DEVICE_JOURNAL_DIR=./.tmp/kiosk-agent-device
 AGENT_HEARTBEAT_SECONDS=30              # < PRINT_COMMAND_LEASE_SECONDS
 ```
 
-Configuration validation refuses: the simulated printer in production, a real
-adapter whose endpoint or host is not named, a real adapter with no certified
-queue, a preference that is not itself certified, unencrypted print traffic off
-the kiosk machine, and a heartbeat that could outlive a print command lease.
+Configuration validation refuses: the simulated printer in production, a
+Windows adapter whose host is not named, a real adapter with no certified queue,
+a preference that is not itself certified, and a heartbeat that could outlive a
+print command lease.
 
 The operator's certification also lives on the kiosk row, as `approvedQueues`
 inside `capabilities`. The two lists must name the same queue; the machine's
@@ -228,12 +227,11 @@ and fleet work, not gaps in the code above.
   `docs/hardware/printer-compatibility.md`. The two rows that matter most are
   the restart cases: a combination that passes everything else and duplicates
   output after a spooler restart is not certified.
-- **XPS-only queues need a rendering host.** The reference device host spools
-  PDF bytes with datatype `RAW`, which is correct for a PDF-direct queue and
-  refused outright for one that expects rendered output. Microsoft Print to PDF
-  is in the second group, so the plan's integration-test target needs the .NET
-  host with `Windows.Data.Pdf` before it can be used. The protocol does not
-  change; only the host does.
+- **Hardware execution remains outstanding.** The host now renders selected PDF
+  pages with `Windows.Data.Pdf` and sends them through the Canon UFR II driver,
+  but this repository cannot exercise Windows, the driver or physical paper.
+  Run the Canon USB certification checklist before calling the combination
+  certified.
 - **The reference host is unexercised on hardware.** It is written against the
   documented Win32 and PowerShell surfaces and has no automated coverage,
   because there is no Windows machine in this repository's test path. Treat it

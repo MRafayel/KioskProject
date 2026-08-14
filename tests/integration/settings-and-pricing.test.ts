@@ -1019,7 +1019,8 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
     if (!first || !second) throw new Error("EXPECTED_TWO_DOCUMENTS");
 
     // Two double-sided copies of a three-page document, and one single-sided
-    // landscape copy of a two-page document.
+    // copy of a two-page document. Orientation is automatic for every file in
+    // the certified A4-only product profile.
     const saveResponse = await saveSettings({
       sessionId: prepared.session.id,
       version: prepared.session.version,
@@ -1033,7 +1034,7 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
             pageRanges: null,
             copies: 1,
             duplex: "SIMPLEX",
-            orientation: "LANDSCAPE"
+            orientation: "AUTO"
           }
         ],
         paperSize: "A4",
@@ -1059,7 +1060,7 @@ describe.sequential("Phase 6 settings and server-authoritative pricing", () => {
         fileId: second,
         copies: 1,
         duplex: "SIMPLEX",
-        orientation: "LANDSCAPE",
+        orientation: "AUTO",
         selectedPages: 2,
         printedSides: 2,
         physicalSheets: 2

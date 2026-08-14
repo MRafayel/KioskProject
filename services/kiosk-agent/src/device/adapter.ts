@@ -32,7 +32,6 @@ export function buildPrinterAdapter(environment: NonAdminEnvironment): PrinterAd
     journalDirectory: resolve(environment.PRINTER_DEVICE_JOURNAL_DIR, "operations"),
     jobTimeoutMilliseconds: environment.PRINT_JOB_TIMEOUT_SECONDS * 1_000,
     mock: { outputDirectory: environment.PRINTER_MOCK_OUTPUT_DIR },
-    ipp: { printerUri: environment.PRINTER_IPP_URL, queueName },
     windows: {
       hostExecutablePath: environment.PRINTER_WINDOWS_HOST_PATH,
       queueName,

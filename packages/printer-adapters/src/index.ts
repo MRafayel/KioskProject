@@ -39,19 +39,14 @@ export {
   OPERATION_ID_PATTERN
 } from "./submission.js";
 export {
-  IppPrinterAdapter,
-  IppStatusError,
-  IppTransportError,
-  httpEndpoint,
-  type IppPrinterAdapterOptions
-} from "./ipp/adapter.js";
-export {
   WindowsPrinterAdapter,
   type DeviceHostTransport,
   type WindowsPrinterAdapterOptions
 } from "./windows/adapter.js";
 export {
   ChildProcessDeviceHost,
+  deviceHostCommand,
+  type DeviceHostCommand,
   type ChildProcessDeviceHostOptions
 } from "./windows/child-process-host.js";
 export {

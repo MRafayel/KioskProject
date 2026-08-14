@@ -16,7 +16,7 @@ import {
   type PageRange
 } from "@printing-kiosk/domain";
 
-export type Orientation = "PORTRAIT" | "LANDSCAPE";
+export type Orientation = "AUTO";
 /**
  * Which deterministic scenario the touchscreen asks the simulated hardware
  * for. It exists because the pilot has no card terminal and no printer; a
@@ -188,7 +188,7 @@ export const defaultFileSelection: FileSelection = {
   excludedPages: [],
   copies: 1,
   duplex: false,
-  orientation: "PORTRAIT"
+  orientation: "AUTO"
 };
 
 export const defaultPrintSettings: PrintSettings = { selections: {} };

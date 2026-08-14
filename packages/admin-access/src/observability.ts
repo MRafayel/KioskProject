@@ -247,6 +247,32 @@ export const adminKioskSchema = z.object({
   timezone: z.string().max(64),
   lastSeenAt: isoTimestamp.nullable(),
   liveness: z.enum(KIOSK_LIVENESS),
+  agent: z
+    .object({
+      liveness: z.enum(KIOSK_LIVENESS),
+      version: z.string().max(64),
+      platform: z.string().max(16),
+      platformRelease: z.string().max(120).nullable(),
+      adapter: z.string().max(16),
+      queueName: z.string().max(220).nullable(),
+      printerHealth: operationalState,
+      activeOperations: z.number().int().nonnegative(),
+      lastHeartbeatAt: isoTimestamp.nullable()
+    })
+    .nullable(),
+  printer: z
+    .object({
+      queueName: z.string().max(220),
+      approval: operationalState,
+      queueState: operationalState,
+      health: operationalState,
+      warningCode: operationalCode.nullable(),
+      driverName: z.string().max(400).nullable(),
+      portName: z.string().max(400).nullable(),
+      shared: z.boolean(),
+      lastSeenAt: isoTimestamp
+    })
+    .nullable(),
   liveSessions: z.number().int().nonnegative(),
   openPrintJobs: z.number().int().nonnegative(),
   recoveryRequiredJobs: z.number().int().nonnegative()

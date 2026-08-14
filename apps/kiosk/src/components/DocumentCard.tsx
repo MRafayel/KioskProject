@@ -12,7 +12,6 @@ import {
   selectedPageRanges,
   countPagesInRanges,
   type FileSelection,
-  type Orientation,
   type PagePrintState,
   type ReadyPrototypeFile
 } from "../features/session/model.js";
@@ -257,24 +256,6 @@ export function DocumentCard({
           {messages.configure.documentSelectedPages(selectedPages, file.pageCount)}
         </p>
       </fieldset>
-
-      {/* Orientation, sides and copies belong to this document, so they sit
-          inside its card next to the pages they apply to. Nothing here is
-          shared with the other documents in the job. */}
-      <div className="settings-grid">
-        <label className="field">
-          <span>{messages.configure.orientation}</span>
-          <select
-            value={selection.orientation}
-            onChange={(event) =>
-              onSelectionChange({ orientation: event.target.value as Orientation })
-            }
-          >
-            <option value="PORTRAIT">{messages.configure.portrait}</option>
-            <option value="LANDSCAPE">{messages.configure.landscape}</option>
-          </select>
-        </label>
-      </div>
 
       <div className="settings-row">
         <fieldset className="segmented-field">

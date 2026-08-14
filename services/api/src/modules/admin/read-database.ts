@@ -29,6 +29,8 @@ type ReadOnly<TDelegate> = Pick<
 
 export interface AdminReadDatabase {
   kiosk: ReadOnly<PrismaClient["kiosk"]>;
+  kioskAgent: ReadOnly<PrismaClient["kioskAgent"]>;
+  printer: ReadOnly<PrismaClient["printer"]>;
   printSession: ReadOnly<PrismaClient["printSession"]>;
   sessionEvent: ReadOnly<PrismaClient["sessionEvent"]>;
   uploadedFile: ReadOnly<PrismaClient["uploadedFile"]>;

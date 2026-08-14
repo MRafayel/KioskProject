@@ -2,19 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import { readPrinterCapabilities } from "./capabilities.js";
 
-const limits = { maxCopies: 20, maxSelectedPages: 200, maxPrintedSides: 1_000 };
+const limits = { maxCopies: 10, maxSelectedPages: 200, maxPrintedSides: 1_000 };
 
 describe("printer capability snapshots", () => {
-  it("reads a Phase 6 snapshot exactly as recorded", () => {
+  it("narrows a legacy snapshot to the fixed product policy", () => {
     const capabilities = readPrinterCapabilities(
       {
         capabilitiesVersion: 2,
         capabilities: {
           paperSizes: ["A4"],
           colorModes: ["MONOCHROME"],
-          duplexModes: ["SIMPLEX", "LONG_EDGE"],
+          duplexModes: ["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"],
           orientations: ["AUTO", "PORTRAIT"],
-          scalingModes: ["FIT"],
+          scalingModes: ["FIT", "ACTUAL_SIZE"],
           maxCopies: 5
         }
       },
@@ -26,7 +26,7 @@ describe("printer capability snapshots", () => {
       paperSizes: ["A4"],
       colorModes: ["MONOCHROME"],
       duplexModes: ["SIMPLEX", "LONG_EDGE"],
-      orientations: ["AUTO", "PORTRAIT"],
+      orientations: ["AUTO"],
       scalingModes: ["FIT"],
       maxCopies: 5
     });

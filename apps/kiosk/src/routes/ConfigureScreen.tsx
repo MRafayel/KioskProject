@@ -26,7 +26,7 @@ import {
 import { usePricing } from "../features/session/usePricing.js";
 import { deleteKioskSessionFile, kioskPagePreviewUrl } from "../features/session/sessionService.js";
 
-const FALLBACK_MAX_COPIES = 20;
+const FALLBACK_MAX_COPIES = 10;
 
 export function ConfigureScreen() {
   const { messages, numberLocale } = useLanguage();
@@ -267,16 +267,7 @@ export function ConfigureScreen() {
 
         <aside className="summary-card" aria-labelledby="summary-title">
           <div className="paper-preview" aria-hidden="true">
-            {/* The first document's orientation. Each document sets its own,
-                so this is an illustration of the job's first sheet rather than
-                a statement about all of them. */}
-            <div
-              className={
-                fileSelection(state.settings, documents[0]?.id ?? "").orientation === "LANDSCAPE"
-                  ? "paper paper--landscape"
-                  : "paper"
-              }
-            >
+            <div className="paper">
               <span /> <span /> <span /> <span />
             </div>
           </div>

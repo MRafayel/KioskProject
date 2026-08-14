@@ -210,15 +210,15 @@ const environmentSchema = z
       .min(16_777_216)
       .max(2_147_483_648)
       .default(2_147_483_648),
-    MAX_COPIES: z.coerce.number().int().min(1).max(100).default(20),
+    MAX_COPIES: z.coerce.number().int().min(1).max(10).default(10),
     MAX_SELECTED_PAGES: z.coerce.number().int().min(1).max(2_000).default(200),
     MAX_PRINTED_SIDES: z.coerce.number().int().min(1).max(20_000).default(1_000),
     QUOTE_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
-    // Which device this kiosk drives. `mock` writes files, `ipp` speaks to a
-    // network printer, `windows` drives the print subsystem through a local
-    // device host. Production refuses `mock` outright: a kiosk that took a
+    // Which device this kiosk drives. `mock` writes files and `windows` drives
+    // the local USB print subsystem through a device host. Network printing is
+    // deliberately not a deployable option. Production refuses `mock`: a kiosk that took a
     // customer's money and wrote their document to a folder is not a kiosk.
-    PRINTER_ADAPTER: z.enum(["mock", "ipp", "windows"]).default("mock"),
+    PRINTER_ADAPTER: z.enum(["mock", "windows"]).default("mock"),
     // The queue names an operator certified for this kiosk, comma separated.
     // Empty approves nothing, which is the only safe default: an uncertified
     // kiosk must not print to whatever queue a driver installer left behind.
@@ -230,9 +230,6 @@ const environmentSchema = z
     // Whether a queue published to other machines may be used. A kiosk opens no
     // other inbound path, so this stays off unless a deployment says otherwise.
     PRINTER_ALLOW_SHARED_QUEUE: stringBooleanSchema.default(false),
-    // The IPP endpoint of the certified printer. `ipps://` in production unless
-    // it is on the kiosk's own loopback.
-    PRINTER_IPP_URL: z.string().max(400).default(""),
     // The Windows device host executable. See docs/hardware/windows-device-host.md.
     PRINTER_WINDOWS_HOST_PATH: z.string().max(400).default(""),
     // Where the agent keeps its record of what it handed to a device. It is
@@ -472,14 +469,6 @@ const environmentSchema = z
     // A real device is chosen by name, so the settings that name it have to be
     // present. A kiosk that started without them would only discover it at the
     // first paid print.
-    if (environment.PRINTER_ADAPTER === "ipp" && !isIppPrinterUrl(environment.PRINTER_IPP_URL)) {
-      context.addIssue({
-        code: "custom",
-        path: ["PRINTER_IPP_URL"],
-        message: "PRINTER_IPP_URL must be an ipp://, ipps://, http:// or https:// URL"
-      });
-    }
-
     if (environment.PRINTER_ADAPTER === "windows" && !environment.PRINTER_WINDOWS_HOST_PATH) {
       context.addIssue({
         code: "custom",
@@ -875,21 +864,6 @@ const environmentSchema = z
       });
     }
 
-    // Print traffic carries the customer's document. Off the kiosk's own
-    // machine it has to be encrypted like everything else.
-    if (environment.PRINTER_ADAPTER === "ipp" && isIppPrinterUrl(environment.PRINTER_IPP_URL)) {
-      const printerUrl = new URL(environment.PRINTER_IPP_URL);
-      const encrypted = printerUrl.protocol === "ipps:" || printerUrl.protocol === "https:";
-      if (!encrypted && !isLoopbackHostname(printerUrl.hostname)) {
-        context.addIssue({
-          code: "custom",
-          path: ["PRINTER_IPP_URL"],
-          message:
-            "PRINTER_IPP_URL must use ipps:// or https:// in production unless it is loopback-only"
-        });
-      }
-    }
-
     const productionSecrets = [
       ["COOKIE_SIGNING_KEY", environment.COOKIE_SIGNING_KEY],
       ["UPLOAD_TOKEN_PEPPER", environment.UPLOAD_TOKEN_PEPPER],
@@ -1049,14 +1023,6 @@ const environmentSchema = z
       }
     }
   });
-
-function isIppPrinterUrl(value: string): boolean {
-  try {
-    return ["ipp:", "ipps:", "http:", "https:"].includes(new URL(value).protocol);
-  } catch {
-    return false;
-  }
-}
 
 function parseAllowlist(value: string): string[] {
   return value

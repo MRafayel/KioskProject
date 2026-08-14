@@ -18,9 +18,9 @@ const app = await buildAgent(environment, { eventSource: relay });
 const realtime = new CloudRealtimeConnection(environment, relay);
 
 // The printer lives on this machine, behind the adapter contract. Which device
-// it actually is — the simulated one, a network printer over IPP, or the
-// Windows print subsystem through a local host — is configuration, and nothing
-// below this line can tell the difference.
+// it actually is — the simulated development device or the local Windows USB
+// print subsystem — is configuration, and nothing below this line can tell the
+// difference.
 const printerAdapter = buildPrinterAdapter(environment);
 const logger = {
   info: (fields: Record<string, unknown>, message: string) => app.log.info(fields, message),

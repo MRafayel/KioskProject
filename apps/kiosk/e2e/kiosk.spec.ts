@@ -333,7 +333,7 @@ async function stubReadyDocumentAndPricing(
         selectedPages: 1,
         copies: 1,
         duplex: "SIMPLEX",
-        orientation: "PORTRAIT",
+        orientation: "AUTO",
         printedSides: 1,
         physicalSheets: 1
       }
@@ -356,10 +356,10 @@ async function stubReadyDocumentAndPricing(
           capabilityVersion: 2,
           paperSizes: ["A4"],
           duplexModes: ["SIMPLEX", "LONG_EDGE"],
-          orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
-          scalingModes: ["FIT", "ACTUAL_SIZE"],
+          orientations: ["AUTO"],
+          scalingModes: ["FIT"],
           colorModes: ["MONOCHROME"],
-          maxCopies: 20,
+          maxCopies: 10,
           maxSelectedPages: 200,
           maxPrintedSides: 1_000
         })

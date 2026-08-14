@@ -1,9 +1,6 @@
 import {
-  DUPLEX_MODES,
-  ORIENTATIONS,
   PAPER_SIZES,
   PRINT_COLOR_MODE,
-  SCALING_MODES,
   type ColorMode,
   type DuplexMode,
   type Orientation,
@@ -31,7 +28,7 @@ export function readPrinterCapabilities(
   limits: PrintSettingsLimits
 ): PrinterCapabilities {
   const snapshot = asRecord(kiosk.capabilities);
-  const declaredDuplex = readEnumList(snapshot.duplexModes, DUPLEX_MODES);
+  const declaredDuplex = readEnumList(snapshot.duplexModes, ["SIMPLEX", "LONG_EDGE"] as const);
   const duplexModes: DuplexMode[] =
     declaredDuplex.length > 0
       ? declaredDuplex
@@ -40,8 +37,6 @@ export function readPrinterCapabilities(
         : ["SIMPLEX"];
 
   const paperSizes = readEnumList(snapshot.paperSizes, PAPER_SIZES);
-  const orientations = readEnumList(snapshot.orientations, ORIENTATIONS);
-  const scalingModes = readEnumList(snapshot.scalingModes, SCALING_MODES);
   const declaredColorModes = readEnumList(snapshot.colorModes, [PRINT_COLOR_MODE] as const);
   const colorModes: ColorMode[] =
     declaredColorModes.length > 0
@@ -57,8 +52,8 @@ export function readPrinterCapabilities(
     paperSizes: paperSizes.length > 0 ? paperSizes : ["A4"],
     colorModes,
     duplexModes,
-    orientations: orientations.length > 0 ? orientations : [...ORIENTATIONS],
-    scalingModes: scalingModes.length > 0 ? scalingModes : [...SCALING_MODES],
+    orientations: ["AUTO"],
+    scalingModes: ["FIT"],
     maxCopies: Math.min(declaredMaxCopies ?? limits.maxCopies, limits.maxCopies)
   };
 }
