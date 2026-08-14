@@ -143,35 +143,6 @@ function Counter({ item }: { item: CounterItem }) {
   );
 }
 
-/**
- * A named group of counters that steps out of the way when it has nothing.
- *
- * An operations dashboard that always draws the same thirty tiles teaches the
- * eye to skim all thirty. Most of the time almost every number here is zero,
- * and those zeros are genuinely good news — so they get one quiet line saying
- * so, and the tiles are spent on the groups that actually have something in
- * them.
- */
-export function CounterGroup({
-  title,
-  items,
-  quiet
-}: {
-  title: string;
-  items: readonly CounterItem[];
-  /** The one line shown instead of the tiles, e.g. "nothing live right now". */
-  quiet: string;
-}) {
-  const empty = items.every((item) => item.value === 0);
-
-  return (
-    <section className="counter-group">
-      <h3>{title}</h3>
-      {empty ? <p className="counter-group__quiet">{quiet}</p> : <Counters items={items} />}
-    </section>
-  );
-}
-
 /** A state or code, drawn so an unusual one is visible at a glance. */
 export function StateBadge({ value, tone }: { value: string | null; tone?: Tone }) {
   if (!value) return <span className="muted">—</span>;

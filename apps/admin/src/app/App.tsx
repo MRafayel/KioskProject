@@ -177,7 +177,9 @@ function Shell() {
               would keep the first filter and show the wrong rows under a
               heading that looked right. */}
             {current ? (
-              <div key={destinationKey(destination)}>{current.render(destination)}</div>
+              <div className="shell__section" key={destinationKey(destination)}>
+                {current.render(destination)}
+              </div>
             ) : (
               <p>Your role has no sections available.</p>
             )}
@@ -202,9 +204,9 @@ function Shell() {
 /**
  * On the rail this is plain text rather than a badge.
  *
- * The accent is reserved for "somebody has to do something", and a role is a
- * standing fact, not a task. Tinting it would put a second orange next to the
- * active section and teach the eye to stop trusting the colour.
+ * The status tones are reserved for "somebody has to do something", and a role
+ * is a standing fact, not a task. Tinting it would put a second coloured thing
+ * beside the active section and teach the eye to stop trusting the tone.
  */
 function roleLabel(role: string): string {
   return (

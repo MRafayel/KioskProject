@@ -1,41 +1,76 @@
 /**
  * The control plane's visual language.
  *
- * One warm accent on near-black and off-white, generous radii, and numbers set
- * large and light. It is also the right palette for this particular panel: a
- * single accent means the accent can mean something. Orange here is reserved
- * for "a person has to do something", so a screen with no orange on it is a
- * screen with nothing waiting.
+ * A layered dark interface: near-black page, deep navy rail, navy surfaces and
+ * a slightly lifted card on top of them. Depth comes from tone rather than from
+ * shadow or gradient, so four flat fills separate the page, the frame, a
+ * section and the thing you can click, and nothing needs a blur to read as
+ * raised.
  *
- * Colour never carries meaning on its own. Every badge, counter and worklist
- * entry says in words what its colour repeats, because an operations dashboard
- * is read under bad lighting by people who may not distinguish these hues.
+ * Blue is structural here — it is what a surface is made of — so it cannot also
+ * mean "urgent". Urgency is carried by the status ramp below (red, amber,
+ * green) and, in every case, by words as well. Colour never carries meaning on
+ * its own: every badge, counter and worklist entry says in text what its colour
+ * repeats, because an operations dashboard is read under bad lighting by people
+ * who may not distinguish these hues.
+ *
+ * Contrast: every foreground token below clears WCAG 2.2 AA (4.5:1) against
+ * every structural surface it is used on. The tightest pairing is `--ink-dim`
+ * on `--card-lift` at 5.0:1, and white on `--accent-deep` at 5.2:1. Check any
+ * replacement against `--card-lift` — it is the lightest surface in the set and
+ * the one that fails first. `--accent` is 3.8:1 there, which is why it marks
+ * things and never labels them.
  */
 
 :root {
-  /* The design this follows is a light interface; committing to one keeps the
-     accent honest instead of drifting through a second set of tokens at night. */
-  color-scheme: light;
+  /* Committing to one scheme keeps the tonal ladder honest rather than letting
+     a second set of tokens drift out of step with it. */
+  color-scheme: dark;
 
-  --paper: #f4f2f0;
-  --card: #ffffff;
-  --card-soft: #efedea;
-  --ink: #141414;
-  --ink-soft: #6f6a65;
-  --line: #e4e0db;
-  --accent: #e2622f;
-  /* Every use of this is text, and most of it sits on the tint below: warning
-     badges, attention items, the alarming counter, the refund note. That
-     pairing is the palest surface it ever lands on, and the previous shade
-     measured 4.48:1 there — under AA, while passing on white. Darkened until
-     it clears on the tint too. */
-  --accent-strong: #b04416;
-  --accent-soft: #fbe9e0;
-  --dark: #161513;
-  --dark-ink: #f6f4f2;
-  --dark-line: #2e2c29;
+  /* The four structural surfaces, darkest to lightest. Page, rail, section,
+     card. Anything interactive lifts one more step to `--card-lift`. */
+  --paper: #070a12;
+  --rail: #0a1120;
+  --card: #0f1826;
+  --card-soft: #16223a;
+  --card-lift: #1d2c48;
 
-  --radius-card: 18px;
+  --ink: #f3f6fb;
+  --ink-soft: #a3b2c9;
+  /* Metadata and timestamps. Quieter than `--ink-soft` and deliberately not
+     used for anything a person has to read to do their job. Still held above
+     4.5:1 on `--card-lift`, which is the lightest surface it ever lands on —
+     "de-emphasised" is not licence to make it unreadable. */
+  --ink-dim: #8a9cba;
+  --line: #22304a;
+  --line-strong: #33456a;
+
+  /* Structural blue: selection, focus, the active section. Never a status.
+     `--accent` is a decoration and a marker, and at 3.8:1 on `--card-lift` it
+     clears the 3:1 that a non-text indicator needs. It is *not* dark enough to
+     carry white text, so anything filled with a label uses `--accent-deep`
+     instead — that pairing measures 5.2:1. */
+  --accent: #3b82f6;
+  --accent-deep: #2563eb;
+  --accent-strong: #7fb0ff;
+  --accent-soft: #16233d;
+
+  /* The status ramp. Each pairs a foreground with the tinted surface it sits
+     on; both are checked against the card behind them. */
+  --critical: #f87171;
+  --critical-soft: #2a1417;
+  --warn: #fbbf24;
+  --warn-soft: #2a2110;
+  --good: #4ade80;
+  --good-soft: #10241a;
+
+  /* Retained so the inverted-surface rules keep a name that means what it says
+     now that the interface itself is dark. */
+  --dark: #060911;
+  --dark-ink: #f3f6fb;
+  --dark-line: #1e2b45;
+
+  --radius-card: 16px;
   --radius-control: 10px;
   --radius-pill: 999px;
 
@@ -44,6 +79,19 @@
     -apple-system,
     "Segoe UI",
     sans-serif;
+}
+
+/* Motion is decorative everywhere in this panel — a hover tint, a revealed
+   affordance. None of it communicates state, so all of it can go. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 * {
@@ -58,21 +106,29 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* A control has to be visibly a control on a dark surface, where an outline
+   alone nearly disappears. So it lifts one tonal step above whatever it sits on
+   and takes the stronger border, and hovering lifts it one step further. */
 button {
   font: inherit;
-  padding: 0.45rem 0.95rem;
-  border: 1px solid var(--line);
+  /* 0.5rem of padding on a 1.5 line-height puts this at ~40px tall, which is
+     the smallest comfortable pointer target and clears WCAG 2.2 target size. */
+  min-height: 2.5rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-pill);
-  background: var(--card);
+  background: var(--card-soft);
   color: var(--ink);
   cursor: pointer;
   transition:
     background 120ms ease,
-    border-color 120ms ease;
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--ink);
+  background: var(--card-lift);
+  border-color: var(--accent);
 }
 
 button:disabled {
@@ -80,10 +136,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* The focus ring is drawn in the structural blue and separated from the control
+   by an offset in the page colour, so it stays visible whether the control sits
+   on the rail, a panel or a lifted card. */
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
-  outline: 2px solid var(--accent);
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
 }
 
@@ -101,9 +162,11 @@ select:focus-visible {
    button's own colouring, so "the pointer is on something you can press" looks
    the same wherever it happens on this screen. */
 .button-link {
+  min-height: 0;
   padding: 0.25rem 0.55rem;
   border-color: transparent;
   background: transparent;
+  color: var(--accent-strong);
   text-decoration: underline;
   text-underline-offset: 3px;
   transition:
@@ -113,18 +176,26 @@ select:focus-visible {
 
 .button-link:hover:not(:disabled) {
   border-color: transparent;
-  background: var(--dark);
-  color: var(--dark-ink);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
+/* A field is recessed rather than raised: it sits below the card it is on, so
+   an input and a button never read as the same kind of thing. */
 input,
-select {
+select,
+textarea {
   font: inherit;
-  padding: 0.5rem 0.65rem;
-  border: 1px solid var(--line);
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-control);
-  background: var(--card);
+  background: var(--paper);
   color: var(--ink);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ink-dim);
 }
 
 code {
@@ -161,23 +232,31 @@ code {
    Making the control itself look reluctant would add nothing except hesitation
    at the moment hesitation is least useful. */
 .signin__action,
+.recovery__submit,
+.button-primary {
+  padding: 0.6rem 1.4rem;
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.signin__action,
 .recovery__submit {
   margin-top: 1rem;
   padding: 0.7rem 1.6rem;
-  background: var(--dark);
-  border-color: var(--dark);
-  color: var(--dark-ink);
 }
 
 .signin__action:hover:not(:disabled),
-.recovery__submit:hover:not(:disabled) {
-  background: var(--accent);
-  border-color: var(--accent);
+.recovery__submit:hover:not(:disabled),
+.button-primary:hover:not(:disabled) {
+  background: #1d54cc;
+  border-color: var(--accent-strong);
 }
 
 .signin__error {
   margin-top: 1rem;
-  color: var(--accent-strong);
+  color: var(--critical);
 }
 
 .signin__note,
@@ -238,17 +317,20 @@ code {
   min-height: 100vh;
 }
 
-/* The dark rail runs the full height of the window and sits flush against its
+/* The navy rail runs the full height of the window and sits flush against its
    left edge. Detaching it into a floating card made it one more element on a
    busy page; anchored, it stops reading as content and starts reading as the
-   frame the content lives in — which is what navigation is. */
+   frame the content lives in — which is what navigation is.
+   It is the darkest surface after the page itself, so the content beside it
+   reads as raised without either one needing a shadow. */
 .shell__rail {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  padding: 1.5rem 0.9rem 1.1rem;
-  background: var(--dark);
-  color: var(--dark-ink);
+  gap: 0.15rem;
+  padding: 1.4rem 0.75rem 1.1rem;
+  background: var(--rail);
+  border-right: 1px solid var(--line);
+  color: var(--ink);
   position: sticky;
   top: 0;
   height: 100vh;
@@ -258,17 +340,21 @@ code {
 .shell__nav {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.15rem;
 }
 
 .shell__rail-title {
-  padding: 0 0.6rem 0.9rem;
-  font-size: 0.7rem;
-  letter-spacing: 0.12em;
+  margin: 0;
+  padding: 0 0.7rem 1rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--dark-ink) 45%, var(--dark));
+  color: var(--ink-dim);
 }
 
+/* Pushed to the foot of the rail by `margin-top: auto`, so it stays put
+   whether the account has four sections or ten. */
 /* Pushed to the foot of the rail by `margin-top: auto`, so it stays put
    whether the account has four sections or ten. */
 .shell__account {
@@ -279,50 +365,71 @@ code {
 
 .shell__account-name {
   margin: 0;
-  padding: 0 0.6rem;
-  font-weight: 500;
+  padding: 0 0.7rem;
+  font-weight: 600;
 }
 
 .shell__account-role {
-  margin: 0 0 0.6rem;
-  padding: 0 0.6rem;
+  margin: 0 0 0.7rem;
+  padding: 0 0.7rem;
   font-size: 0.8rem;
-  color: color-mix(in srgb, var(--dark-ink) 55%, var(--dark));
+  color: var(--ink-soft);
 }
 
 .shell__signout {
   width: 100%;
   border-color: var(--dark-line);
   background: transparent;
-  color: color-mix(in srgb, var(--dark-ink) 75%, var(--dark));
+  color: var(--ink-soft);
 }
 
 .shell__signout:hover:not(:disabled) {
-  border-color: var(--dark-line);
-  background: var(--dark-line);
-  color: var(--dark-ink);
+  border-color: var(--line-strong);
+  background: var(--card-soft);
+  color: var(--ink);
 }
 
+/* Square-ish rather than a pill: the active tab carries a marker bar down its
+   left edge, and a pill radius cuts the bar into a crescent. */
 .nav-tab {
+  position: relative;
+  min-height: 2.4rem;
   border: 1px solid transparent;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-control);
   background: transparent;
-  color: color-mix(in srgb, var(--dark-ink) 72%, var(--dark));
+  color: var(--ink-soft);
   padding: 0.5rem 0.85rem;
   text-align: left;
+  font-size: 0.92rem;
 }
 
 .nav-tab:hover:not(:disabled) {
   border-color: transparent;
-  background: var(--dark-line);
-  color: var(--dark-ink);
+  background: var(--card-soft);
+  color: var(--ink);
 }
 
+/* The current section is marked three ways, because a fill alone is a colour
+   and this has to survive being read by somebody who cannot see it: a lifted
+   surface, a solid bar on the leading edge, and heavier text. `aria-current`
+   carries the same fact to a screen reader. */
 .nav-tab.is-active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #ffffff;
+  background: var(--card-lift);
+  border-color: var(--line-strong);
+  color: var(--ink);
   font-weight: 600;
+  padding-left: 1.05rem;
+}
+
+.nav-tab.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0.35rem;
+  top: 0.55rem;
+  bottom: 0.55rem;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
 }
 
 .shell__body {
@@ -343,8 +450,8 @@ code {
 }
 
 .shell__header h1 {
-  font-size: 1.6rem;
-  font-weight: 500;
+  font-size: 1.75rem;
+  font-weight: 600;
   letter-spacing: -0.02em;
   margin: 0;
 }
@@ -355,20 +462,34 @@ code {
   min-width: 0;
 }
 
+/* The remount wrapper is one grid item, so its own children need the spacing
+   rather than inheriting the gap above. Without this every panel that renders
+   more than one section stacks them flush against each other. */
+.shell__section {
+  display: grid;
+  align-content: start;
+  gap: 1.15rem;
+  min-width: 0;
+}
+
+/* A failed session check, not a failed panel. It takes the critical tone and
+   states the problem in words; the tint is the second signal, never the only
+   one. */
 .shell__alert {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
   padding: 0.85rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--critical) 35%, transparent);
   border-radius: var(--radius-card);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: var(--critical-soft);
+  color: var(--critical);
 }
 
 .shell__footer {
   padding: 0 0.25rem 0.5rem;
-  color: var(--ink-soft);
+  color: var(--ink-dim);
   font-size: 0.8rem;
 }
 
@@ -377,6 +498,7 @@ code {
    ------------------------------------------------------------------------- */
 
 .panel {
+  border: 1px solid var(--line);
   border-radius: var(--radius-card);
   background: var(--card);
   padding: 1.25rem 1.4rem 1.4rem;
@@ -419,13 +541,14 @@ code {
   gap: 1rem;
   margin-top: 0.75rem;
   padding: 0.7rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--critical) 35%, transparent);
   border-radius: var(--radius-control);
-  background: var(--accent-soft);
+  background: var(--critical-soft);
 }
 
 .panel__error-text,
 .panel__error p {
-  color: var(--accent-strong);
+  color: var(--critical);
 }
 
 .panel__actions {
@@ -529,72 +652,214 @@ code {
 }
 
 /* ---------------------------------------------------------------------------
+   The page header
+   ---------------------------------------------------------------------------
+   One line that answers "is anything wrong" before the eye reaches a single
+   number, the age of what is being shown, and the control that renews it. The
+   summary is a sentence rather than a light, because "2 items need attention"
+   survives being read aloud, printed in greyscale, or seen by somebody who
+   cannot tell the red dot from the green one.
+   ------------------------------------------------------------------------- */
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0 0.25rem;
+}
+
+.page-head__lead {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.page-head__summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.page-head__summary--calm {
+  color: var(--good);
+}
+
+.page-head__summary--busy {
+  color: var(--warn);
+}
+
+.page-head__summary--critical {
+  color: var(--critical);
+}
+
+/* Decorative: the words beside it already carry the state, and this only helps
+   somebody who has learnt the palette find the line faster. */
+.page-head__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: var(--radius-pill);
+  background: currentcolor;
+  flex: none;
+}
+
+.page-head__meta {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.page-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Refreshing keeps the numbers on screen and says so here instead, because
+   blanking a dashboard to fetch the same values it already has is how an
+   operator loses their place mid-incident. */
+.page-head__refreshing {
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+}
+
+/* ---------------------------------------------------------------------------
+   Sections
+   ------------------------------------------------------------------------- */
+
+.section {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0 0.25rem;
+}
+
+.section__title {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.section__note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+/* ---------------------------------------------------------------------------
    The worklist
+   ---------------------------------------------------------------------------
+   Each entry is a card rather than a strip: type, count, what it means and the
+   one place to go about it. Severity is spelled out in a pill, so the tinted
+   border is the second signal and never the only one.
+
+   These are the only cards on the page allowed a status tint. Everything else
+   is structural navy, which is what keeps a tinted card meaning something.
    ------------------------------------------------------------------------- */
 
 .attention {
   list-style: none;
   padding: 0;
-  margin: 0.5rem 0 0;
+  margin: 0;
   display: grid;
-  gap: 0.5rem;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
 }
 
 .attention__item {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-card);
-  background: var(--card-soft);
-  padding: 0.75rem 1.1rem;
+  background: var(--card);
+  min-width: 0;
 }
 
-/* What most needs a person is inverted, with the number in the accent. */
 .attention__item--critical {
-  background: var(--dark);
-  color: var(--dark-ink);
-}
-
-.attention__item--critical .attention__count {
-  color: var(--accent);
+  border-color: color-mix(in srgb, var(--critical) 45%, transparent);
+  background: var(--critical-soft);
 }
 
 .attention__item--warning {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+  background: var(--warn-soft);
+}
+
+.attention__item--info {
+  border-color: var(--line-strong);
+  background: var(--card-soft);
+}
+
+.attention__inner {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem 1.15rem 1.1rem;
+}
+
+.attention__top {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
 }
 
 .attention__count {
-  font-size: 2.4rem;
+  font-size: 2.1rem;
   font-weight: 300;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
-  min-width: 3rem;
-  text-align: right;
+  line-height: 1.1;
+}
+
+.attention__item--critical .attention__count {
+  color: var(--critical);
+}
+
+.attention__item--warning .attention__count {
+  color: var(--warn);
 }
 
 .attention__label {
-  font-size: 1.05rem;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--ink);
 }
 
-/* Said in words, because this is the one screen where the absence of a list is
-   the good news and an empty area could be mistaken for a failure to load. */
-.attention__calm {
-  margin: 0.5rem 0 0;
-  padding: 1.1rem 1.25rem;
-  border-radius: var(--radius-card);
-  background: var(--card-soft);
+.attention__detail {
+  font-size: 0.83rem;
   color: var(--ink-soft);
 }
 
-/* An attention row that leads somewhere is one button filling the row, so the
-   whole thing is the target and a keyboard reaches it in one stop rather than
-   landing on a count and a label separately. */
+/* Persistent rather than revealed on hover. An affordance that only exists
+   under the pointer is invisible to everybody scanning the page, which is the
+   entire audience for a worklist. */
+.attention__go {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+/* An entry that leads somewhere is one button filling the card, so the whole
+   thing is the target and a keyboard reaches it in one stop rather than landing
+   on a count and a label separately. */
 .attention__open {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
+  display: block;
   width: 100%;
+  min-height: 0;
   padding: 0;
   border: none;
   border-radius: inherit;
@@ -603,40 +868,331 @@ code {
   text-align: left;
 }
 
-.attention__item.is-navigable {
+.attention__open:hover:not(:disabled) {
+  border: none;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+
+/* A card that goes nowhere says so by staying flat: no pointer, no lift, and
+   no action line. */
+.attention__item:not(.is-navigable) .attention__inner {
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------------------
+   KPI tiles
+   ---------------------------------------------------------------------------
+   The four numbers worth knowing before any of the modules below. The value
+   dominates, the label sits above it small, and the supporting line underneath
+   is the quietest thing in the tile.
+
+   One tile may lift above the others — but only when it has something to say.
+   Emphasis is spent on whatever currently needs a person, never reserved for a
+   fixed metric, so an unremarkable morning shows four calm tiles and nothing
+   competes for an attention that nothing has earned.
+   ------------------------------------------------------------------------- */
+
+.kpi-row {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+
+.kpi {
+  display: grid;
+  align-content: start;
+  gap: 0.15rem;
+  padding: 1rem 1.15rem 1.05rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  min-width: 0;
+}
+
+.kpi--elevated {
+  background: var(--card-lift);
+  border-color: var(--line-strong);
+}
+
+.kpi__label {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.kpi__value {
+  margin: 0.15rem 0 0;
+  font-size: 2.5rem;
+  font-weight: 300;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.kpi__value--critical {
+  color: var(--critical);
+}
+
+.kpi__value--warn {
+  color: var(--warn);
+}
+
+/* The denominator in "2 of 3": present, but never competing with the number
+   that actually changed. */
+.kpi__of {
+  font-size: 1.2rem;
+  color: var(--ink-dim);
+  letter-spacing: 0;
+}
+
+.kpi__foot {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.kpi__foot--problem {
+  color: var(--warn);
+  font-weight: 500;
+}
+
+.kpi__open {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.kpi.is-navigable {
   padding: 0;
 }
 
-.attention__item.is-navigable > .attention__open {
-  padding: 0.85rem 1.25rem;
+.kpi.is-navigable .kpi__open {
+  padding: 1rem 1.15rem 1.05rem;
 }
 
-.attention__go {
-  margin-left: auto;
-  font-size: 0.8rem;
-  opacity: 0;
-  transition: opacity 120ms ease;
+.kpi.is-navigable .kpi__open:hover:not(:disabled) {
+  border: none;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+
+/* ---------------------------------------------------------------------------
+   Modules
+   ---------------------------------------------------------------------------
+   A group of related numbers under one heading, with a plain-language summary
+   above them. The summary is what somebody reads; the rows are what they check
+   afterwards, and a healthy module is allowed to be almost entirely summary.
+   ------------------------------------------------------------------------- */
+
+.module-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+}
+
+.module {
+  display: grid;
+  align-content: start;
+  gap: 0.55rem;
+  padding: 1.1rem 1.2rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  min-width: 0;
+}
+
+.module__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Overrides the panel's tiny uppercase h3: inside a module the heading is the
+   thing being named, not a divider between two lists. */
+.module .module__title,
+.module__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--ink);
+}
+
+.module__summary {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+}
+
+.module__summary--problem {
+  color: var(--warn);
+  font-weight: 500;
+}
+
+.module__summary--critical {
+  color: var(--critical);
+  font-weight: 500;
+}
+
+/* Said in words, because on this screen the absence of a list is the good news
+   and an empty area could be mistaken for a failure to load. */
+.module__healthy {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--good);
+}
+
+/* ---------------------------------------------------------------------------
+   Stat rows
+   ---------------------------------------------------------------------------
+   A label and a number per line. Rows carrying something abnormal keep full
+   contrast and gain a marker; healthy zeros stay visible but recede, so the eye
+   lands on the row that changed rather than sweeping the whole list.
+   ------------------------------------------------------------------------- */
+
+.stat-list {
+  display: grid;
+  gap: 0;
+  margin: 0.15rem 0 0;
+}
+
+.stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.42rem 0;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.stat:last-child {
+  border-bottom: none;
+}
+
+.stat dt {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  min-width: 0;
+}
+
+.stat dd {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* A zero that is good news. Still readable, deliberately not interesting. */
+.stat.is-quiet dt,
+.stat.is-quiet dd {
+  color: var(--ink-dim);
+  font-weight: 400;
+}
+
+.stat.is-problem dt {
+  color: var(--ink);
+}
+
+.stat.is-problem dd {
+  color: var(--warn);
+}
+
+.stat.is-critical dd {
+  color: var(--critical);
+}
+
+/* The marker that makes an abnormal row findable without relying on its colour. */
+.stat.is-problem dt::before,
+.stat.is-critical dt::before {
+  content: "▸ ";
+  color: currentcolor;
+}
+
+.stat__open {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 0;
+  padding: 0.42rem 0.35rem;
+  margin: 0 -0.35rem;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.stat.is-navigable {
+  padding: 0;
+}
+
+.stat__open:hover:not(:disabled) {
+  border: none;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+
+/* ---------------------------------------------------------------------------
+   Status pills
+   ---------------------------------------------------------------------------
+   Always a word. The tint is an accelerant for people who can use it and is
+   never the thing being communicated.
+   ------------------------------------------------------------------------- */
+
+.status-pill {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--card-soft);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
-/* The affordance appears on hover and on keyboard focus alike. Revealing it
-   only on hover would hide it from everybody who never touches a mouse. */
-.attention__open:hover .attention__go,
-.attention__open:focus-visible .attention__go {
-  opacity: 1;
+.status-pill--good {
+  background: var(--good-soft);
+  border-color: color-mix(in srgb, var(--good) 30%, transparent);
+  color: var(--good);
 }
 
-.attention__item.is-navigable:hover {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+.status-pill--warn {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 32%, transparent);
+  color: var(--warn);
 }
 
-.attention__open:hover {
-  border: none;
+.status-pill--critical {
+  background: var(--critical-soft);
+  border-color: color-mix(in srgb, var(--critical) 42%, transparent);
+  color: var(--critical);
 }
 
 /* ---------------------------------------------------------------------------
    Counters
+   ---------------------------------------------------------------------------
+   Retained for the retention panel, which still lays its numbers out this way.
    ------------------------------------------------------------------------- */
 
 .counters {
@@ -648,6 +1204,7 @@ code {
 
 .counter {
   flex: 1 1 8rem;
+  border: 1px solid var(--line);
   border-radius: var(--radius-card);
   background: var(--card-soft);
   padding: 0.7rem 1rem 0.85rem;
@@ -655,11 +1212,12 @@ code {
 }
 
 .counter.is-alarming {
-  background: var(--accent-soft);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 32%, transparent);
 }
 
 .counter.is-alarming dd {
-  color: var(--accent-strong);
+  color: var(--warn);
 }
 
 .counter dt {
@@ -686,6 +1244,7 @@ code {
   display: block;
   width: 100%;
   height: 100%;
+  min-height: 0;
   padding: 0.7rem 1rem 0.85rem;
   border: none;
   border-radius: inherit;
@@ -696,32 +1255,11 @@ code {
 
 .counter__open:hover {
   border: none;
-  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
 }
 
 .counter.is-alarming .counter__open:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-/* ---------------------------------------------------------------------------
-   Counter groups
-   ------------------------------------------------------------------------- */
-
-.counter-group {
-  margin-top: 1.25rem;
-}
-
-.counter-group h3 {
-  margin: 0;
-}
-
-/* A group with nothing in it says so in one line instead of drawing six zeros.
-   Six zeros is not more information than "nothing"; it is the same information
-   spread over enough tiles to train the eye to skip the row. */
-.counter-group__quiet {
-  margin: 0.35rem 0 0;
-  color: var(--ink-soft);
-  font-size: 0.9rem;
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -755,7 +1293,7 @@ code {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--ink-soft);
-  border-bottom-color: var(--ink);
+  border-bottom-color: var(--line-strong);
 }
 
 .table tbody tr:hover {
@@ -767,35 +1305,42 @@ code {
 }
 
 .table tbody tr.is-alarming-row td:first-child {
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 var(--critical);
 }
 
+/* Every badge is a tinted surface with a matching foreground rather than a
+   solid fill, so the four tones sit at the same visual weight and none of them
+   shouts louder than its meaning warrants. The word inside is the actual
+   signal; the tint only makes it findable. */
 .badge {
   display: inline-block;
-  padding: 0.1rem 0.55rem;
+  padding: 0.12rem 0.55rem;
   margin-right: 0.25rem;
+  border: 1px solid transparent;
   border-radius: var(--radius-pill);
   background: var(--card-soft);
   color: var(--ink);
   font-size: 0.74rem;
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .badge--good {
-  background: var(--ink);
-  color: var(--dark-ink);
+  background: var(--good-soft);
+  border-color: color-mix(in srgb, var(--good) 30%, transparent);
+  color: var(--good);
 }
 
 .badge--warn {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  color: var(--warn);
 }
 
-/* Orange is this interface's one loud colour and it is spent here: on a state
-   that means somebody has to act. */
 .badge--bad {
-  background: var(--accent);
-  color: #ffffff;
+  background: var(--critical-soft);
+  border-color: color-mix(in srgb, var(--critical) 40%, transparent);
+  color: var(--critical);
 }
 
 .muted {
@@ -803,7 +1348,7 @@ code {
 }
 
 .is-alarming-text {
-  color: var(--accent-strong);
+  color: var(--critical);
 }
 
 .detail-grid {
@@ -968,7 +1513,7 @@ code {
 
 .resolve__error {
   margin: 0;
-  color: var(--accent-strong);
+  color: var(--critical);
   font-size: 0.9rem;
 }
 
@@ -1035,7 +1580,7 @@ code {
 }
 
 .acknowledge__error {
-  color: var(--accent-strong);
+  color: var(--critical);
   font-size: 0.85rem;
 }
 
@@ -1078,8 +1623,65 @@ code {
     margin-left: auto;
   }
 
+  /* The active marker sits on the leading edge of a tab in a column. In a
+     wrapped row the tabs are short and the bar crowds the label, so the active
+     state falls back to the lifted surface and the heavier text — both of which
+     survive on their own, which is why there were three signals. */
+  .nav-tab.is-active {
+    padding-left: 0.85rem;
+  }
+
+  .nav-tab.is-active::before {
+    display: none;
+  }
+
   .shell__body {
     padding: 1rem;
+  }
+
+  .shell__header h1 {
+    font-size: 1.5rem;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Overview at tablet and phone widths
+   ---------------------------------------------------------------------------
+   The grids above are all `auto-fit`, so they reflow on their own down to a
+   single column and the page never scrolls sideways. What needs saying here is
+   only what auto-fit cannot decide: how large a headline number should be when
+   it no longer has a column of its own, and that the header stops trying to put
+   its action on the same line as its summary.
+   ------------------------------------------------------------------------- */
+
+@media (max-width: 40rem) {
+  .page-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-head__actions {
+    justify-content: flex-start;
+  }
+
+  .kpi__value {
+    font-size: 2.1rem;
+  }
+
+  .attention__count {
+    font-size: 1.9rem;
+  }
+
+  /* A single column of KPIs at this width would push the modules two screens
+     down. Two narrow tiles still read, because the label is above the number
+     rather than beside it. */
+  .kpi-row {
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  }
+
+  .kpi,
+  .kpi.is-navigable .kpi__open {
+    padding: 0.85rem 0.9rem 0.9rem;
   }
 }
 
@@ -1260,10 +1862,12 @@ code {
   border: 1px solid var(--line);
 }
 
+/* "Awaiting keys" is the one status on this screen that is somebody's job to
+   finish rather than a standing fact, so it is the one that carries a tone. */
 .people__status--provisioning {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  border-color: transparent;
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
 }
 
 .people__status--disabled {
@@ -1273,8 +1877,9 @@ code {
 /* An outstanding ticket is the one thing on this screen a second pair of eyes
    is meant to notice. */
 .people__ticket-warning {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
   border-radius: var(--radius-control);
   padding: 0.5rem 0.7rem;
   font-size: 0.82rem;
