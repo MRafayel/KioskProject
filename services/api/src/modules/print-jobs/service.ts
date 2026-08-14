@@ -76,6 +76,11 @@ interface StoredSelection {
   contentSha256: string;
   pageRanges: Array<[number, number]>;
   selectedPages: number;
+  copies: number;
+  duplex: string;
+  orientation: string;
+  printedSides: number;
+  physicalSheets: number;
 }
 
 /**
@@ -188,17 +193,14 @@ export class PrintJobService {
             const documents = await this.resolveDocuments(transaction, session.id, settings);
             const printJobId = this.options.random.uuid(now);
             const manifest = printJobManifestSchema.parse({
-              manifestVersion: 1,
+              manifestVersion: 2,
               printJobId,
               sessionId: session.id,
               settingsRevision: settings.revision,
               settingsManifestHash: settings.manifestHash,
               quoteId: payment.quoteId,
               paymentId: payment.id,
-              copies: settings.copies,
-              duplex: settings.duplex,
               paperSize: settings.paperSize,
-              orientation: settings.orientation,
               scaling: settings.scaling,
               collate: settings.collate,
               colorMode: settings.colorMode,
@@ -221,7 +223,9 @@ export class PrintJobService {
                 jobManifestHash: hashPrintManifest(manifest),
                 status: "QUEUED",
                 resultConfidence: "UNKNOWN",
-                copies: settings.copies,
+                // Copies are per document now, so the job carries the total
+                // number of document copies it produces.
+                copies: documents.reduce((total, document) => total + document.copies, 0),
                 printedSides: settings.printedSides,
                 physicalSheets: settings.physicalSheets,
                 availableAt: now,
@@ -508,7 +512,15 @@ export class PrintJobService {
         sizeBytes: derivative.sizeBytes,
         pageCount: selection.pageCount,
         pageRanges: selection.pageRanges,
-        selectedPages: selection.selectedPages
+        selectedPages: selection.selectedPages,
+        // What the device prints this document as. It travels inside the
+        // hashed manifest, so the agent cannot be handed one document's
+        // settings and asked to apply them to another.
+        copies: selection.copies,
+        duplex: selection.duplex,
+        orientation: selection.orientation,
+        printedSides: selection.printedSides,
+        physicalSheets: selection.physicalSheets
       });
     }
 
@@ -711,6 +723,11 @@ function readSelections(value: unknown): StoredSelection[] {
       !Number.isSafeInteger(record.processingRevision) ||
       typeof record.contentSha256 !== "string" ||
       !Number.isSafeInteger(record.selectedPages) ||
+      !Number.isSafeInteger(record.copies) ||
+      typeof record.duplex !== "string" ||
+      typeof record.orientation !== "string" ||
+      !Number.isSafeInteger(record.printedSides) ||
+      !Number.isSafeInteger(record.physicalSheets) ||
       pageRanges.length === 0
     ) {
       return [];
@@ -722,7 +739,12 @@ function readSelections(value: unknown): StoredSelection[] {
       processingRevision: record.processingRevision as number,
       contentSha256: record.contentSha256,
       pageRanges,
-      selectedPages: record.selectedPages as number
+      selectedPages: record.selectedPages as number,
+      copies: record.copies as number,
+      duplex: record.duplex,
+      orientation: record.orientation,
+      printedSides: record.printedSides as number,
+      physicalSheets: record.physicalSheets as number
     });
   }
   return selections;

@@ -150,10 +150,7 @@ export class PrintSettingsService {
                 id: this.options.random.uuid(now),
                 sessionId: session.id,
                 revision,
-                copies: normalized.copies,
-                duplex: normalized.duplex,
                 paperSize: normalized.paperSize,
-                orientation: normalized.orientation,
                 scaling: normalized.scaling,
                 collate: normalized.collate,
                 colorMode: normalized.colorMode,
@@ -165,7 +162,12 @@ export class PrintSettingsService {
                   contentSha256: file.contentSha256,
                   pageRanges: file.pageRanges.map(([start, end]) => [start, end]),
                   pageRangeText: file.pageRangeText,
-                  selectedPages: file.selectedPages
+                  selectedPages: file.selectedPages,
+                  copies: file.copies,
+                  duplex: file.duplex,
+                  orientation: file.orientation,
+                  printedSides: file.printedSides,
+                  physicalSheets: file.physicalSheets
                 })),
                 selectedPages: normalized.selectedPages,
                 printedSides: normalized.printedSides,
@@ -368,10 +370,7 @@ export function hashManifest(settings: NormalizedPrintSettings): string {
 
 export interface StoredSettingsRevision {
   revision: number;
-  copies: number;
-  duplex: string;
   paperSize: string;
-  orientation: string;
   scaling: string;
   collate: boolean;
   colorMode: string;
@@ -386,10 +385,7 @@ export function toStoredSettingsSnapshot(stored: StoredSettingsRevision): PrintS
   const selections = Array.isArray(stored.selections) ? stored.selections : [];
   return printSettingsSnapshotSchema.parse({
     revision: stored.revision,
-    copies: stored.copies,
-    duplex: stored.duplex,
     paperSize: stored.paperSize,
-    orientation: stored.orientation,
     scaling: stored.scaling,
     collate: stored.collate,
     colorMode: stored.colorMode,
@@ -401,7 +397,12 @@ export function toStoredSettingsSnapshot(stored: StoredSettingsRevision): PrintS
         pageCount: record.pageCount,
         pageRanges: record.pageRanges,
         pageRangeText: record.pageRangeText,
-        selectedPages: record.selectedPages
+        selectedPages: record.selectedPages,
+        copies: record.copies,
+        duplex: record.duplex,
+        orientation: record.orientation,
+        printedSides: record.printedSides,
+        physicalSheets: record.physicalSheets
       };
     }),
     selectedPages: stored.selectedPages,
@@ -417,10 +418,7 @@ function toSettingsSnapshot(
 ): PrintSettingsSnapshot {
   return printSettingsSnapshotSchema.parse({
     revision: stored.revision,
-    copies: normalized.copies,
-    duplex: normalized.duplex,
     paperSize: normalized.paperSize,
-    orientation: normalized.orientation,
     scaling: normalized.scaling,
     collate: normalized.collate,
     colorMode: normalized.colorMode,
@@ -430,7 +428,12 @@ function toSettingsSnapshot(
       pageCount: file.pageCount,
       pageRanges: file.pageRanges.map(([start, end]) => [start, end]),
       pageRangeText: file.pageRangeText,
-      selectedPages: file.selectedPages
+      selectedPages: file.selectedPages,
+      copies: file.copies,
+      duplex: file.duplex,
+      orientation: file.orientation,
+      printedSides: file.printedSides,
+      physicalSheets: file.physicalSheets
     })),
     selectedPages: normalized.selectedPages,
     printedSides: normalized.printedSides,
@@ -449,10 +452,7 @@ function normalizeOrFail(
     {
       fileOrder: body.fileOrder,
       fileSelections: body.fileSelections,
-      copies: body.copies,
-      duplex: body.duplex,
       paperSize: body.paperSize,
-      orientation: body.orientation,
       scaling: body.scaling,
       collate: body.collate
     },
@@ -467,15 +467,16 @@ function normalizeOrFail(
 function fingerprintSettingsRequest(body: UpdatePrintSettingsBody): string {
   const selections = [...body.fileSelections]
     .sort((left, right) => (left.fileId < right.fileId ? -1 : left.fileId > right.fileId ? 1 : 0))
-    .map((selection) => `${selection.fileId}=${selection.pageRanges ?? ""}`)
+    .map(
+      (selection) =>
+        `${selection.fileId}=${selection.pageRanges ?? ""}:${selection.copies}:` +
+        `${selection.duplex}:${selection.orientation}`
+    )
     .join("|");
   return [
     body.fileOrder.join(">"),
     selections,
-    body.copies,
-    body.duplex,
     body.paperSize,
-    body.orientation,
     body.scaling,
     body.collate ? "collate" : "no-collate"
   ].join("\n");

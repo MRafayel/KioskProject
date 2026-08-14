@@ -134,7 +134,10 @@ export class QuoteService {
                 service: "PRINT",
                 paperSize: revision.paperSize,
                 colorMode: revision.colorMode,
-                duplex: revision.duplex !== "SIMPLEX",
+                // Sides are priced at one rate, but the duplex adjustment
+                // follows each document's own choice, so the breakdown the
+                // quote is built from is per document.
+                documents: readStoredDocumentUsage(revision.selections),
                 selectedPages: revision.selectedPages,
                 printedSides: revision.printedSides,
                 physicalSheets: revision.physicalSheets
@@ -337,10 +340,7 @@ export class QuoteService {
     revision: {
       revision: number;
       manifestHash: string;
-      copies: number;
-      duplex: string;
       paperSize: string;
-      orientation: string;
       scaling: string;
       collate: boolean;
       selections: unknown;
@@ -378,12 +378,12 @@ export class QuoteService {
             fileOrder: selections.map((selection) => selection.fileId),
             fileSelections: selections.map((selection) => ({
               fileId: selection.fileId,
-              pageRanges: selection.pageRangeText
+              pageRanges: selection.pageRangeText,
+              copies: selection.copies,
+              duplex: selection.duplex,
+              orientation: selection.orientation
             })),
-            copies: revision.copies,
-            duplex: revision.duplex as DuplexMode,
             paperSize: revision.paperSize as PaperSize,
-            orientation: revision.orientation as Orientation,
             scaling: revision.scaling as ScalingMode,
             collate: revision.collate
           },
@@ -504,6 +504,9 @@ export class QuoteService {
 interface StoredSelection {
   fileId: string;
   pageRangeText: string;
+  copies: number;
+  duplex: DuplexMode;
+  orientation: Orientation;
 }
 
 function readSelections(value: unknown): StoredSelection[] {
@@ -511,8 +514,39 @@ function readSelections(value: unknown): StoredSelection[] {
   return value.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
     const record = entry as Record<string, unknown>;
-    return typeof record.fileId === "string" && typeof record.pageRangeText === "string"
-      ? [{ fileId: record.fileId, pageRangeText: record.pageRangeText }]
+    // A selection missing any of its own settings is not one this code may
+    // guess at: re-deriving the manifest from a guess would either accept a
+    // revision that changed or reject one that did not.
+    return typeof record.fileId === "string" &&
+      typeof record.pageRangeText === "string" &&
+      typeof record.copies === "number" &&
+      typeof record.duplex === "string" &&
+      typeof record.orientation === "string"
+      ? [
+          {
+            fileId: record.fileId,
+            pageRangeText: record.pageRangeText,
+            copies: record.copies,
+            duplex: record.duplex as DuplexMode,
+            orientation: record.orientation as Orientation
+          }
+        ]
+      : [];
+  });
+}
+
+/**
+ * Each document's duplex choice and the sides it contributes, as the stored
+ * revision recorded them. The quote is re-derived from the snapshot rather
+ * than from anything a client sent.
+ */
+function readStoredDocumentUsage(value: unknown): Array<{ duplex: boolean; printedSides: number }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Record<string, unknown>;
+    return typeof record.duplex === "string" && typeof record.printedSides === "number"
+      ? [{ duplex: record.duplex !== "SIMPLEX", printedSides: record.printedSides }]
       : [];
   });
 }

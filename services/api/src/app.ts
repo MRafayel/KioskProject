@@ -12,6 +12,8 @@ import { createDatabaseClient, type PrismaClient } from "@printing-kiosk/databas
 import type { RetentionPolicy } from "@printing-kiosk/domain";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
+import { registerDeviceRoutes } from "./modules/devices/routes.js";
+import { DeviceRegistryService } from "./modules/devices/service.js";
 import { FileJanitor } from "./modules/files/janitor.js";
 import { createS3ObjectStore, type ObjectStore } from "./modules/files/object-store.js";
 import { registerDocumentPreviewRoutes } from "./modules/files/previews.js";
@@ -232,6 +234,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     random,
     leaseSeconds: options.environment.PRINT_COMMAND_LEASE_SECONDS,
     retentionPolicy
+  });
+  const devices = new DeviceRegistryService({
+    database,
+    clock,
+    random,
+    heartbeatIntervalSeconds: options.environment.AGENT_HEARTBEAT_SECONDS
   });
   const janitor = new FileJanitor({
     database,
@@ -478,6 +486,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     kioskAuthentication,
     maxDocumentBytes: options.environment.MAX_NORMALIZED_FILE_BYTES
   });
+  registerDeviceRoutes(app, { database, clock, devices, kioskAuthentication });
   registerDocumentPreviewRoutes(app, {
     database,
     objectStore,

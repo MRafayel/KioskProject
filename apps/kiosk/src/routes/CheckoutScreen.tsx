@@ -7,7 +7,7 @@ import {
   fileExtension,
   formatMinorAmount,
   isQuotePayable,
-  isReadyFile,
+  readyFiles,
   type PrototypeOutcome
 } from "../features/session/model.js";
 import { PaymentRequestError, startKioskPayment } from "../features/session/paymentService.js";
@@ -40,14 +40,17 @@ export function CheckoutScreen() {
   const [starting, setStarting] = useState(false);
   const [startFailure, setStartFailure] = useState<string | null>(null);
 
-  const file = state.files[0];
+  const documents = readyFiles(state.files);
+  const firstDocument = documents[0];
   const quote = state.pricing.quote;
   const settings = state.pricing.settings;
   // Payment may only ever be offered against a live server quote. A price that
   // expired or was invalidated sends the customer back to reconfigure rather
   // than letting a stale total reach the payment step.
-  if (!isReadyFile(file)) return <KioskRedirect to="/upload" />;
+  if (!firstDocument) return <KioskRedirect to="/upload" />;
   if (!settings || !isQuotePayable(quote, new Date())) return <KioskRedirect to="/configure" />;
+
+  const firstPriced = settings.files.find((entry) => entry.fileId === firstDocument.id);
 
   const money = (amountMinor: number) =>
     formatMinorAmount(amountMinor, quote.currency, quote.currencyExponent, numberLocale);
@@ -90,7 +93,13 @@ export function CheckoutScreen() {
           <div className="receipt-card__heading">
             <div>
               <strong>
-                {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+                {documents.length > 1
+                  ? messages.checkout.documentCount(documents.length)
+                  : (firstDocument.name ??
+                    messages.upload.fileName(
+                      firstDocument.ordinal + 1,
+                      fileExtension(firstDocument.kind)
+                    ))}
               </strong>
               <span>{messages.checkout.selectedPages(quote.selectedPages)}</span>
             </div>
@@ -102,19 +111,58 @@ export function CheckoutScreen() {
               {messages.checkout.edit}
             </button>
           </div>
+          {/* With more than one document the customer is paying for a set, so
+              the receipt names each one and the pages it contributes rather
+              than showing a single total they cannot break down. */}
+          {documents.length > 1 ? (
+            <ul className="receipt-documents">
+              {documents.map((document) => {
+                const priced = settings.files.find((entry) => entry.fileId === document.id);
+                return (
+                  <li key={document.id}>
+                    <span>
+                      {document.name ??
+                        messages.upload.fileName(
+                          document.ordinal + 1,
+                          fileExtension(document.kind)
+                        )}
+                    </span>
+                    <span>
+                      {priced
+                        ? messages.checkout.documentSummary(
+                            priced.selectedPages,
+                            priced.copies,
+                            priced.duplex === "SIMPLEX"
+                              ? messages.configure.singleSided
+                              : messages.configure.doubleSided
+                          )
+                        : messages.checkout.documentPagesUnknown}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
           <dl className="receipt-list">
-            <div>
-              <dt>{messages.checkout.copies}</dt>
-              <dd>{settings.copies}</dd>
-            </div>
-            <div>
-              <dt>{messages.checkout.sides}</dt>
-              <dd>
-                {settings.duplex === "SIMPLEX"
-                  ? messages.configure.singleSided
-                  : messages.configure.doubleSided}
-              </dd>
-            </div>
+            {/* Copies and sides are per document, so a single-document job
+                still states them here; a job of several states them against
+                each document in the list above. */}
+            {documents.length === 1 && firstPriced ? (
+              <>
+                <div>
+                  <dt>{messages.checkout.copies}</dt>
+                  <dd>{firstPriced.copies}</dd>
+                </div>
+                <div>
+                  <dt>{messages.checkout.sides}</dt>
+                  <dd>
+                    {firstPriced.duplex === "SIMPLEX"
+                      ? messages.configure.singleSided
+                      : messages.configure.doubleSided}
+                  </dd>
+                </div>
+              </>
+            ) : null}
             <div>
               <dt>{messages.checkout.paperSheets}</dt>
               <dd>{quote.physicalSheets}</dd>

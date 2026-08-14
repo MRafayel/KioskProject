@@ -320,11 +320,16 @@ describe("settings and quote route contracts", () => {
   const sessionId = "01900000-0000-7000-8000-000000000010";
   const validSettings = {
     fileOrder: ["01900000-0000-7000-8000-000000000011"],
-    fileSelections: [{ fileId: "01900000-0000-7000-8000-000000000011", pageRanges: "1-3" }],
-    copies: 2,
-    duplex: "LONG_EDGE",
+    fileSelections: [
+      {
+        fileId: "01900000-0000-7000-8000-000000000011",
+        pageRanges: "1-3",
+        copies: 2,
+        duplex: "LONG_EDGE",
+        orientation: "AUTO"
+      }
+    ],
     paperSize: "A4",
-    orientation: "AUTO",
     scaling: "FIT",
     collate: true
   };
@@ -391,7 +396,13 @@ describe("settings and quote route contracts", () => {
       updatePrintSettingsBodySchema.safeParse({
         ...validSettings,
         fileSelections: [
-          { fileId: "01900000-0000-7000-8000-000000000011", pageRanges: "1-3; DROP" }
+          {
+            fileId: "01900000-0000-7000-8000-000000000011",
+            pageRanges: "1-3; DROP",
+            copies: 1,
+            duplex: "SIMPLEX",
+            orientation: "AUTO"
+          }
         ]
       }).success
     ).toBe(false);

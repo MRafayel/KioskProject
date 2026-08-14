@@ -50,8 +50,14 @@ await database.systemMetadata.upsert({
 });
 
 // The capability snapshot is what settings validation trusts. It describes the
-// simulated pilot device: A4 monochrome with long-edge duplex. A real printer
-// replaces these values in Phase 10.
+// simulated pilot device: A4 monochrome with long-edge duplex. From Phase 10 a
+// registered agent overwrites these values with what its printer actually
+// reported, so this is a starting position rather than a fixed truth.
+//
+// `approvedQueues` is the operator's certification, and it is deliberately
+// stored here beside the capabilities it governs: a kiosk may publish
+// capabilities only for a queue on this list, so an agent reporting a printer
+// nobody certified changes nothing. An empty list approves nothing.
 const developmentCapabilities = {
   service: "PRINT_ONLY",
   outputMode: "MONOCHROME",
@@ -62,6 +68,7 @@ const developmentCapabilities = {
   orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
   scalingModes: ["FIT", "ACTUAL_SIZE"],
   maxCopies: 20,
+  approvedQueues: ["Mock Kiosk Printer"],
   scanningEnabled: false,
   photocopyEnabled: false
 };

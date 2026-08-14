@@ -42,16 +42,23 @@ function rule(overrides: Partial<PricingRule> = {}): PricingRule {
   };
 }
 
-function usage(overrides: Partial<PricingUsage> = {}): PricingUsage {
+/**
+ * Duplex is a property of a document, so the shorthand here describes a job of
+ * one document printed that way. A job with documents printed differently
+ * passes `documents` itself.
+ */
+function usage(overrides: Partial<PricingUsage> & { duplex?: boolean } = {}): PricingUsage {
+  const { duplex, ...rest } = overrides;
+  const printedSides = rest.printedSides ?? 6;
   return {
     service: "PRINT",
     paperSize: "A4",
     colorMode: "MONOCHROME",
-    duplex: true,
     selectedPages: 5,
-    printedSides: 6,
+    printedSides,
     physicalSheets: 4,
-    ...overrides
+    documents: [{ duplex: duplex ?? true, printedSides }],
+    ...rest
   };
 }
 
@@ -144,6 +151,53 @@ describe("duplex, fees, minimum and tax", () => {
       usage: usage({ duplex: false, physicalSheets: 6 })
     });
     expect(duplex.totalMinor).toBe(simplex.totalMinor);
+  });
+
+  it("adjusts only the sides a job actually printed double-sided", () => {
+    // A discount on duplex output must not reach the document that was
+    // printed single-sided just because another document in the same job
+    // was duplex.
+    const discounted = ruleSet({
+      rules: [
+        rule({ duplexAdjustmentBasisPoints: -1_000, minimumAmountMinor: 0, serviceFeeMinor: 0 })
+      ]
+    });
+    const mixed = calculateQuote({
+      ruleSet: discounted,
+      usage: usage({
+        printedSides: 10,
+        physicalSheets: 8,
+        documents: [
+          { duplex: true, printedSides: 6 },
+          { duplex: false, printedSides: 4 }
+        ]
+      })
+    });
+
+    // Ten sides at 12 is 120; only the duplex document's 6 sides (72) are
+    // discounted by 10%, so the adjustment is -7 rather than -12.
+    expect(mixed.printAmountMinor).toBe(120);
+    expect(mixed.duplexAdjustmentMinor).toBe(-7);
+
+    const allDuplex = calculateQuote({
+      ruleSet: discounted,
+      usage: usage({ printedSides: 10, physicalSheets: 5, duplex: true })
+    });
+    expect(allDuplex.duplexAdjustmentMinor).toBe(-12);
+  });
+
+  it("refuses a per-document breakdown that does not add up to the job", () => {
+    // The breakdown decides the adjustment, so one that disagrees with the
+    // charged total would discount sides nobody is paying for.
+    expect(() =>
+      calculateQuote({
+        ruleSet: ruleSet(),
+        usage: usage({
+          printedSides: 10,
+          documents: [{ duplex: true, printedSides: 6 }]
+        })
+      })
+    ).toThrow("PRICING_USAGE_INVALID");
   });
 
   it("can apply the minimum after tax when the rule set says so", () => {

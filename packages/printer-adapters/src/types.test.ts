@@ -15,25 +15,22 @@ import { canonicalPrintManifestJson, type PrintJobManifest } from "./types.js";
  * as a tampered manifest and every capture owe a refund. That is what this
  * constant exists to catch.
  */
-const GOLDEN_MANIFEST_SHA256 = "49c78dadaaacf437254477f6c1aa788311616595eb38fd270ac37fef32095e85";
+const GOLDEN_MANIFEST_SHA256 = "dfb56399a6eeb5f019694a87f21d033d1b99b1888a87384dce69262690d8c1e7";
 
 const goldenManifest: PrintJobManifest = {
-  manifestVersion: 1,
+  manifestVersion: 2,
   printJobId: "01900000-0000-7000-8000-000000000901",
   sessionId: "01900000-0000-7000-8000-000000000902",
   settingsRevision: 3,
   settingsManifestHash: "c".repeat(64),
   quoteId: "01900000-0000-7000-8000-000000000903",
   paymentId: "01900000-0000-7000-8000-000000000904",
-  copies: 2,
-  duplex: "LONG_EDGE",
   paperSize: "A4",
-  orientation: "AUTO",
   scaling: "FIT",
   collate: true,
   colorMode: "MONOCHROME",
   selectedPages: 5,
-  printedSides: 10,
+  printedSides: 8,
   physicalSheets: 6,
   documents: [
     {
@@ -43,7 +40,12 @@ const goldenManifest: PrintJobManifest = {
       sizeBytes: 2048,
       pageCount: 3,
       pageRanges: [[1, 3]],
-      selectedPages: 3
+      selectedPages: 3,
+      copies: 2,
+      duplex: "LONG_EDGE",
+      orientation: "PORTRAIT",
+      printedSides: 6,
+      physicalSheets: 4
     },
     {
       documentId: "01900000-0000-7000-8000-000000000906",
@@ -55,7 +57,12 @@ const goldenManifest: PrintJobManifest = {
         [2, 2],
         [4, 4]
       ],
-      selectedPages: 2
+      selectedPages: 2,
+      copies: 1,
+      duplex: "SIMPLEX",
+      orientation: "LANDSCAPE",
+      printedSides: 2,
+      physicalSheets: 2
     }
   ]
 };

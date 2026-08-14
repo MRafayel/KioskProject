@@ -26,7 +26,8 @@
     "typecheck": "pnpm generate && tsc -p tsconfig.json --noEmit",
     "test": "vitest run src --passWithNoTests",
     "verify:phase8-upgrade": "node scripts/verify-phase8-upgrade.mjs",
-    "verify:phase9-upgrade": "node scripts/verify-phase9-upgrade.mjs"
+    "verify:phase9-upgrade": "node scripts/verify-phase9-upgrade.mjs",
+    "verify:phase10-upgrade": "node scripts/verify-phase10-upgrade.mjs"
   },
   "dependencies": {
     "@printing-kiosk/domain": "workspace:*",

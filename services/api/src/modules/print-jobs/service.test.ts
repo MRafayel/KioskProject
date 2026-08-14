@@ -17,25 +17,22 @@ import { hashPrintManifest } from "./service.js";
  * constant is not a formatting detail: changing it on one side alone is the
  * failure being guarded against.
  */
-const GOLDEN_MANIFEST_SHA256 = "49c78dadaaacf437254477f6c1aa788311616595eb38fd270ac37fef32095e85";
+const GOLDEN_MANIFEST_SHA256 = "dfb56399a6eeb5f019694a87f21d033d1b99b1888a87384dce69262690d8c1e7";
 
 const goldenManifest = {
-  manifestVersion: 1,
+  manifestVersion: 2,
   printJobId: "01900000-0000-7000-8000-000000000901",
   sessionId: "01900000-0000-7000-8000-000000000902",
   settingsRevision: 3,
   settingsManifestHash: "c".repeat(64),
   quoteId: "01900000-0000-7000-8000-000000000903",
   paymentId: "01900000-0000-7000-8000-000000000904",
-  copies: 2,
-  duplex: "LONG_EDGE",
   paperSize: "A4",
-  orientation: "AUTO",
   scaling: "FIT",
   collate: true,
   colorMode: "MONOCHROME",
   selectedPages: 5,
-  printedSides: 10,
+  printedSides: 8,
   physicalSheets: 6,
   documents: [
     {
@@ -45,7 +42,12 @@ const goldenManifest = {
       sizeBytes: 2048,
       pageCount: 3,
       pageRanges: [[1, 3]],
-      selectedPages: 3
+      selectedPages: 3,
+      copies: 2,
+      duplex: "LONG_EDGE",
+      orientation: "PORTRAIT",
+      printedSides: 6,
+      physicalSheets: 4
     },
     {
       documentId: "01900000-0000-7000-8000-000000000906",
@@ -57,7 +59,12 @@ const goldenManifest = {
         [2, 2],
         [4, 4]
       ],
-      selectedPages: 2
+      selectedPages: 2,
+      copies: 1,
+      duplex: "SIMPLEX",
+      orientation: "LANDSCAPE",
+      printedSides: 2,
+      physicalSheets: 2
     }
   ]
 };
@@ -80,12 +87,24 @@ describe("hashPrintManifest", () => {
 
   it("changes when anything the device would print changes", () => {
     const manifest = printJobManifestSchema.parse(goldenManifest);
+    // One more copy of the first document only: the job totals move with it,
+    // and so must the digest the device checks.
+    const [first, ...rest] = goldenManifest.documents;
     const extraCopy = printJobManifestSchema.parse({
       ...goldenManifest,
-      copies: 3,
-      printedSides: 15
+      printedSides: 11,
+      physicalSheets: 8,
+      documents: [{ ...first, copies: 3, printedSides: 9, physicalSheets: 6 }, ...rest]
     });
 
     expect(hashPrintManifest(extraCopy)).not.toBe(hashPrintManifest(manifest));
+
+    // And a document that only changed how it is printed is a different job
+    // even when every page count stays the same.
+    const landscape = printJobManifestSchema.parse({
+      ...goldenManifest,
+      documents: [{ ...first, orientation: "LANDSCAPE" }, ...rest]
+    });
+    expect(hashPrintManifest(landscape)).not.toBe(hashPrintManifest(manifest));
   });
 });

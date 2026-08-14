@@ -10,7 +10,7 @@ import {
   calculatePrintSummary,
   fileExtension,
   formatMinorAmount,
-  isReadyFile,
+  readyFiles,
   simulatedPrintOutcomeFor
 } from "../features/session/model.js";
 import {
@@ -126,7 +126,7 @@ export function PaymentScreen() {
     };
   }, [declineRequested, dispatch, navigate, paymentId]);
 
-  if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
+  if (readyFiles(state.files).length === 0) return <KioskRedirect to="/upload" />;
   // Payment is only ever watched, never invented: without a payment the
   // control plane created, this screen has nothing to show.
   if (!paymentId) return <KioskRedirect to="/checkout" />;
@@ -261,7 +261,7 @@ export function PrintingScreen() {
     sessionId
   ]);
 
-  if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
+  if (readyFiles(state.files).length === 0) return <KioskRedirect to="/upload" />;
   // Printing is only ever watched, never invented: without a capture the
   // control plane applied to this session, this screen has nothing to show.
   if (!paymentId) return <KioskRedirect to="/checkout" />;
@@ -307,7 +307,7 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
   const printOperatorRequired =
     printStatusUnavailable && state.print.failureDisposition === "OPERATOR_REQUIRED";
 
-  if (!isReadyFile(state.files[0])) return <KioskRedirect to="/upload" />;
+  if (readyFiles(state.files).length === 0) return <KioskRedirect to="/upload" />;
 
   return (
     <div className="terminal-state terminal-state--error">
@@ -433,8 +433,8 @@ export function CompleteScreen() {
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
 
-  const file = state.files[0];
-  if (!isReadyFile(file)) return <KioskRedirect to="/" />;
+  const documents = readyFiles(state.files);
+  if (documents.length === 0) return <KioskRedirect to="/" />;
 
   const quote = state.pricing.quote;
   const localSummary = calculatePrintSummary(state.files, state.settings);
@@ -466,8 +466,16 @@ export function CompleteScreen() {
       <dl className="completion-summary">
         <div>
           <dt>{messages.status.printed}</dt>
+          {/* Every document the customer paid for is named, so the receipt
+              accounts for the whole job rather than only its first document. */}
           <dd>
-            {file.name ?? messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+            {documents
+              .map(
+                (document) =>
+                  document.name ??
+                  messages.upload.fileName(document.ordinal + 1, fileExtension(document.kind))
+              )
+              .join(", ")}
           </dd>
         </div>
         {/* The receipt shows the amount the control plane quoted, never a

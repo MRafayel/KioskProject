@@ -121,9 +121,37 @@ export const printJobDocumentSchema = z
     sizeBytes: z.number().int().positive(),
     pageCount: z.number().int().positive(),
     pageRanges: z.array(pageRangeSchema).min(1).max(50),
-    selectedPages: z.number().int().positive()
+    selectedPages: z.number().int().positive(),
+    // How this document is printed. Copies, sides and orientation belong to a
+    // document, so the device is told them per document rather than once for
+    // a run that may mix them.
+    copies: z.number().int().positive().max(100),
+    duplex: z.enum(["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"]),
+    orientation: z.enum(["AUTO", "PORTRAIT", "LANDSCAPE"]),
+    printedSides: z.number().int().positive(),
+    physicalSheets: z.number().int().positive()
   })
-  .strict();
+  .strict()
+  .superRefine((document, context) => {
+    if (document.printedSides !== document.selectedPages * document.copies) {
+      context.addIssue({
+        code: "custom",
+        path: ["printedSides"],
+        message: "A document's side total must match its pages and copies."
+      });
+    }
+    const sheetsPerCopy =
+      document.duplex === "SIMPLEX"
+        ? document.selectedPages
+        : Math.ceil(document.selectedPages / 2);
+    if (document.physicalSheets !== sheetsPerCopy * document.copies) {
+      context.addIssue({
+        code: "custom",
+        path: ["physicalSheets"],
+        message: "A document's sheet total must match its pages, sides and copies."
+      });
+    }
+  });
 
 /**
  * The immutable job manifest. It is hashed once and never edited: the control
@@ -131,17 +159,14 @@ export const printJobDocumentSchema = z
  */
 export const printJobManifestSchema = z
   .object({
-    manifestVersion: z.literal(1),
+    manifestVersion: z.literal(2),
     printJobId: z.string().uuid(),
     sessionId: z.string().uuid(),
     settingsRevision: z.number().int().positive(),
     settingsManifestHash: z.string().regex(/^[0-9a-f]{64}$/),
     quoteId: z.string().uuid(),
     paymentId: z.string().uuid(),
-    copies: z.number().int().positive(),
-    duplex: z.enum(["SIMPLEX", "LONG_EDGE", "SHORT_EDGE"]),
     paperSize: z.enum(["A4"]),
-    orientation: z.enum(["AUTO", "PORTRAIT", "LANDSCAPE"]),
     scaling: z.enum(["FIT", "ACTUAL_SIZE"]),
     collate: z.boolean(),
     colorMode: z.enum(["MONOCHROME"]),
@@ -155,6 +180,8 @@ export const printJobManifestSchema = z
     const documentIds = new Set<string>();
     const positions = new Set<number>();
     let selectedPages = 0;
+    let printedSides = 0;
+    let physicalSheets = 0;
     for (const [index, document] of manifest.documents.entries()) {
       if (documentIds.has(document.documentId)) {
         context.addIssue({
@@ -173,6 +200,8 @@ export const printJobManifestSchema = z
       documentIds.add(document.documentId);
       positions.add(document.position);
       selectedPages += document.selectedPages;
+      printedSides += document.printedSides;
+      physicalSheets += document.physicalSheets;
     }
 
     if (selectedPages !== manifest.selectedPages) {
@@ -182,11 +211,20 @@ export const printJobManifestSchema = z
         message: "The print manifest page total must match its documents."
       });
     }
-    if (manifest.printedSides !== manifest.selectedPages * manifest.copies) {
+    // Copies are per document, so the job totals are the sum of what each
+    // document produces rather than one multiplication over the whole run.
+    if (printedSides !== manifest.printedSides) {
       context.addIssue({
         code: "custom",
         path: ["printedSides"],
-        message: "The print manifest side total must match its pages and copies."
+        message: "The print manifest side total must match its documents."
+      });
+    }
+    if (physicalSheets !== manifest.physicalSheets) {
+      context.addIssue({
+        code: "custom",
+        path: ["physicalSheets"],
+        message: "The print manifest sheet total must match its documents."
       });
     }
   });

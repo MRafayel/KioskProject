@@ -50,9 +50,13 @@ export interface MessageCatalog {
     qrTitle: string;
     waitingForPhone: string;
     uploadedDocument: string;
+    uploadedDocuments: string;
+    documentsReady: (count: number) => string;
+    addMoreHint: string;
     uploadComplete: string;
     placeholder: string;
     continue: string;
+    continueWithCount: (count: number) => string;
     continueUnavailable: string;
     rejectedHelp: string;
     refreshError: string;
@@ -77,6 +81,17 @@ export interface MessageCatalog {
     step: string;
     title: string;
     description: string;
+    descriptionMany: (count: number) => string;
+    documents: string;
+    documentsTitle: (count: number) => string;
+    documentsHint: string;
+    documentLabel: (name: string) => string;
+    documentPosition: (position: number, total: number) => string;
+    documentSelectedPages: (selected: number, total: number) => string;
+    removeDocument: (name: string) => string;
+    addDocument: string;
+    settingsAppliesToAll: (count: number) => string;
+    settingsAppliesToOne: string;
     remove: string;
     removing: string;
     removeFailed: string;
@@ -117,6 +132,9 @@ export interface MessageCatalog {
     copiesAria: string;
     decreaseCopies: string;
     increaseCopies: string;
+    copiesAriaFor: (name: string) => string;
+    decreaseCopiesFor: (name: string) => string;
+    increaseCopiesFor: (name: string) => string;
     summaryTitle: string;
     selectedPages: string;
     printedSides: string;
@@ -136,6 +154,10 @@ export interface MessageCatalog {
     title: string;
     description: string;
     selectedPages: (count: number) => string;
+    documentCount: (count: number) => string;
+    documentPages: (count: number, ranges: string) => string;
+    documentSummary: (pages: number, copies: number, sides: string) => string;
+    documentPagesUnknown: string;
     edit: string;
     copies: string;
     sides: string;
@@ -289,14 +311,18 @@ const english: MessageCatalog = {
     description: "Scan this QR code with your phone. No account or app is needed.",
     instructionCamera: "Open your phone camera",
     instructionQr: "Point the camera at the QR code",
-    instructionFile: "Choose a PDF, JPEG, or PNG file",
+    instructionFile: "Choose one or more PDF, JPEG, or PNG files",
     sessionLabel: "Upload session",
     qrTitle: "QR code for secure phone upload",
     waitingForPhone: "Waiting for your phone",
     uploadedDocument: "Uploaded document",
+    uploadedDocuments: "Uploaded documents",
+    documentsReady: (count) => (count === 1 ? "1 document ready" : `${count} documents ready`),
+    addMoreHint: "Keep sending from your phone to add more documents.",
     uploadComplete: "Upload complete",
     placeholder: "Your uploaded files will appear here automatically.",
     continue: "Continue to print settings",
+    continueWithCount: (count) => `Continue with ${count} documents`,
     continueUnavailable: "Print settings will unlock after the document passes security checks.",
     rejectedHelp: "Remove this file on your phone and upload another document.",
     refreshError: "The upload status is temporarily unavailable. We will keep trying.",
@@ -322,6 +348,19 @@ const english: MessageCatalog = {
     step: "Step 2 of 4",
     title: "Choose print settings",
     description: "Review each option before payment. All output is black-and-white.",
+    descriptionMany: (count) =>
+      `Choose the pages for each of your ${count} documents, then the settings for the whole job. All output is black-and-white.`,
+    documents: "Documents",
+    documentsTitle: (count) => (count === 1 ? "Your document" : `Your ${count} documents`),
+    documentsHint: "Page choices apply to the document they sit under.",
+    documentLabel: (name) => `Settings for ${name}`,
+    documentPosition: (position, total) => `Document ${position} of ${total}`,
+    documentSelectedPages: (selected, total) =>
+      `Printing ${selected} of ${total} ${total === 1 ? "page" : "pages"}`,
+    removeDocument: (name) => `Remove ${name}`,
+    addDocument: "Add another document",
+    settingsAppliesToAll: (count) => `Applied to all ${count} documents.`,
+    settingsAppliesToOne: "Applied to your document.",
     remove: "Remove",
     removing: "Removing…",
     removeFailed: "The file could not be removed. Try again before continuing.",
@@ -365,6 +404,9 @@ const english: MessageCatalog = {
     copiesAria: "Number of copies",
     decreaseCopies: "Decrease copies",
     increaseCopies: "Increase copies",
+    copiesAriaFor: (name) => `Number of copies of ${name}`,
+    decreaseCopiesFor: (name) => `Decrease copies of ${name}`,
+    increaseCopiesFor: (name) => `Increase copies of ${name}`,
     summaryTitle: "Print summary",
     selectedPages: "Selected pages",
     printedSides: "Printed sides",
@@ -384,6 +426,11 @@ const english: MessageCatalog = {
     title: "Review and pay",
     description: "Check your print details. The prototype will simulate payment at this kiosk.",
     selectedPages: (count) => `${count} selected ${count === 1 ? "page" : "pages"}`,
+    documentCount: (count) => `${count} documents`,
+    documentPages: (count, ranges) => `${count} ${count === 1 ? "page" : "pages"} · ${ranges}`,
+    documentSummary: (pages, copies, sides) =>
+      `${pages} ${pages === 1 ? "page" : "pages"} · ${copies}× · ${sides}`,
+    documentPagesUnknown: "Pages pending",
     edit: "Edit",
     copies: "Copies",
     sides: "Sides",
@@ -529,14 +576,18 @@ const russian: MessageCatalog = {
     description: "Отсканируйте QR-код телефоном. Регистрация и приложение не нужны.",
     instructionCamera: "Откройте камеру телефона",
     instructionQr: "Наведите камеру на QR-код",
-    instructionFile: "Выберите файл PDF, JPEG или PNG",
+    instructionFile: "Выберите один или несколько файлов PDF, JPEG или PNG",
     sessionLabel: "Сеанс загрузки",
     qrTitle: "QR-код для безопасной загрузки с телефона",
     waitingForPhone: "Ожидаем подключение телефона",
     uploadedDocument: "Загруженный документ",
+    uploadedDocuments: "Загруженные документы",
+    documentsReady: (count) => (count === 1 ? "1 документ готов" : `Готовых документов: ${count}`),
+    addMoreHint: "Продолжайте отправлять с телефона, чтобы добавить документы.",
     uploadComplete: "Загрузка завершена",
     placeholder: "Загруженные файлы автоматически появятся здесь.",
     continue: "Перейти к настройкам печати",
+    continueWithCount: (count) => `Продолжить с ${count} документами`,
     continueUnavailable:
       "Настройки печати откроются после того, как документ пройдёт проверку безопасности.",
     rejectedHelp: "Удалите этот файл на телефоне и загрузите другой документ.",
@@ -565,6 +616,19 @@ const russian: MessageCatalog = {
     title: "Настройте печать",
     description:
       "Проверьте все параметры перед оплатой. Печать выполняется только в чёрно-белом режиме.",
+    descriptionMany: (count) =>
+      `Выберите страницы для каждого из ${count} документов, затем настройки для всей печати. Печать только чёрно-белая.`,
+    documents: "Документы",
+    documentsTitle: (count) => (count === 1 ? "Ваш документ" : `Ваши документы: ${count}`),
+    documentsHint: "Выбор страниц относится к документу, под которым он находится.",
+    documentLabel: (name) => `Настройки для ${name}`,
+    documentPosition: (position, total) => `Документ ${position} из ${total}`,
+    documentSelectedPages: (selected, total) =>
+      `Печатается ${selected} из ${total} ${russianPlural(total, "страницы", "страниц", "страниц")}`,
+    removeDocument: (name) => `Удалить ${name}`,
+    addDocument: "Добавить ещё документ",
+    settingsAppliesToAll: (count) => `Применяется ко всем документам: ${count}.`,
+    settingsAppliesToOne: "Применяется к вашему документу.",
     remove: "Удалить",
     removing: "Удаляем…",
     removeFailed: "Не удалось удалить файл. Повторите попытку перед продолжением.",
@@ -608,6 +672,9 @@ const russian: MessageCatalog = {
     copiesAria: "Количество копий",
     decreaseCopies: "Уменьшить количество копий",
     increaseCopies: "Увеличить количество копий",
+    copiesAriaFor: (name) => `Количество копий: ${name}`,
+    decreaseCopiesFor: (name) => `Уменьшить количество копий: ${name}`,
+    increaseCopiesFor: (name) => `Увеличить количество копий: ${name}`,
     summaryTitle: "Итог печати",
     selectedPages: "Выбрано страниц",
     printedSides: "Печатных сторон",
@@ -628,6 +695,13 @@ const russian: MessageCatalog = {
     description: "Проверьте параметры печати. В прототипе оплата на терминале будет имитироваться.",
     selectedPages: (count) =>
       `Выбрано: ${count} ${russianPlural(count, "страница", "страницы", "страниц")}`,
+    documentCount: (count) =>
+      `${count} ${russianPlural(count, "документ", "документа", "документов")}`,
+    documentPages: (count, ranges) =>
+      `${count} ${russianPlural(count, "страница", "страницы", "страниц")} · ${ranges}`,
+    documentSummary: (pages, copies, sides) =>
+      `${pages} ${russianPlural(pages, "страница", "страницы", "страниц")} · ${copies}× · ${sides}`,
+    documentPagesUnknown: "Страницы уточняются",
     edit: "Изменить",
     copies: "Копии",
     sides: "Стороны",
@@ -776,14 +850,18 @@ const armenian: MessageCatalog = {
     description: "Սկանավորեք QR կոդը հեռախոսով։ Գրանցում և հավելված պետք չեն։",
     instructionCamera: "Բացեք հեռախոսի տեսախցիկը",
     instructionQr: "Ուղղեք տեսախցիկը դեպի QR կոդը",
-    instructionFile: "Ընտրեք PDF, JPEG կամ PNG ձևաչափով ֆայլ",
+    instructionFile: "Ընտրեք մեկ կամ մի քանի PDF, JPEG կամ PNG ֆայլ",
     sessionLabel: "Ֆայլերի վերբեռնման պատուհան",
     qrTitle: "Հեռախոսից անվտանգ վերբեռնման QR կոդ",
     waitingForPhone: "Սպասում ենք, որ հեռախոսը միանա",
     uploadedDocument: "Վերբեռնված փաստաթուղթ",
+    uploadedDocuments: "Վերբեռնված փաստաթղթեր",
+    documentsReady: (count) => `Պատրաստ է ${count} փաստաթուղթ`,
+    addMoreHint: "Շարունակեք ուղարկել հեռախոսից՝ ևս փաստաթղթեր ավելացնելու համար։",
     uploadComplete: "Ֆայլը վերբեռնված է",
     placeholder: "Վերբեռնված ֆայլերն այստեղ կհայտնվեն ավտոմատ։",
     continue: "Անցնել տպման կարգավորումներին",
+    continueWithCount: (count) => `Շարունակել ${count} փաստաթղթով`,
     continueUnavailable:
       "Տպման կարգավորումները հասանելի կդառնան, երբ փաստաթուղթն անցնի անվտանգության ստուգումը։",
     rejectedHelp: "Հեռացրեք այս ֆայլը հեռախոսում և վերբեռնեք մեկ ուրիշը։",
@@ -811,6 +889,18 @@ const armenian: MessageCatalog = {
     step: "Քայլ 2 / 4",
     title: "Ընտրեք տպման կարգավորումները",
     description: "Վճարելուց առաջ ստուգեք կարգավորումները։ Տպումը միայն սև-սպիտակ է։",
+    descriptionMany: (count) =>
+      `Ընտրեք էջերը ${count} փաստաթղթերից յուրաքանչյուրի համար, ապա՝ ամբողջ տպման կարգավորումները։ Տպումը միայն սև-սպիտակ է։`,
+    documents: "Փաստաթղթեր",
+    documentsTitle: (count) => (count === 1 ? "Ձեր փաստաթուղթը" : `Ձեր ${count} փաստաթղթերը`),
+    documentsHint: "Էջերի ընտրությունը վերաբերում է այն փաստաթղթին, որի տակ գտնվում է։",
+    documentLabel: (name) => `${name}՝ կարգավորումներ`,
+    documentPosition: (position, total) => `Փաստաթուղթ ${position}՝ ${total}-ից`,
+    documentSelectedPages: (selected, total) => `Տպվում է ${total} էջից ${selected}-ը`,
+    removeDocument: (name) => `Հեռացնել ${name}`,
+    addDocument: "Ավելացնել ևս մեկ փաստաթուղթ",
+    settingsAppliesToAll: (count) => `Կիրառվում է բոլոր ${count} փաստաթղթերի վրա։`,
+    settingsAppliesToOne: "Կիրառվում է ձեր փաստաթղթի վրա։",
     remove: "Հեռացնել",
     removing: "Հեռացվում է…",
     removeFailed: "Չհաջողվեց հեռացնել ֆայլը։ Շարունակելուց առաջ փորձեք կրկին։",
@@ -853,6 +943,9 @@ const armenian: MessageCatalog = {
     copiesAria: "Պատճենների քանակը",
     decreaseCopies: "Նվազեցնել պատճենների քանակը",
     increaseCopies: "Ավելացնել պատճենների քանակը",
+    copiesAriaFor: (name) => `${name}՝ պատճենների քանակը`,
+    decreaseCopiesFor: (name) => `${name}՝ նվազեցնել պատճենների քանակը`,
+    increaseCopiesFor: (name) => `${name}՝ ավելացնել պատճենների քանակը`,
     summaryTitle: "Տպման ամփոփում",
     selectedPages: "Ընտրված էջեր",
     printedSides: "Տպվող կողմեր",
@@ -873,6 +966,10 @@ const armenian: MessageCatalog = {
     description:
       "Ստուգեք տպման կարգավորումները։ Փորձնական տարբերակում վճարումը միայն նմանակվում է։",
     selectedPages: (count) => `Ընտրված էջերի քանակը՝ ${count}`,
+    documentCount: (count) => `${count} փաստաթուղթ`,
+    documentPages: (count, ranges) => `${count} էջ · ${ranges}`,
+    documentSummary: (pages, copies, sides) => `${pages} էջ · ${copies}× · ${sides}`,
+    documentPagesUnknown: "Էջերը ճշտվում են",
     edit: "Փոխել",
     copies: "Պատճենների քանակը",
     sides: "Տպման կողմերը",

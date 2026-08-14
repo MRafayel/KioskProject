@@ -61,7 +61,12 @@ const environmentSchema = z
       .min(1_024)
       .max(157_286_400)
       .default(52_428_800),
-    MAX_FILES_PER_SESSION: z.coerce.number().int().min(1).max(10).default(1),
+    // One session may carry several documents. The ceiling is the same 10 the
+    // settings contract and the print manifest already bound themselves to, so
+    // this can be raised to that limit but never past what those accept. A
+    // deployment that wants the older one-document-per-session behaviour sets
+    // this to 1; nothing else has to change for that to keep working.
+    MAX_FILES_PER_SESSION: z.coerce.number().int().min(1).max(10).default(10),
     UPLOAD_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(300).default(120),
     MAX_DOCUMENT_PAGES: z.coerce.number().int().min(1).max(1_000).default(200),
     MAX_IMAGE_DIMENSION_PIXELS: z.coerce.number().int().min(1_000).max(100_000).default(20_000),
@@ -118,7 +123,34 @@ const environmentSchema = z
     MAX_SELECTED_PAGES: z.coerce.number().int().min(1).max(2_000).default(200),
     MAX_PRINTED_SIDES: z.coerce.number().int().min(1).max(20_000).default(1_000),
     QUOTE_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
-    PRINTER_ADAPTER: z.literal("mock").default("mock"),
+    // Which device this kiosk drives. `mock` writes files, `ipp` speaks to a
+    // network printer, `windows` drives the print subsystem through a local
+    // device host. Production refuses `mock` outright: a kiosk that took a
+    // customer's money and wrote their document to a folder is not a kiosk.
+    PRINTER_ADAPTER: z.enum(["mock", "ipp", "windows"]).default("mock"),
+    // The queue names an operator certified for this kiosk, comma separated.
+    // Empty approves nothing, which is the only safe default: an uncertified
+    // kiosk must not print to whatever queue a driver installer left behind.
+    PRINTER_QUEUE_ALLOWLIST: z.string().max(2_000).default(""),
+    // Which approved queue to use when the machine offers more than one. A
+    // kiosk with two certified printers and no preference refuses rather than
+    // guessing which room the customer's paper comes out in.
+    PRINTER_QUEUE_NAME: z.string().max(220).default(""),
+    // Whether a queue published to other machines may be used. A kiosk opens no
+    // other inbound path, so this stays off unless a deployment says otherwise.
+    PRINTER_ALLOW_SHARED_QUEUE: stringBooleanSchema.default(false),
+    // The IPP endpoint of the certified printer. `ipps://` in production unless
+    // it is on the kiosk's own loopback.
+    PRINTER_IPP_URL: z.string().max(400).default(""),
+    // The Windows device host executable. See docs/hardware/windows-device-host.md.
+    PRINTER_WINDOWS_HOST_PATH: z.string().max(400).default(""),
+    // Where the agent keeps its record of what it handed to a device. It is
+    // what separates "never submitted" from "submitted and forgotten", so it
+    // has to survive a restart on the same machine as the agent.
+    PRINTER_DEVICE_JOURNAL_DIR: z.string().min(1).default(".tmp/kiosk-agent-device"),
+    // How often the agent reports that it is alive, and how often it re-reads
+    // what the printer can do. A swapped printer is noticed within one beat.
+    AGENT_HEARTBEAT_SECONDS: z.coerce.number().int().min(5).max(600).default(30),
     // Where the simulated printer writes its output. It is a private local
     // directory, never a web root, and it holds one folder per operation.
     PRINTER_MOCK_OUTPUT_DIR: z.string().min(1).default("var/mock-printer/output"),
@@ -346,6 +378,64 @@ const environmentSchema = z
       });
     }
 
+    // A real device is chosen by name, so the settings that name it have to be
+    // present. A kiosk that started without them would only discover it at the
+    // first paid print.
+    if (environment.PRINTER_ADAPTER === "ipp" && !isIppPrinterUrl(environment.PRINTER_IPP_URL)) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_IPP_URL"],
+        message: "PRINTER_IPP_URL must be an ipp://, ipps://, http:// or https:// URL"
+      });
+    }
+
+    if (environment.PRINTER_ADAPTER === "windows" && !environment.PRINTER_WINDOWS_HOST_PATH) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_WINDOWS_HOST_PATH"],
+        message: "PRINTER_WINDOWS_HOST_PATH is required when PRINTER_ADAPTER=windows"
+      });
+    }
+
+    // Approval is what stands between a paid job and an arbitrary queue. A
+    // deployment driving real hardware has to state which queue it certified.
+    if (
+      environment.PRINTER_ADAPTER !== "mock" &&
+      parseAllowlist(environment.PRINTER_QUEUE_ALLOWLIST).length === 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_QUEUE_ALLOWLIST"],
+        message: "PRINTER_QUEUE_ALLOWLIST must name at least one certified queue"
+      });
+    }
+
+    // Naming a preference that is not itself approved would either be ignored
+    // or would print somewhere nobody certified. Both are worse than refusing.
+    const allowlist = parseAllowlist(environment.PRINTER_QUEUE_ALLOWLIST).map((entry) =>
+      entry.toLocaleLowerCase("en-US")
+    );
+    if (
+      environment.PRINTER_QUEUE_NAME &&
+      !allowlist.includes(environment.PRINTER_QUEUE_NAME.trim().toLocaleLowerCase("en-US"))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_QUEUE_NAME"],
+        message: "PRINTER_QUEUE_NAME must be one of PRINTER_QUEUE_ALLOWLIST"
+      });
+    }
+
+    // A heartbeat that could outlive a lease would let a kiosk look alive while
+    // the control plane was already settling its job without it.
+    if (environment.AGENT_HEARTBEAT_SECONDS >= environment.PRINT_COMMAND_LEASE_SECONDS) {
+      context.addIssue({
+        code: "custom",
+        path: ["AGENT_HEARTBEAT_SECONDS"],
+        message: "AGENT_HEARTBEAT_SECONDS must be shorter than PRINT_COMMAND_LEASE_SECONDS"
+      });
+    }
+
     if (environment.S3_KMS_KEY_ID && environment.S3_SERVER_SIDE_ENCRYPTION !== "aws:kms") {
       context.addIssue({
         code: "custom",
@@ -394,6 +484,32 @@ const environmentSchema = z
         path: ["PRINT_TEST_OUTCOMES_ENABLED"],
         message: "PRINT_TEST_OUTCOMES_ENABLED must be false in production"
       });
+    }
+
+    // The simulated printer writes a customer's document to a folder and
+    // reports a successful print. In production that is a machine that takes
+    // money and delivers nothing, so the selection is refused outright.
+    if (environment.PRINTER_ADAPTER === "mock") {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_ADAPTER"],
+        message: "PRINTER_ADAPTER must drive a real device in production"
+      });
+    }
+
+    // Print traffic carries the customer's document. Off the kiosk's own
+    // machine it has to be encrypted like everything else.
+    if (environment.PRINTER_ADAPTER === "ipp" && isIppPrinterUrl(environment.PRINTER_IPP_URL)) {
+      const printerUrl = new URL(environment.PRINTER_IPP_URL);
+      const encrypted = printerUrl.protocol === "ipps:" || printerUrl.protocol === "https:";
+      if (!encrypted && !isLoopbackHostname(printerUrl.hostname)) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_IPP_URL"],
+          message:
+            "PRINTER_IPP_URL must use ipps:// or https:// in production unless it is loopback-only"
+        });
+      }
     }
 
     const productionSecrets = [
@@ -539,6 +655,21 @@ const environmentSchema = z
       });
     }
   });
+
+function isIppPrinterUrl(value: string): boolean {
+  try {
+    return ["ipp:", "ipps:", "http:", "https:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function parseAllowlist(value: string): string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
 
 function isPostgresUrl(value: string): boolean {
   try {

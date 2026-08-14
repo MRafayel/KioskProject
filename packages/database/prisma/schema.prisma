@@ -36,10 +36,77 @@ model Kiosk {
   sessionEvents       SessionEvent[]
   printJobs           PrintJob[]
   agentCommands       AgentCommand[]
+  agents              KioskAgent[]
+  printers            Printer[]
 
   @@index([status])
   @@index([lastSeenAt])
   @@map("kiosks")
+}
+
+/// One installation of the local agent. A kiosk normally has exactly one; the
+/// row exists so a fleet can see whether it is alive, what it is running, and
+/// which printer it says it is bound to, without the kiosk opening any port.
+model KioskAgent {
+  id               String    @id @db.Uuid
+  kioskId          String    @map("kiosk_id") @db.VarChar(64)
+  /// Stable per installation, so a restarted agent is the same agent.
+  agentId          String    @unique @map("agent_id") @db.Uuid
+  agentVersion     String    @map("agent_version") @db.VarChar(64)
+  platform         String    @db.VarChar(16)
+  platformRelease  String?   @map("platform_release") @db.VarChar(120)
+  adapter          String    @db.VarChar(16)
+  /// The queue the agent last said it was bound to. Null when it bound none.
+  queueName        String?   @map("queue_name") @db.VarChar(220)
+  printerHealth    String    @default("OFFLINE") @map("printer_health") @db.VarChar(16)
+  /// The digest of the capability snapshot this agent last reported.
+  capabilityHash   String?   @map("capability_hash") @db.VarChar(64)
+  activeOperations Int       @default(0) @map("active_operations")
+  registeredAt     DateTime  @default(now()) @map("registered_at")
+  lastHeartbeatAt  DateTime? @map("last_heartbeat_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+  kiosk            Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+
+  @@index([kioskId, lastHeartbeatAt])
+  @@map("kiosk_agents")
+}
+
+/// One print queue a kiosk machine offers.
+///
+/// Every discovered queue gets a row, not only the certified one: an operator
+/// certifying a kiosk needs to see what is actually installed on it, and a
+/// queue that appeared without anybody adding it is exactly what a fleet view
+/// should be able to show. Only the approved row carries capabilities, because
+/// capabilities are what a customer is offered and a quote is bound to.
+model Printer {
+  id             String    @id @db.Uuid
+  kioskId        String    @map("kiosk_id") @db.VarChar(64)
+  queueName      String    @map("queue_name") @db.VarChar(220)
+  adapter        String    @db.VarChar(16)
+  approval       String    @default("NOT_APPROVED") @db.VarChar(16)
+  queueState     String    @default("ERROR") @map("queue_state") @db.VarChar(16)
+  isDefault      Boolean   @default(false) @map("is_default")
+  shared         Boolean   @default(false)
+  deviceUri      String?   @map("device_uri") @db.VarChar(400)
+  driverName     String?   @map("driver_name") @db.VarChar(400)
+  portName       String?   @map("port_name") @db.VarChar(400)
+  deviceId       String?   @map("device_id") @db.VarChar(400)
+  makeAndModel   String?   @map("make_and_model") @db.VarChar(400)
+  firmware       String?   @db.VarChar(400)
+  health         String    @default("OFFLINE") @db.VarChar(16)
+  warningCode    String?   @map("warning_code") @db.VarChar(32)
+  capabilities   Json?
+  capabilityHash String?   @map("capability_hash") @db.VarChar(64)
+  lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
+  lastHealthyAt  DateTime? @map("last_healthy_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+  kiosk          Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+
+  @@unique([kioskId, queueName])
+  @@index([kioskId, approval])
+  @@map("printers")
 }
 
 model KioskCredential {
@@ -146,10 +213,9 @@ model PrintSettingRevision {
   id                 String       @id @db.Uuid
   sessionId          String       @map("session_id") @db.Uuid
   revision           Int
-  copies             Int
-  duplex             String       @db.VarChar(16)
+  /// Copies, duplex and orientation live on each `selections` entry: they
+  /// describe one document, and a session prints several.
   paperSize          String       @map("paper_size") @db.VarChar(16)
-  orientation        String       @db.VarChar(16)
   scaling            String       @db.VarChar(16)
   collate            Boolean
   colorMode          String       @map("color_mode") @db.VarChar(16)

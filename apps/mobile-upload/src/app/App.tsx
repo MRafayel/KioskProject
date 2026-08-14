@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+  type ReactNode
+} from "react";
 
 import type {
   MobileContextResponse,
@@ -167,6 +175,7 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
   const [progress, setProgress] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [uploadSucceeded, setUploadSucceeded] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<UploadErrorState | null>(null);
   const [sessionAvailable, setSessionAvailable] = useState(() =>
     isMobileUploadState(context.session.state)
@@ -180,7 +189,8 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
   );
   const acceptsUploads = sessionAvailable && isMobileUploadState(context.session.state);
   const currentBytes = capacityFiles.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
-  const atFileLimit = capacityFiles.length >= context.limits.maxFiles;
+  const remainingSlots = Math.max(0, context.limits.maxFiles - capacityFiles.length);
+  const atFileLimit = remainingSlots === 0;
   const busy = progress !== null || deletingId !== null;
   const closeSession = useCallback((requestError: unknown) => {
     const error =
@@ -338,50 +348,75 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
   );
 
   async function onFileSelected(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
+    const selected = [...(event.target.files ?? [])];
     event.target.value = "";
-    if (!file || busy || !sessionAvailable) return;
+    await uploadSelection(selected);
+  }
+
+  /**
+   * Send a batch of documents.
+   *
+   * Uploads run one at a time rather than together: the session has a total
+   * byte budget and a document count limit, and both are decided by the control
+   * plane as each upload lands. Sequential uploads let the remaining budget be
+   * recalculated from what the server actually accepted, so a batch that goes
+   * over the limit stops at the document that crossed it and keeps everything
+   * before it, rather than racing several uploads into a refusal.
+   */
+  async function uploadSelection(selected: File[]): Promise<void> {
+    if (selected.length === 0 || busy || !sessionAvailable) return;
 
     setError(null);
     setUploadSucceeded(false);
-    const localError = validateLocalFile(
-      file,
-      context.limits.maxFileBytes,
-      context.limits.maxTotalBytes - currentBytes
-    );
-    if (localError) {
-      setError({
-        kind: "message",
-        key:
-          localError === "EMPTY_FILE"
-            ? "emptyFile"
-            : localError === "FILE_TOO_LARGE"
-              ? "fileTooLarge"
-              : "unsupportedFile"
-      });
-      return;
-    }
-    if (atFileLimit) {
-      setError({ kind: "message", key: "fileLimit" });
-      return;
-    }
 
     const uploadAbort = new AbortController();
     uploadAbortRef.current = uploadAbort;
-    setProgress(0);
+    let accepted = 0;
+    let remainingBytes = context.limits.maxTotalBytes - currentBytes;
+    let remainingSlots = context.limits.maxFiles - capacityFiles.length;
+
     try {
-      const latest = await checkMobileSession(context.session.publicId);
-      if (!isMobileUploadState(latest.session.state)) {
-        throw new MobileRequestError("UPLOAD_SESSION_NOT_EDITABLE", 409);
+      for (const file of selected) {
+        if (remainingSlots <= 0) {
+          setError({ kind: "message", key: "fileLimit" });
+          break;
+        }
+
+        const localError = validateLocalFile(file, context.limits.maxFileBytes, remainingBytes);
+        if (localError) {
+          setError({
+            kind: "message",
+            key:
+              localError === "EMPTY_FILE"
+                ? "emptyFile"
+                : localError === "FILE_TOO_LARGE"
+                  ? "fileTooLarge"
+                  : "unsupportedFile"
+          });
+          break;
+        }
+
+        setProgress(0);
+        const latest = await checkMobileSession(context.session.publicId);
+        if (!isMobileUploadState(latest.session.state)) {
+          throw new MobileRequestError("UPLOAD_SESSION_NOT_EDITABLE", 409);
+        }
+        uploadAbort.signal.throwIfAborted();
+        await uploadFile(context.session.id, file, context.csrfToken, setProgress, {
+          signal: uploadAbort.signal
+        });
+
+        accepted += 1;
+        remainingBytes -= file.size;
+        remainingSlots -= 1;
       }
-      uploadAbort.signal.throwIfAborted();
-      await uploadFile(context.session.id, file, context.csrfToken, setProgress, {
-        signal: uploadAbort.signal
-      });
-      const refreshedFiles = await refreshFiles();
-      setUploadSucceeded(
-        !refreshedFiles.some((uploadedFile) => uploadedFile.status === "REJECTED")
-      );
+
+      if (accepted > 0) {
+        const refreshedFiles = await refreshFiles();
+        setUploadSucceeded(
+          !refreshedFiles.some((uploadedFile) => uploadedFile.status === "REJECTED")
+        );
+      }
     } catch (requestError) {
       if (isTerminalMobileSessionError(requestError)) {
         closeSession(requestError);
@@ -397,6 +432,13 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
       if (uploadAbortRef.current === uploadAbort) uploadAbortRef.current = null;
       setProgress(null);
     }
+  }
+
+  async function onFilesDropped(event: DragEvent<HTMLDivElement>): Promise<void> {
+    event.preventDefault();
+    setDragging(false);
+    if (fileInputDisabled) return;
+    await uploadSelection([...event.dataTransfer.files]);
   }
 
   async function removeFile(fileId: string): Promise<void> {
@@ -446,13 +488,34 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
         </section>
 
         <section className="transfer-card" aria-labelledby="files-title">
-          <div className="file-picker">
+          {/* A drop target as well as a button. On a phone the button is the
+              only reachable path, but this page is opened on a laptop often
+              enough that dragging a handful of documents onto it should work. */}
+          <div
+            className={`file-picker${dragging ? " file-picker--dragging" : ""}`}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              if (!fileInputDisabled) setDragging(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (!fileInputDisabled) setDragging(true);
+            }}
+            onDragLeave={(event) => {
+              // Only when the pointer leaves the zone itself, not when it
+              // crosses one of the children inside it.
+              if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+              setDragging(false);
+            }}
+            onDrop={(event) => void onFilesDropped(event)}
+          >
             <input
               accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png"
               aria-hidden="true"
               disabled={fileInputDisabled}
               hidden
               id="file-upload"
+              multiple={remainingSlots > 1}
               onChange={(event) => void onFileSelected(event)}
               ref={inputRef}
               type="file"
@@ -464,12 +527,20 @@ function UploadScreen({ context }: { context: MobileContextResponse }) {
               type="button"
             >
               <UploadIcon />
-              {capacityFiles.length > 0 ? text.chooseAnother : text.chooseFile}
+              {capacityFiles.length > 0 ? text.chooseAnother : text.chooseFiles}
             </button>
             <p>
               {interpolate(text.fileHint, {
                 size: formatBytes(context.limits.maxFileBytes, locale)
               })}
+            </p>
+            <p className="file-picker__capacity">
+              {atFileLimit
+                ? interpolate(text.fileLimitReached, { max: String(context.limits.maxFiles) })
+                : interpolate(text.remainingSlots, {
+                    remaining: String(remainingSlots),
+                    max: String(context.limits.maxFiles)
+                  })}
             </p>
           </div>
 

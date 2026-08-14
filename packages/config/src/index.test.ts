@@ -30,7 +30,9 @@ describe("loadEnvironment", () => {
     expect(environment.API_PORT).toBe(3000);
     expect(environment.PRINTER_ADAPTER).toBe("mock");
     expect(environment.S3_FORCE_PATH_STYLE).toBe(true);
-    expect(environment.MAX_FILES_PER_SESSION).toBe(1);
+    // A session carries several documents by default, up to the same ceiling
+    // the settings contract and the print manifest stop at.
+    expect(environment.MAX_FILES_PER_SESSION).toBe(10);
     expect(environment.MAX_FILE_BYTES).toBe(52_428_800);
     expect(environment.MAX_DOCUMENT_PAGES).toBe(200);
     expect(environment.MAX_IMAGE_PIXELS).toBe(40_000_000);
@@ -422,6 +424,101 @@ describe("loadEnvironment", () => {
     ).toMatchObject({ PAYMENT_TIMEOUT_SECONDS: 180 });
   });
 
+  it("requires a real device to be named before it can be driven", () => {
+    // A kiosk that started without knowing which printer or which host it uses
+    // would only discover that at the first paid print.
+    expect(() => loadEnvironment({ NODE_ENV: "test", PRINTER_ADAPTER: "ipp" })).toThrow();
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_ADAPTER: "ipp",
+        PRINTER_IPP_URL: "printer.local",
+        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
+      })
+    ).toThrow();
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_ADAPTER: "windows",
+        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_ADAPTER: "ipp",
+        PRINTER_IPP_URL: "ipp://printer.local/ipp/print",
+        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
+      })
+    ).toMatchObject({ PRINTER_ADAPTER: "ipp" });
+  });
+
+  /**
+   * Approval is the only thing standing between a paid job and whatever queue
+   * a driver installer left on the machine, so a deployment driving hardware
+   * has to state which queue it certified — and a preference that is not itself
+   * certified is refused rather than quietly ignored.
+   */
+  it("requires a certified queue for a real device", () => {
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_ADAPTER: "ipp",
+        PRINTER_IPP_URL: "ipp://printer.local/ipp/print"
+      })
+    ).toThrow();
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4",
+        PRINTER_QUEUE_NAME: "Microsoft Print to PDF"
+      })
+    ).toThrow();
+    expect(
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4, Kiosk A4 Spare",
+        PRINTER_QUEUE_NAME: "kiosk a4 spare"
+      })
+    ).toMatchObject({ PRINTER_QUEUE_NAME: "kiosk a4 spare" });
+  });
+
+  it("refuses the simulated printer and unencrypted print traffic in production", () => {
+    // The simulated printer takes a customer's money and writes their document
+    // to a folder. A production build cannot be configured to be one.
+    expect(() =>
+      loadEnvironment({ ...secureProductionEnvironment, PRINTER_ADAPTER: "mock" })
+    ).toThrow();
+    expect(() =>
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        PRINTER_IPP_URL: "ipp://printer.example.test/ipp/print"
+      })
+    ).toThrow();
+    // The customer's document never leaves the kiosk machine on this path.
+    expect(
+      loadEnvironment({
+        ...secureProductionEnvironment,
+        PRINTER_IPP_URL: "ipp://127.0.0.1/ipp/print"
+      })
+    ).toMatchObject({ PRINTER_ADAPTER: "ipp" });
+  });
+
+  it("keeps the heartbeat inside the print command lease", () => {
+    // A heartbeat that outlived a lease would let a kiosk look alive while the
+    // control plane was already settling its job without it.
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        AGENT_HEARTBEAT_SECONDS: "120",
+        PRINT_COMMAND_LEASE_SECONDS: "120"
+      })
+    ).toThrow();
+    expect(loadEnvironment({ NODE_ENV: "test", AGENT_HEARTBEAT_SECONDS: "60" })).toMatchObject({
+      AGENT_HEARTBEAT_SECONDS: 60
+    });
+  });
+
   it("refuses the payment outcome control in production", () => {
     // A route that dictates payment outcomes is a way to print money, so a
     // production configuration cannot express one that offers it.
@@ -495,5 +592,10 @@ const secureProductionEnvironment = {
   DOCUMENT_PROCESSOR_AUTH_TOKEN: "production-processor-auth-token-at-least-32-characters",
   PAYMENT_WEBHOOK_SECRET: "production-payment-webhook-secret-at-least-32-characters",
   MALWARE_SCANNER_ADAPTER: "clamav",
-  S3_SERVER_SIDE_ENCRYPTION: "AES256"
+  S3_SERVER_SIDE_ENCRYPTION: "AES256",
+  // A production kiosk drives a real device, and the queue it prints to is one
+  // an operator certified by name.
+  PRINTER_ADAPTER: "ipp",
+  PRINTER_IPP_URL: "ipps://printer.example.test/ipp/print",
+  PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
 } as const;

@@ -41,17 +41,14 @@ afterEach(async () => {
 
 function buildManifest() {
   return {
-    manifestVersion: 1 as const,
+    manifestVersion: 2 as const,
     printJobId,
     sessionId,
     settingsRevision: 1,
     settingsManifestHash: "b".repeat(64),
     quoteId: "01900000-0000-7000-8000-000000000805",
     paymentId: "01900000-0000-7000-8000-000000000806",
-    copies: 1,
-    duplex: "SIMPLEX" as const,
     paperSize: "A4" as const,
-    orientation: "PORTRAIT" as const,
     scaling: "FIT" as const,
     collate: true,
     colorMode: "MONOCHROME" as const,
@@ -66,7 +63,12 @@ function buildManifest() {
         sizeBytes: documentBytes.byteLength,
         pageCount: 2,
         pageRanges: [[1, 2]] as [number, number][],
-        selectedPages: 2
+        selectedPages: 2,
+        copies: 1,
+        duplex: "SIMPLEX" as const,
+        orientation: "PORTRAIT" as const,
+        printedSides: 2,
+        physicalSheets: 2
       }
     ]
   };
@@ -256,6 +258,7 @@ describe("PrintCommandRunner", () => {
     const counting: PrinterAdapter = {
       ...adapter,
       name: adapter.name,
+      describe: () => adapter.describe(),
       getHealth: () => adapter.getHealth(),
       getCapabilities: () => adapter.getCapabilities(),
       getOperationStatus: (id) => adapter.getOperationStatus(id),
@@ -461,13 +464,24 @@ function stubAdapter(
 ): PrinterAdapter {
   return {
     name: "STUB",
+    describe: () =>
+      Promise.resolve({
+        adapter: "STUB",
+        queueName: "Stub Queue",
+        deviceId: null,
+        makeAndModel: null,
+        driverName: null,
+        firmware: null
+      }),
     getHealth: () => Promise.resolve({ state: "READY", warningCode: null }),
     getCapabilities: () =>
       Promise.resolve({
-        version: 1,
+        version: 3,
         paperSizes: ["A4"],
         duplexModes: ["SIMPLEX"],
         colorModes: ["MONOCHROME"],
+        orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
+        scalingModes: ["FIT", "ACTUAL_SIZE"],
         maxCopies: 1
       }),
     submit: () => Promise.resolve(submit()),

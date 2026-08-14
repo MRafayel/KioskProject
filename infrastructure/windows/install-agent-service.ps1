@@ -1,0 +1,100 @@
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+  Install the printing kiosk agent as a Windows service.
+
+.DESCRIPTION
+  The agent has to be running before anybody touches the kiosk, has to come
+  back after a power cut without a person logging in, and has to keep running
+  when the shell it was started from goes away. That is a service, not a
+  scheduled task and not a startup shortcut.
+
+  Two decisions here are deliberate and should not be relaxed:
+
+  * The service runs as a virtual account (`NT SERVICE\<name>`), not as
+    LocalSystem and not as an interactive user. The agent's job is to talk
+    outward and hand bytes to a print queue; nothing it does needs
+    administrative rights on the machine, and a kiosk is a device strangers
+    stand in front of.
+  * Recovery restarts the service indefinitely rather than a fixed number of
+    times. A kiosk that stopped restarting after three failures is a printer
+    nobody can use until somebody drives to it.
+
+  The device host is a separate program invoked per request (see
+  print-host.ps1); it is not installed as a service and holds nothing between
+  calls.
+
+.PARAMETER InstallPath
+  Directory holding the built agent — the output of `pnpm --filter
+  @printing-kiosk/kiosk-agent build`, its node_modules, and the .env file.
+
+.PARAMETER NodePath
+  Absolute path to the Node runtime the service runs.
+
+.EXAMPLE
+  .\install-agent-service.ps1 -InstallPath 'C:\PrintingKiosk\agent' -NodePath 'C:\Program Files\nodejs\node.exe'
+#>
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory = $true)][string] $InstallPath,
+  [Parameter(Mandatory = $true)][string] $NodePath,
+  [string] $ServiceName = 'PrintingKioskAgent',
+  [string] $DisplayName = 'Printing Kiosk Agent'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+if (-not (Test-Path -LiteralPath $NodePath)) { throw "Node runtime not found: $NodePath" }
+$entryPoint = Join-Path $InstallPath 'dist\main.js'
+if (-not (Test-Path -LiteralPath $entryPoint)) { throw "Agent build not found: $entryPoint" }
+
+$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($null -ne $existing) {
+  Write-Host "Stopping existing service $ServiceName"
+  Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+  # sc.exe delete is asynchronous; the create below would fail on a name the
+  # service control manager has not finished releasing.
+  & sc.exe delete $ServiceName | Out-Null
+  Start-Sleep -Seconds 2
+}
+
+$binaryPath = '"{0}" "{1}"' -f $NodePath, $entryPoint
+New-Service -Name $ServiceName `
+  -BinaryPathName $binaryPath `
+  -DisplayName $DisplayName `
+  -Description 'Drives the local printer and relays kiosk session traffic for the printing kiosk.' `
+  -StartupType Automatic | Out-Null
+
+# A virtual account: its own security identity, no password to store, and no
+# rights beyond what is granted to it below.
+& sc.exe config $ServiceName obj= "NT SERVICE\$ServiceName" | Out-Null
+
+# The spooler and the network stack are what the agent needs before it starts.
+& sc.exe config $ServiceName depend= Spooler/Tcpip | Out-Null
+
+# Restart on every failure, forever, with a short pause so a crash loop does not
+# saturate the machine. `reset= 0` keeps the failure count from clearing, which
+# is what makes the third action apply to every subsequent failure.
+& sc.exe failure $ServiceName reset= 0 actions= restart/10000/restart/30000/restart/60000 | Out-Null
+& sc.exe failureflag $ServiceName 1 | Out-Null
+
+# The agent's local state — its installation identity, its spool, and its record
+# of what it handed to a device — lives under ProgramData and must be readable
+# only by the service and administrators.
+$stateDirectory = Join-Path $env:ProgramData 'PrintingKiosk'
+New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+$acl = Get-Acl -Path $stateDirectory
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($identity in @("NT SERVICE\$ServiceName", 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')) {
+  $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $identity, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+}
+Set-Acl -Path $stateDirectory -AclObject $acl
+
+Start-Service -Name $ServiceName
+Write-Host "$DisplayName installed and started."
+Write-Host "State directory: $stateDirectory"
+Write-Host "Confirm the kiosk registered: check the API for a kiosk_agents row with a recent heartbeat."

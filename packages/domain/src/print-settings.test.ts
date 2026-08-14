@@ -9,7 +9,9 @@ import {
   formatPageRanges,
   normalizePrintSettings,
   parsePageRangeText,
+  type DuplexMode,
   type NormalizePrintSettingsContext,
+  type Orientation,
   type PrintSettingsError,
   type PrintSettingsInput
 } from "./print-settings.js";
@@ -41,17 +43,34 @@ function context(pageCount = 8): NormalizePrintSettingsContext {
   };
 }
 
-function settings(overrides: Partial<PrintSettingsInput> = {}): PrintSettingsInput {
+/**
+ * Copies, duplex and orientation belong to a document, so the shorthand here
+ * applies them to the single default document. A test that needs them to
+ * differ between documents passes `fileSelections` itself.
+ */
+function settings(
+  overrides: Partial<PrintSettingsInput> & {
+    copies?: number;
+    duplex?: DuplexMode;
+    orientation?: Orientation;
+  } = {}
+): PrintSettingsInput {
+  const { copies, duplex, orientation, ...rest } = overrides;
   return {
     fileOrder: ["0190efb7-0000-7000-8000-000000000001"],
-    fileSelections: [{ fileId: "0190efb7-0000-7000-8000-000000000001", pageRanges: null }],
-    copies: 1,
-    duplex: "SIMPLEX",
+    fileSelections: [
+      {
+        fileId: "0190efb7-0000-7000-8000-000000000001",
+        pageRanges: null,
+        copies: copies ?? 1,
+        duplex: duplex ?? "SIMPLEX",
+        orientation: orientation ?? "PORTRAIT"
+      }
+    ],
     paperSize: "A4",
-    orientation: "PORTRAIT",
     scaling: "FIT",
     collate: true,
-    ...overrides
+    ...rest
   };
 }
 
@@ -143,7 +162,7 @@ describe("sheet arithmetic", () => {
       settings({ duplex: "LONG_EDGE", copies: 2 }),
       context(5)
     );
-    expect(normalized.printedSidesPerCopy).toBe(5);
+    expect(normalized.files[0]?.printedSidesPerCopy).toBe(5);
     expect(normalized.printedSides).toBe(10);
     expect(normalized.physicalSheets).toBe(6);
   });
@@ -232,7 +251,15 @@ describe("settings normalization", () => {
     expect(
       attemptError(
         settings({
-          fileSelections: [{ fileId: "0190efb7-0000-7000-8000-000000000002", pageRanges: null }]
+          fileSelections: [
+            {
+              fileId: "0190efb7-0000-7000-8000-000000000002",
+              pageRanges: null,
+              copies: 1,
+              duplex: "SIMPLEX",
+              orientation: "PORTRAIT"
+            }
+          ]
         }),
         context()
       ).code
@@ -247,6 +274,9 @@ describe("settings manifest", () => {
     const reordered = {
       ...manifest,
       files: manifest.files.map((file) => ({
+        orientation: file.orientation,
+        duplex: file.duplex,
+        copies: file.copies,
         selectedPages: file.selectedPages,
         pageRanges: file.pageRanges,
         pageCount: file.pageCount,
@@ -272,7 +302,15 @@ describe("settings manifest", () => {
       buildSettingsManifest(
         normalizePrintSettings(
           settings({
-            fileSelections: [{ fileId: "0190efb7-0000-7000-8000-000000000001", pageRanges: "1-2" }]
+            fileSelections: [
+              {
+                fileId: "0190efb7-0000-7000-8000-000000000001",
+                pageRanges: "1-2",
+                copies: 1,
+                duplex: "SIMPLEX",
+                orientation: "PORTRAIT"
+              }
+            ]
           }),
           context()
         )

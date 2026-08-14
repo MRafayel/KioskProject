@@ -133,7 +133,7 @@ test("shows an image file kind in the ready document settings card", async ({ pa
   await page.getByRole("button", { name: /Continue to print settings/i }).click();
 
   await expect(page.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
-  await expect(page.locator(".file-card--compact .file-card__icon")).toHaveText("JPEG");
+  await expect(page.locator(".document-card .file-card__icon")).toHaveText("JPEG");
 });
 
 test("shows only the server total and unlocks payment when a quote exists", async ({ page }) => {
@@ -319,10 +319,7 @@ async function stubReadyDocumentAndPricing(
 ): Promise<void> {
   const settings = {
     revision: 1,
-    copies: 1,
-    duplex: "SIMPLEX",
     paperSize: "A4",
-    orientation: "PORTRAIT",
     scaling: "FIT",
     collate: true,
     colorMode: "MONOCHROME",
@@ -333,7 +330,12 @@ async function stubReadyDocumentAndPricing(
         pageCount: 1,
         pageRanges: [[1, 1]],
         pageRangeText: "1",
-        selectedPages: 1
+        selectedPages: 1,
+        copies: 1,
+        duplex: "SIMPLEX",
+        orientation: "PORTRAIT",
+        printedSides: 1,
+        physicalSheets: 1
       }
     ],
     selectedPages: 1,

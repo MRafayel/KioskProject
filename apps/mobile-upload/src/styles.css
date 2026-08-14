@@ -273,6 +273,26 @@ h1 {
   border-radius: 1rem;
   background: #f6fbff;
   text-align: center;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+/* The dashed border already reads as a drop target; dragging over it only has
+   to confirm that letting go here will do something. */
+.file-picker--dragging {
+  border-color: #0875bf;
+  background: #e4f2fd;
+}
+
+.file-picker__capacity {
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-picker {
+    transition: none;
+  }
 }
 
 .primary-button {

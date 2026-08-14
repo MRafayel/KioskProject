@@ -1,3 +1,4 @@
+export * from "./devices.js";
 export * from "./events.js";
 export * from "./health.js";
 export * from "./payments.js";

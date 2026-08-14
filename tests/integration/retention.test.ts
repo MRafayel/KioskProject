@@ -225,10 +225,7 @@ describe("Phase 9 retention", () => {
         id: revisionId,
         sessionId: fixture.sessionId,
         revision: 1,
-        copies: 2,
-        duplex: "LONG_EDGE",
         paperSize: "A4",
-        orientation: "PORTRAIT",
         scaling: "FIT",
         collate: true,
         colorMode: "MONOCHROME",
@@ -241,7 +238,12 @@ describe("Phase 9 retention", () => {
             contentSha256: digest,
             pageRanges: [[1, 1]],
             pageRangeText: "1",
-            selectedPages: 1
+            selectedPages: 1,
+            copies: 2,
+            duplex: "LONG_EDGE",
+            orientation: "PORTRAIT",
+            printedSides: 2,
+            physicalSheets: 2
           }
         ],
         selectedPages: 1,
@@ -265,7 +267,8 @@ describe("Phase 9 retention", () => {
       where: { id: revisionId }
     });
     expect(revision.selectionsRedactedAt).not.toBeNull();
-    expect(revision).toMatchObject({ copies: 2, selectedPages: 1, printedSides: 2 });
+    // The priced aggregates are untouched by redaction.
+    expect(revision).toMatchObject({ selectedPages: 1, printedSides: 2 });
     const serialized = JSON.stringify(revision.selections);
     expect(serialized).not.toContain("contentSha256");
     expect(serialized).not.toContain(digest);
@@ -279,11 +282,21 @@ describe("Phase 9 retention", () => {
       headers: { authorization }
     });
     expect(readable.statusCode, readable.body).toBe(200);
+    // Redaction removes the document fingerprint and nothing else: the paper
+    // and range choices that were priced, including each document's own copies
+    // and sides, survive.
     expect(readable.json()).toMatchObject({
       settings: {
         revision: 1,
-        copies: 2,
-        files: [{ fileId: fixture.fileId, pageRanges: [[1, 1]] }]
+        files: [
+          {
+            fileId: fixture.fileId,
+            pageRanges: [[1, 1]],
+            copies: 2,
+            duplex: "LONG_EDGE",
+            orientation: "PORTRAIT"
+          }
+        ]
       }
     });
   });
