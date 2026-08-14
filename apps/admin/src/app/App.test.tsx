@@ -374,7 +374,12 @@ describe("admin Phase 2 operational sections", () => {
     vi.mocked(adminApi.me).mockResolvedValue({
       ...identity(),
       role: "TECHNICAL_ADMIN",
-      capabilities: ["dashboard.read", "authenticator.manage.self", "authenticator.manage.operator"]
+      capabilities: [
+        "dashboard.read",
+        "authenticator.manage.self",
+        "operator.read",
+        "authenticator.manage.operator"
+      ]
     });
     const user = userEvent.setup();
 

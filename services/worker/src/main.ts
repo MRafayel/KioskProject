@@ -2,7 +2,10 @@ import pino from "pino";
 
 import { loadNonAdminEnvironment, loadWorkspaceEnvironmentFile } from "@printing-kiosk/config";
 import { PRODUCT_SCOPE } from "@printing-kiosk/contracts";
-import { createDatabaseClient } from "@printing-kiosk/database";
+import {
+  assertApplicationRoleIsNotPrivileged,
+  createDatabaseClient
+} from "@printing-kiosk/database";
 import { MockPaymentProvider } from "@printing-kiosk/payment-adapters";
 
 import { SessionCleanupRunner } from "./jobs/cleanup-session.js";
@@ -19,6 +22,12 @@ loadWorkspaceEnvironmentFile();
 const environment = loadNonAdminEnvironment();
 const logger = pino({ level: environment.LOG_LEVEL });
 const database = createDatabaseClient(environment.DATABASE_URL);
+// The same gate the API applies, for the same credential. Checking it in one
+// process only would mean a deployment could satisfy the gate and still run the
+// worker as a superuser against the same database.
+if (environment.NODE_ENV === "production") {
+  await assertApplicationRoleIsNotPrivileged(database);
+}
 const publisher = new OutboxPublisher(database, environment, logger);
 const processorScratch = new ProcessorScratchJanitor({
   directory: environment.DOCUMENT_PROCESSOR_SCRATCH_DIR,

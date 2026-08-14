@@ -359,18 +359,22 @@ export function registerAdminObservabilityRoutes(
   /**
    * The Operators, and enough about each to decide what to do about them.
    *
-   * Gated on `authenticator.manage.operator` rather than on `operator.manage`,
-   * which is the looser of the two on purpose: a Technical Admin can issue an
-   * enrolment ticket and retire a key, so it has to be able to see who it would
-   * be doing that to. An Admin holds both and sees the same rows with more
-   * controls beside them — the panel decides which to draw, and every one of
-   * them is refused again by its own route.
+   * Gated on `operator.read`, held by the same two roles that can act on a
+   * person: an Admin, and a Technical Admin that has to be able to see who it
+   * would be issuing an enrolment ticket to. An Admin sees the same rows with
+   * more controls beside them — the panel decides which to draw, and every one
+   * of them is refused again by its own route.
+   *
+   * Until Phase 6 this named `authenticator.manage.operator`, which is R2, so a
+   * read demanded a fresh WebAuthn assertion and the section stopped loading
+   * five minutes after sign-in. The access boundary is unchanged; what changed
+   * is that a read is now gated by a capability that cannot change anything.
    *
    * A read, so it runs on the read pool like every other list. The connection
    * that changes people is a different one and appears nowhere in this file.
    */
   app.get("/v1/admin/people", readRoute, async (request, reply) => {
-    const admin = await authorizeAdmin(request, dependencies, "authenticator.manage.operator");
+    const admin = await authorizeAdmin(request, dependencies, "operator.read");
     await throttleAccount(request, admin.sessionId);
     const people = await dependencies.observability.people(dependencies.clock.now());
     return sendNoStore(reply, adminPeopleResponseSchema.parse(people));

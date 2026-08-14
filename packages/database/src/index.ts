@@ -8,6 +8,56 @@ export function createDatabaseClient(connectionString: string): PrismaClient {
 }
 
 /**
+ * Refuse to start in production if the application connects as a superuser.
+ *
+ * Every ownership separation in the control plane rests on one assumption: that
+ * the credential the product runs with cannot take back what was taken from it.
+ * A superuser bypasses privilege checks entirely — it can re-own
+ * `audit_events`, `ALTER TABLE ... DISABLE TRIGGER ALL`, and rewrite the record
+ * of having done so. Under that credential Phase 4's transfer, Phase 5's
+ * publication trigger and Phase 6's evidence tables are all decoration.
+ *
+ * This was a standing deployment gate for four phases and nothing enforced it,
+ * which is a gate in the same sense that an unlocked door is a lock.
+ * `pnpm db:admin-owner verify` reports it, but only to whoever runs it; this
+ * asks the same question of the connection the process actually opened, at the
+ * moment it opens it.
+ *
+ * Development is exempt because the compose image runs the application as the
+ * cluster's bootstrap superuser, and refusing to boot over that would be an
+ * outage in exchange for nothing — the same reasoning the write-pool assertions
+ * already use for an unconfigured role.
+ */
+export async function assertApplicationRoleIsNotPrivileged(client: PrismaClient): Promise<void> {
+  const rows = await client.$queryRaw<{ role: string; superuser: boolean; bypassrls: boolean }[]>`
+    SELECT rolname AS role, rolsuper AS superuser, rolbypassrls AS bypassrls
+      FROM pg_roles
+     WHERE rolname = current_user`;
+
+  const row = rows[0];
+  if (!row) {
+    throw new Error(
+      "Could not determine which role the application connects as. Refusing to start: " +
+        "the control plane's ownership separation cannot be verified."
+    );
+  }
+
+  const findings: string[] = [];
+  if (row.superuser) findings.push("is a SUPERUSER");
+  if (row.bypassrls) findings.push("holds BYPASSRLS");
+  if (findings.length === 0) return;
+
+  throw new Error(
+    `The application connects to PostgreSQL as ${row.role}, which ${findings.join(" and ")}. ` +
+      "Refusing to start: that credential can retake ownership of the audit log and the " +
+      "control plane's evidence tables, disable their append-only triggers, and erase the " +
+      "record of having done so — so every ownership separation in the control plane would " +
+      "be decoration. Create an ordinary login role for the application, hand it the " +
+      "product's tables, and rerun `pnpm db:admin-owner verify`."
+  );
+}
+
+/**
  * Startup options pinned onto every connection the control plane opens.
  *
  * These are sent in the PostgreSQL startup packet, so they apply to every

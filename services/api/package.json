@@ -28,10 +28,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
-    "lint": "eslint src",
+    "lint": "eslint src scripts",
     "start": "node dist/server.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p scripts/tsconfig.json",
+    "test": "vitest run src",
+    "admin-benchmark": "tsx scripts/admin-read-benchmark.ts"
   },
   "devDependencies": {
     "tsx": "4.23.0"

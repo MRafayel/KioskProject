@@ -61,6 +61,8 @@ describe("no role is a superset of another", () => {
     // Changing the prices is an operational decision, so it is an Admin's. The
     // support role reads what happened and cannot cause it.
     expect(missing).toContain("pricing.publish");
+    // And since Phase 6, neither can it move money.
+    expect(missing).toContain("refund.authorize");
   });
 
   it("Operator holds strictly less than both", () => {
@@ -136,10 +138,25 @@ describe("money is separated from observation", () => {
     expect(hasCapability("OPERATOR", "print.recovery.resolve")).toBe(true);
   });
 
-  it("never lets an Operator authorize a refund", () => {
-    expect(hasCapability("OPERATOR", "refund.authorize")).toBe(false);
+  it("lets only the operational authority authorize a refund", () => {
     expect(hasCapability("ADMIN", "refund.authorize")).toBe(true);
-    expect(hasCapability("TECHNICAL_ADMIN", "refund.authorize")).toBe(true);
+    expect(hasCapability("OPERATOR", "refund.authorize")).toBe(false);
+    // Removed from the support role in Phase 6, on the owner's decision. It was
+    // granted in Phase 4 under a co-approver model that no longer exists, and it
+    // is the only one of that role's operational capabilities that costs money.
+    expect(hasCapability("TECHNICAL_ADMIN", "refund.authorize")).toBe(false);
+  });
+
+  it("still lets the support role see why an obligation is outstanding", () => {
+    // Reading an obligation is not authorizing one. Removing the ability to pay
+    // must not remove the ability to diagnose.
+    expect(hasCapability("TECHNICAL_ADMIN", "refund.obligation.read")).toBe(true);
+    expect(hasCapability("TECHNICAL_ADMIN", "payment.reconcile.read")).toBe(true);
+  });
+
+  it("leaves exactly one role able to cause a payout", () => {
+    const canPay = ADMIN_ROLES.filter((role) => hasCapability(role, "refund.authorize"));
+    expect(canPay).toEqual(["ADMIN"]);
   });
 
   it("never lets an Operator read reconciliation or mismatch detail", () => {
@@ -156,6 +173,16 @@ describe("account management boundaries", () => {
     // whether that Operator may work, or where. See ROLE_CAPABILITIES.
     expect(hasCapability("TECHNICAL_ADMIN", "operator.manage")).toBe(false);
     expect(hasCapability("OPERATOR", "operator.manage")).toBe(false);
+  });
+
+  it("gates the roster on a read capability that cannot change anybody", () => {
+    // Phase 6. The roster used to be gated on `authenticator.manage.operator`,
+    // which is R2 — so a screen asked for a security key, and stopped loading
+    // once the step-up went stale. Same two roles, R0.
+    expect(riskOfCapability("operator.read")).toBe("R0");
+    expect(hasCapability("ADMIN", "operator.read")).toBe(true);
+    expect(hasCapability("TECHNICAL_ADMIN", "operator.read")).toBe(true);
+    expect(hasCapability("OPERATOR", "operator.read")).toBe(false);
   });
 
   it("lets every role manage its own authenticators, and an Operator's only from above", () => {

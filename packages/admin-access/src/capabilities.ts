@@ -121,6 +121,21 @@ export const ADMIN_CAPABILITIES = [
   "change.read",
 
   /**
+   * The Operator roster: who exists, whether they can sign in, which kiosks
+   * they cover, and whether a key or a ticket is outstanding.
+   *
+   * Added in Phase 6 to fix a defect rather than to widen anything. The roster
+   * was gated on `authenticator.manage.operator`, which is R2 — so reading a
+   * screen demanded a fresh WebAuthn assertion, and five minutes after signing
+   * in the section stopped loading at all. Nothing about who may see it changed:
+   * the two roles that held the R2 capability hold this one.
+   *
+   * The general rule it restores is worth more than the fix: a GET names an R0
+   * capability, and a capability that can change something is never what gates a
+   * read. `admin-security.test.ts` asserts it for every route.
+   */
+  "operator.read",
+  /**
    * Administering Operator accounts: status and kiosk assignment.
    *
    * Never Technical Admin accounts, and never an account's role — an account
@@ -211,6 +226,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "pricing.read",
     "pricing.publish",
     "change.read",
+    "operator.read",
     "operator.manage",
     "authenticator.manage.self",
     "authenticator.manage.operator"
@@ -226,12 +242,22 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
    * reads the change log, because "what did the prices do at 14:03" is a
    * diagnostic question.
    *
-   * Four capabilities below pre-date this role model and sit oddly with it —
-   * `refund.authorize`, `print.recovery.correct`, `document.retention.retry` and
-   * `authenticator.manage.operator` are all operational rather than diagnostic.
-   * They are listed unchanged, and as an open decision, in
-   * `docs/ADMIN_PHASE_5_STATUS.md` §4.1: narrowing them is a change to shipped
-   * behaviour and belongs to the owner, not to a passing edit.
+   * **It cannot move money.** `refund.authorize` was granted here in Phase 4,
+   * when the plan still made Technical Admin a co-approver of production change.
+   * That model is gone, and Phase 6 removed the grant with it on the owner's
+   * decision: authorizing a payout is the operational authority's act, and a
+   * support role holding it meant a single compromised support account could
+   * cost money. It still reads `refund.obligation.read`, because "why is this
+   * obligation outstanding" is a diagnostic question and answering it moves
+   * nothing.
+   *
+   * Three capabilities below are operational rather than diagnostic and were
+   * kept deliberately at the same decision. `print.recovery.correct` and
+   * `document.retention.retry` are recovery work — a dead-lettered cleanup means
+   * customer documents that should not exist still do, and an Admin who has to
+   * be woken up to press retry is a worse answer than a support role that can.
+   * Neither can cause a payout: correcting an observation appends a fact, and
+   * `refund.authorize` is what turns any of it into money.
    *
    * It holds one capability over people, and the boundary around it is the
    * point. `authenticator.manage.operator` lets it get an Operator onto their
@@ -267,13 +293,13 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "payment.reconcile.read",
     "payment.mismatch.read",
     "refund.obligation.read",
-    "refund.authorize",
     "error.read",
     "incident.acknowledge",
     "audit.read",
     "audit.read.self",
     "pricing.read",
     "change.read",
+    "operator.read",
     "authenticator.manage.self",
     "authenticator.manage.operator"
   ]
@@ -356,6 +382,10 @@ const CAPABILITY_RISK: Readonly<Record<AdminCapability, ActionRisk>> = {
 
   "change.read": "R0",
 
+  // A read, and therefore R0. It was the roster's gate being an R2 capability
+  // that made a screen ask for a security key, so this is the correction rather
+  // than a new power: see the note beside the declaration.
+  "operator.read": "R0",
   "operator.manage": "R2",
   "authenticator.manage.self": "R2",
   "authenticator.manage.operator": "R2"

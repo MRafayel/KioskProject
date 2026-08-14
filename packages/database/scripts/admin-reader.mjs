@@ -22,6 +22,14 @@
  * default and a new column of a column-restricted table is invisible until it
  * is added to the matrix, which is the behaviour we want but only if somebody
  * notices. `verify` is what notices — run it in the deployment pipeline.
+ *
+ * `provision` needs two connections, for the reason `admin-append-role.mjs`
+ * gives: creating a role needs CREATEROLE, which only the application role has,
+ * and granting needs to own the table being granted on, which since Phase 4 the
+ * application does not for `audit_events` or any `admin_*` table — and this role
+ * reads seven of them. Development, where the application is the cluster's
+ * bootstrap superuser, works on one connection either way; production does not,
+ * which is why this was a latent deployment failure until Phase 6.
  */
 
 import { dirname } from "node:path";
@@ -53,11 +61,25 @@ const WRITE_PRIVILEGES = ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES"
 const { positionals } = parseArgs({ allowPositionals: true, options: {} });
 const command = positionals[0];
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) fail("DATABASE_URL is required.");
+// Role management — CREATE ROLE, the password, the connection settings — needs
+// CREATEROLE, which the owner role deliberately does not have.
+const roleAdminUrl = process.env.DATABASE_URL;
+if (!roleAdminUrl) fail("DATABASE_URL is required.");
 
-const client = new pg.Client({ connectionString: databaseUrl });
+// Granting needs to own the table being granted on. The owner is also a member
+// of the application role, so it can grant on the product tables too.
+const grantUrl = process.env.ADMIN_OWNER_DATABASE_URL ?? roleAdminUrl;
+
+/** Owns the admin tables; issues every GRANT and REVOKE, and reads the catalog. */
+const client = new pg.Client({ connectionString: grantUrl });
 await client.connect();
+
+const sharesOneConnection = grantUrl === roleAdminUrl;
+/** May CREATE ROLE; issues no grant. */
+const roleAdminClient = sharesOneConnection
+  ? client
+  : new pg.Client({ connectionString: roleAdminUrl });
+if (!sharesOneConnection) await roleAdminClient.connect();
 
 let failures = 0;
 
@@ -77,6 +99,7 @@ try {
   }
 } finally {
   await client.end();
+  if (!sharesOneConnection) await roleAdminClient.end();
 }
 
 if (failures > 0) process.exit(1);
@@ -103,26 +126,31 @@ async function provision() {
   const databaseName = (await client.query("SELECT current_database() AS name")).rows[0].name;
   const roleLiteral = quoteIdentifier(ADMIN_READER_ROLE);
 
+  // The role itself, on the connection that can create one. Kept outside the
+  // grant transaction below because it is on a different connection, and
+  // because a role that exists with no grants can do nothing anyway.
+  const exists = await roleAdminClient.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
+    ADMIN_READER_ROLE
+  ]);
+  if (exists.rowCount === 0) {
+    await roleAdminClient.query(
+      `CREATE ROLE ${roleLiteral} LOGIN PASSWORD ${quoteLiteral(password)} ` +
+        "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+    );
+  } else {
+    await roleAdminClient.query(
+      `ALTER ROLE ${roleLiteral} LOGIN PASSWORD ${quoteLiteral(password)}`
+    );
+  }
+
+  for (const [setting, value] of Object.entries(ROLE_SETTINGS)) {
+    await roleAdminClient.query(
+      `ALTER ROLE ${roleLiteral} SET ${quoteIdentifier(setting)} = ${quoteLiteral(value)}`
+    );
+  }
+
   await client.query("BEGIN");
   try {
-    const exists = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
-      ADMIN_READER_ROLE
-    ]);
-    if (exists.rowCount === 0) {
-      await client.query(
-        `CREATE ROLE ${roleLiteral} LOGIN PASSWORD ${quoteLiteral(password)} ` +
-          "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
-      );
-    } else {
-      await client.query(`ALTER ROLE ${roleLiteral} LOGIN PASSWORD ${quoteLiteral(password)}`);
-    }
-
-    for (const [setting, value] of Object.entries(ROLE_SETTINGS)) {
-      await client.query(
-        `ALTER ROLE ${roleLiteral} SET ${quoteIdentifier(setting)} = ${quoteLiteral(value)}`
-      );
-    }
-
     // Start from nothing every time, so this command is a statement of the
     // whole policy rather than a patch on top of whatever ran before it.
     await client.query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${roleLiteral}`);
@@ -258,14 +286,14 @@ async function verify() {
 
 /** Take the role's login away without dropping it or losing the grants. */
 async function disable() {
-  const exists = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
+  const exists = await roleAdminClient.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [
     ADMIN_READER_ROLE
   ]);
   if (exists.rowCount === 0) {
     process.stdout.write(`Role ${ADMIN_READER_ROLE} does not exist.\n`);
     return;
   }
-  await client.query(`ALTER ROLE ${quoteIdentifier(ADMIN_READER_ROLE)} NOLOGIN`);
+  await roleAdminClient.query(`ALTER ROLE ${quoteIdentifier(ADMIN_READER_ROLE)} NOLOGIN`);
   process.stdout.write(
     `${ADMIN_READER_ROLE} can no longer connect. Existing connections are unaffected;\n` +
       "terminate them with pg_terminate_backend if this is an incident response.\n"

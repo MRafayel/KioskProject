@@ -70,11 +70,31 @@ const ADMIN_OWNER_ROLE = "printing_kiosk_migrator";
  * immutable. Those are the rules that decide who can sign in to the panel at
  * all.
  *
- * Deliberately not here: `print_job_recovery_resolutions`, the Phase 4 tables
- * beside it, and every product table. Moving those is a bigger change than
- * this one — the integration teardown owns the resolutions table specifically
- * so it can suspend the append-only triggers — and it is a decision for
- * whoever takes it, not a side effect of this one. See ADMIN_PHASE_4_STATUS.md.
+ * The four evidence tables at the end are the control plane's own record of
+ * what a person did — what an operator saw at a tray, the later account that
+ * superseded it, who authorized a payout, and who asked retention to try again.
+ * Each is append-only by trigger, and until Phase 6 each was owned by the
+ * application, which meant the same argument as `audit_events`: the trigger was
+ * the mechanism and ownership was the hole under it. They move here for exactly
+ * that reason.
+ *
+ * They keep **SELECT and nothing else** for the application, which is narrower
+ * than the `admin_*` tables above. The application does read two of them —
+ * retention shortens a resolved recovery's grace by reading the observation, and
+ * the re-arm joins the retry requests — and it writes none of them: every insert
+ * comes from an admin role on its own connection. So there is no reason for the
+ * product's credential to hold anything more, and after this it does not.
+ *
+ * Deliberately still not here: every product table. A session, a payment or a
+ * print job is the application's to manage, and moving those would be a
+ * different change with a different argument behind it.
+ *
+ * One consequence worth knowing: the integration teardowns delete from these
+ * tables with `ALTER TABLE ... DISABLE TRIGGER USER`, which needs ownership or
+ * superuser. They pass in development because the compose file runs the
+ * application as the cluster's bootstrap superuser. That is the same reason
+ * `admin_change_executions` has been deletable in tests since Phase 5, and the
+ * same reason a production deployment must not run the application that way.
  */
 const OWNED_TABLES = Object.freeze({
   audit_events: ["SELECT", "INSERT"],
@@ -96,7 +116,12 @@ const OWNED_TABLES = Object.freeze({
   // DML as the other admin tables so an integration teardown can clear them.
   // What it loses, as with the rest, is the ability to drop them or to switch
   // off the triggers enforcing who may approve what.
-  admin_change_executions: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+  admin_change_executions: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  // Phase 6. The control plane's evidence, read-only to the product.
+  print_job_recovery_resolutions: ["SELECT"],
+  print_job_recovery_corrections: ["SELECT"],
+  refund_authorizations: ["SELECT"],
+  cleanup_retry_requests: ["SELECT"]
 });
 
 const ALL_PRIVILEGES = [
@@ -222,16 +247,19 @@ async function provision() {
     [
       `Provisioned ${ADMIN_OWNER_ROLE}.`,
       `  now owns   : ${Object.keys(OWNED_TABLES).join(", ")}`,
-      `  ${applicationRole} keeps INSERT and SELECT on audit_events, and no more.`,
+      `  ${applicationRole} keeps INSERT and SELECT on audit_events, SELECT on the`,
+      "               control plane's evidence tables, and no more.",
       "",
       "Set ADMIN_OWNER_DATABASE_URL to this role and password. A migration that",
       "alters one of the tables above must now run as it: `pnpm db:migrate:owner`.",
       "",
-      "The other three admin roles held grants issued by the previous owner.",
+      "The other five admin roles held grants issued by the previous owner.",
       "Re-provision and re-verify all of them now:",
       "  pnpm db:admin-reader provision && pnpm db:admin-reader verify",
       "  pnpm db:admin-writer provision && pnpm db:admin-writer verify",
       "  pnpm db:admin-refund-writer provision && pnpm db:admin-refund-writer verify",
+      "  pnpm db:admin-people-writer provision && pnpm db:admin-people-writer verify",
+      "  pnpm db:admin-pricing-writer provision && pnpm db:admin-pricing-writer verify",
       "",
       "Then confirm the result with: pnpm db:admin-owner verify",
       ""

@@ -14,6 +14,7 @@ import {
   assertAdminReadClientIsReadOnly,
   assertAdminRefundClientIsAppendOnly,
   assertAdminWriteClientIsAppendOnly,
+  assertApplicationRoleIsNotPrivileged,
   createAdminPeopleClient,
   createAdminPricingClient,
   createAdminReadClient,
@@ -193,6 +194,14 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   const ownsDatabase = !options.database;
   const database = options.database ?? createDatabaseClient(options.environment.DATABASE_URL);
+  // Every ownership separation in the control plane assumes the product's own
+  // credential cannot take back what was taken from it. A superuser can, so in
+  // production this refuses to start rather than serve a control plane whose
+  // guarantees are decoration. Development runs as the compose image's
+  // bootstrap superuser and is exempt.
+  if (options.environment.NODE_ENV === "production") {
+    await assertApplicationRoleIsNotPrivileged(database);
+  }
   const clock = options.clock ?? new SystemClock();
   const random = options.random ?? new CryptoRandomSource();
   const objectStore = options.objectStore ?? createS3ObjectStore(options.environment);

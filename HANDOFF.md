@@ -1,20 +1,24 @@
 # Handoff — Admin Control Plane
 
 For the next session. Read this, then `docs/ADMIN_PHASE_0.md` (the threat model
-and the phase plan) and `docs/ADMIN_PHASE_5_STATUS.md` (what shipped last).
+and the phase plan) and `docs/ADMIN_PHASE_6_STATUS.md` (what shipped last).
 
-**State: Phases 0–5 complete, all checks green. The working tree has uncommitted
-Phase 5 work awaiting the owner's commit. Phase 6 (hardening) is next and is
-described in §8.**
+**State: Phases 0–6 complete, all checks green. The working tree has uncommitted
+Phase 6 work awaiting the owner's commit. Every phase in the plan is now built;
+what comes next is a choice rather than a queue — see §8.**
 
-> **Phase 5 was reshaped mid-flight by two owner decisions, and they change how
-> to read the older documents.** Admin is the operational authority; Technical
-> Admin is a support role and is not a co-approver of anything. And there is one
-> Admin, so no workflow may wait for a second one — **nothing is classified R3**,
-> and publishing a tariff is R2. `ADMIN_PHASE_0.md` §14, §15, §16, §19, §21, §22
-> and §23 have been amended to match. Where an older phase document still
-> describes a two-person or three-person approval, the code is right and the
-> document is stale.
+> **Two owner decisions in Phase 5 changed how to read the older documents.**
+> Admin is the operational authority; Technical Admin is a support role and is
+> not a co-approver of anything. And there is one Admin, so no workflow may wait
+> for a second one — **nothing is classified R3**, and publishing a tariff is R2.
+> `ADMIN_PHASE_0.md` §14, §15, §16, §19, §21, §22 and §23 have been amended to
+> match. Where an older phase document still describes a two-person or
+> three-person approval, the code is right and the document is stale.
+>
+> **Two more were taken in Phase 6, and one of them narrows a role.** Technical
+> Admin no longer holds `refund.authorize` — exactly one role can move money now.
+> And there will be one Admin permanently, which closes the last question Phase 5
+> left open. `ADMIN_PHASE_0.md` §23.6 is new.
 
 ---
 
@@ -74,6 +78,14 @@ anywhere changes an account's role**, and none may be added: creating an
 identity and deciding what it is are CLI acts with a database credential behind
 them.
 
+**Since Phase 6, two rules about routes are enforced by a test rather than by
+review.** Every admin route must appear in the `ENDPOINTS` table in
+`tests/integration/admin-security.test.ts` with the capability it names — adding
+a route without classifying it fails the suite. And **every GET must name an R0
+capability**: gating a read on a capability that can change something imports its
+step-up ceremony, which is how the People section came to demand a security key
+to display a list.
+
 **Blast radius assumption:** an attacker eventually compromises an Operator, an
 Admin, and possibly one Technical Admin account. Design so that is survivable.
 
@@ -91,7 +103,7 @@ reintroduce a second-approver workflow without the owner asking for one.
 **Dependencies:** avoid unnecessary ones, justify every significant one in the
 phase doc. The whole control plane has added exactly one runtime dependency so
 far (`@simplewebauthn/server`, justified in `ADMIN_PHASE_0.md` §13.1). Phases 3,
-4, 4B and 5 added none.
+4, 4B, 5 and 6 added none.
 
 **The UI is temporary and will be replaced.** Keep panel work minimal and
 functional; do not invest in visual polish, layout refinement or reusable UI
@@ -132,6 +144,17 @@ reach backwards further than any decision before them:
   evidence is enforced by the database. Reasoning and the accepted residual risk
   in `ADMIN_PHASE_5_STATUS.md` §4.1.
 
+Two more in Phase 6, in `ADMIN_PHASE_0.md` §23.5 and §23.6:
+
+- **Technical Admin cannot move money.** `refund.authorize` was removed from it —
+  granted in Phase 4 under the co-approver model that no longer exists. The other
+  three capabilities Phase 5 flagged were kept deliberately: correcting an
+  observation and retrying retention are recovery work that must not wait for an
+  Admin at 03:00, and none of the three can cause a payout.
+- **One Admin, permanently.** The question Phase 5 left open is now closed rather
+  than carried. Nothing waits for a second account; the R3 branch stays as a
+  fail-closed backstop rather than as a workflow anybody intends to use.
+
 ---
 
 ## 3. Architecture of the control plane
@@ -163,15 +186,15 @@ truth for both sides:
 **Five PostgreSQL roles for the panel, plus an owner role. All provisioned by
 CLI, all verified by CLI:**
 
-| Role                                  | URL                          | Privileges                                                         |
-| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------ |
-| application                           | `DATABASE_URL`               | the product                                                        |
-| `printing_kiosk_admin_reader`         | `ADMIN_READ_DATABASE_URL`    | SELECT on an explicit allow-list                                   |
-| `printing_kiosk_admin_writer`         | `ADMIN_WRITE_DATABASE_URL`   | INSERT on four tables, no UPDATE or DELETE anywhere                |
-| `printing_kiosk_admin_refund_writer`  | `ADMIN_REFUND_DATABASE_URL`  | INSERT on `refunds`, its authorization record, and `audit_events`  |
-| `printing_kiosk_admin_people_writer`  | `ADMIN_PEOPLE_DATABASE_URL`  | UPDATE on 9 named columns; never `admin_users.role`; no DELETE     |
-| `printing_kiosk_admin_pricing_writer` | `ADMIN_PRICING_DATABASE_URL` | UPDATE on 3 columns of `pricing_rule_sets`; cannot read a quote    |
-| `printing_kiosk_migrator`             | `ADMIN_OWNER_DATABASE_URL`   | owns `audit_events` and `admin_*`; runs migrations that alter them |
+| Role                                  | URL                          | Privileges                                                        |
+| ------------------------------------- | ---------------------------- | ----------------------------------------------------------------- |
+| application                           | `DATABASE_URL`               | the product                                                       |
+| `printing_kiosk_admin_reader`         | `ADMIN_READ_DATABASE_URL`    | SELECT on an explicit allow-list                                  |
+| `printing_kiosk_admin_writer`         | `ADMIN_WRITE_DATABASE_URL`   | INSERT on four tables, no UPDATE or DELETE anywhere               |
+| `printing_kiosk_admin_refund_writer`  | `ADMIN_REFUND_DATABASE_URL`  | INSERT on `refunds`, its authorization record, and `audit_events` |
+| `printing_kiosk_admin_people_writer`  | `ADMIN_PEOPLE_DATABASE_URL`  | UPDATE on 9 named columns; never `admin_users.role`; no DELETE    |
+| `printing_kiosk_admin_pricing_writer` | `ADMIN_PRICING_DATABASE_URL` | UPDATE on 3 columns of `pricing_rule_sets`; cannot read a quote   |
+| `printing_kiosk_migrator`             | `ADMIN_OWNER_DATABASE_URL`   | owns `audit_events`, `admin_*` and the four evidence tables       |
 
 Each role is the outermost enforcement layer for one phase's gate: an Operator
 cannot move money because _their connection has no grant on the money tables_;
@@ -180,6 +203,14 @@ grant to record an observation_; nothing reachable from a browser promotes
 anybody because _no connection holds UPDATE on `admin_users.role`_; and a tariff
 cannot commit that no record accounts for because _a deferred trigger recomputes
 its digest from the rows written and refuses at COMMIT_. Preserve all four.
+
+Since Phase 6 the migrator also owns `print_job_recovery_resolutions`,
+`print_job_recovery_corrections`, `refund_authorizations` and
+`cleanup_retry_requests` — thirteen tables in all. The application keeps SELECT
+on those four and nothing else, so the credential the append-only triggers exist
+to constrain can no longer switch them off. **In production the API and worker
+now refuse to start if the application role is a superuser**, because under that
+credential none of this holds.
 
 The people and pricing roles are the only ones holding UPDATE at all, and both
 hold it per _column_. They share `admin-column-role.mjs` for exactly that reason
@@ -221,7 +252,7 @@ server-side, step-up required, the job id is the idempotency key, append-only.
 | `document.retention.retry` | R1   | Admin+    | a request the worker acts on              |
 | `print.recovery.resolve`   | R2   | Operator+ | an observation                            |
 | `print.recovery.correct`   | R2   | Admin+    | a correction superseding one              |
-| `refund.authorize`         | R2   | Admin+    | an obligation at PENDING, on its own role |
+| `refund.authorize`         | R2   | **Admin** | an obligation at PENDING, on its own role |
 
 Plus: the refund queue (which surfaces `UNRESOLVABLE` rather than dropping it),
 the correction chain on the job detail, who authorized each obligation, and a
@@ -229,6 +260,8 @@ retention runner that shortens a resolved recovery's grace and re-arms runs a
 person asked it to retry.
 
 Nothing settles a refund. There is no provider credential anywhere in the panel.
+`refund.authorize` was Admin **and** Technical Admin until Phase 6; it is now
+Admin only, and exactly one role in the system can cause a payout.
 
 **Phase 4B — people.** Five more actions, all R2, all on the people role:
 
@@ -240,8 +273,10 @@ Nothing settles a refund. There is no provider credential anywhere in the panel.
 | retire an Operator's key               | `authenticator.manage.operator` | Admin + TA | a revocation, refused at the minimum |
 | issue an enrolment ticket              | `authenticator.manage.operator` | Admin + TA | a 15-minute single-use authorisation |
 
-Plus `GET /v1/admin/people` on the read pool, an **I have an enrolment code**
-panel on the sign-in screen, and the Phase 4A styling gap closed.
+Plus `GET /v1/admin/people` on the read pool — gated on `authenticator.manage.
+operator` until Phase 6 found that this made a screen demand a security key, and
+on `operator.read` since — an **I have an enrolment code** panel on the sign-in
+screen, and the Phase 4A styling gap closed.
 
 Nothing here creates an account or changes a role — both stay CLI. A ticket can
 only name an Operator that is still `PROVISIONING` with no usable key, which is
@@ -264,6 +299,22 @@ COMMIT. The record takes no UPDATE and no DELETE from any role, its own owner
 included. Publishing requires echoing the digest the preview returned, so what is
 published is what was reviewed.
 
+**Phase 6 — hardening.** No new operational surface. What it produced instead:
+
+- `tests/integration/admin-security.test.ts`, the phase gate. 52 tests, most of
+  them asked of **every route the app registered** rather than of a sample. It
+  declares all 43 admin routes with the capability each names and asserts that
+  set equals Fastify's own route table, then drives the authorization, step-up,
+  CSRF and authentication sweeps from that one declaration.
+- The four evidence tables moved to the migrator role (§3), closing the gap
+  Phase 4 left open.
+- A production boot check: the API and worker refuse to start if the application
+  role is a superuser. That gate had been documented and unenforced for four
+  phases.
+- `pnpm db:admin-benchmark`, and the first measurement of the admin reads at
+  volume: 50,000 sessions, slowest read 12.5ms at p95 against a 5s timeout.
+- Four defects fixed, all live. `ADMIN_PHASE_6_STATUS.md` §4.2.
+
 ---
 
 ## 5. Files worth knowing
@@ -280,7 +331,9 @@ published is what was reviewed.
 | [admin-refund-writer-matrix.mjs](packages/database/scripts/admin-refund-writer-matrix.mjs)                           | why the money role is separate, as data           |
 | [admin-people-writer-matrix.mjs](packages/database/scripts/admin-people-writer-matrix.mjs)                           | what may be changed about a person, as data       |
 | [admin-pricing-writer-matrix.mjs](packages/database/scripts/admin-pricing-writer-matrix.mjs)                         | the only connection that can change a price       |
-| [admin-owner.mjs](packages/database/scripts/admin-owner.mjs)                                                         | the audit log's owner, and the superuser check    |
+| [admin-owner.mjs](packages/database/scripts/admin-owner.mjs)                                                         | who owns the evidence, and the superuser check    |
+| [admin-security.test.ts](tests/integration/admin-security.test.ts)                                                   | the authorization matrix, and the Phase 6 gate    |
+| [admin-read-benchmark.ts](services/api/scripts/admin-read-benchmark.ts)                                              | what the dashboard costs at volume                |
 | [migration.sql](packages/database/prisma/migrations/20260811020000_admin_phase4_money_and_corrections/migration.sql) | the deferred authorization trigger                |
 | [migration.sql](packages/database/prisma/migrations/20260811030000_admin_phase4b_people_management/migration.sql)    | who an enrolment ticket may ever name             |
 | [migration.sql](packages/database/prisma/migrations/20260812010000_admin_phase5_pricing_publication/migration.sql)   | the digest recomputed in SQL, checked at COMMIT   |
@@ -330,9 +383,12 @@ already.
 
 Account CLI: `pnpm db:admin <create|list|break-glass|revoke-break-glass|suspend|resume|disable>`.
 Role CLIs: `pnpm db:admin-reader`, `db:admin-writer`, `db:admin-refund-writer`,
-`db:admin-people-writer` (each `provision|verify|disable`) and
-`pnpm db:admin-owner <provision|verify>`.
-Migrations that alter `audit_events` or `admin_*`: `pnpm db:migrate:owner`.
+`db:admin-people-writer`, `db:admin-pricing-writer` (each
+`provision|verify|disable`) and `pnpm db:admin-owner <provision|verify>`.
+Migrations that alter a migrator-owned table: `pnpm db:migrate:owner`.
+Read performance: `pnpm db:admin-benchmark <seed|measure|clean>` — development
+only, refuses a non-loopback database, and `clean` cannot remove the audit rows
+it wrote because the log is append-only for everybody.
 
 Onboarding an Operator end to end: `pnpm db:admin create --role OPERATOR ...`,
 then **People → Issue an enrolment code** in the panel (read it out, do not send
@@ -363,18 +419,22 @@ and persists. This has been offered and not taken up; offer it once, then drop i
 
 ## 7. Known bugs and gaps
 
-Full detail in `docs/ADMIN_PHASE_4_STATUS.md` §4.3 and
-`docs/ADMIN_PHASE_4B_STATUS.md` §4.3. The ones that will bite:
+Full detail in `docs/ADMIN_PHASE_6_STATUS.md` §4.3, `ADMIN_PHASE_4_STATUS.md`
+§4.3 and `ADMIN_PHASE_4B_STATUS.md` §4.3. The ones that will bite:
 
-1. **The application role is a superuser in development**, so Phase 4's
-   ownership separation is ineffective there and `pnpm db:admin-owner verify`
-   fails by design saying exactly that. **Production must run the application as
-   an ordinary role** or the audit-integrity work does not hold there either.
-2. **The control plane's own evidence tables are still application-owned.**
-   `print_job_recovery_resolutions` and the three Phase 4 tables keep their
-   append-only triggers, but the application role could disable them. Left out
-   of the transfer deliberately — the integration teardown suspends those
-   triggers — and worth revisiting with the teardown.
+1. ~~The application role is a superuser in development.~~ **Closed in Phase 6**
+   as far as code can close it. It is still a superuser locally — that is the
+   Docker image, and `pnpm db:admin-owner verify` still reports it by design —
+   but the API and the worker now **refuse to start in production** if the role
+   they connect as holds `rolsuper` or `rolbypassrls`. The gate is enforced
+   rather than documented.
+2. ~~The control plane's evidence tables are application-owned.~~ **Closed in
+   Phase 6.** All four moved to the migrator role; the application keeps SELECT
+   and nothing else. Note the consequence: the integration teardowns suspend
+   those triggers to delete, which now works only because development runs the
+   application as a superuser. That is not a production concern — tests do not
+   run there — but the teardown is no longer a demonstration that the
+   application could clean up after itself.
 3. **A correction cannot withdraw an authorized refund.** The record changes and
    the obligation stands. Phase 5 was expected to solve this with an approval
    workflow; there is no such workflow now, so it is simply open — reversing an
@@ -402,7 +462,19 @@ Modified`, and `index.html`'s ETag never changes when only a header changes —
    (`alwaysSendSecurityHeaders`) so they land on every status. **Whatever serves
    the built admin app in production will have the same bug** if its headers are
    attached to the static-file handler rather than set unconditionally. Decide
-   this before deploying.
+   this before deploying. Phase 6 tested the API's own headers and could not
+   answer this one; it is the last XSS-adjacent question open.
+10. **Four capabilities grant nothing.** `kiosk.liveness.read`,
+    `kiosk.maintenance_mode`, `payment.mismatch.read` and `pricing.read` gate no
+    endpoint and widen no response — Phase 0 declared them ahead of features
+    nobody built. Harmless, and misleading to a reviewer reading
+    `ROLE_CAPABILITIES`. They are enumerated with a reason each in
+    `admin-security.test.ts`, asserted in both directions. Delete or implement;
+    the owner's call.
+11. **The read benchmark measures one client against an idle database.** It
+    answers "are these queries fast" (they are — 12.5ms at p95 on 50,000
+    sessions) and not "what do they cost the print path while a kiosk is
+    quoting". The second question needs load from both sides at once.
 
 Two small improvements were offered in an earlier session and never approved —
 take them or drop them: a test that clicks an attention row and asserts the
@@ -411,62 +483,56 @@ already been used…" / "The code was spent but no key was enrolled.").
 
 ---
 
-## 8. Do this next — Phase 6
+## 8. Do this next
 
-**Phase 6 = hardening.** `ADMIN_PHASE_0.md` §22 row 6, and its gate is that a
-security test suite is green: authorization matrix review per endpoint, IDOR,
-CSRF, XSS, secret leakage, query performance, audit integrity.
+**The phase plan is finished.** `ADMIN_PHASE_0.md` §22 had six rows and all six
+are built. There is no next phase queued, so the next session starts with a
+choice rather than a list — which makes it the first session where "what should
+we do" is a real question and not a formality. Put it to the owner before
+building anything.
 
-Every operational surface the plan called for now exists. Phase 6 is the first
-one that adds no feature, which makes it the first where the temptation is to
-find something to build instead. Resist that: the list above is the work.
+The honest ranking, with the reason each earns its place:
 
-Where to start, in the order that finds the most:
+1. **Nothing settles a refund** (§7 item 4). This is the largest hole left in the
+   product, not just in the control plane: obligations have been accumulating at
+   `PENDING` since Phase 4A and there is no executor. It needs a provider
+   credential, which nothing in the admin plane has or should have — so it is a
+   worker, not a panel, and its design is a phase of its own. Note what it
+   unblocks: §7 item 3, withdrawing an authorized refund, is easier to reason
+   about once something can settle one.
+2. **Decide how the built admin app is served** (§7 item 9). The last
+   security question this repository cannot answer for itself, and the only one
+   that blocks a deployment rather than a feature.
+3. **Concurrent load** (§7 item 11). Phase 6 proved the dashboard is fast; Phase 0
+   §17's promise was that it would not degrade printing, and only one side of
+   that has been measured.
+4. **The panel replacement** the owner has signalled. The business logic to
+   preserve is in `ADMIN_PHASE_5_STATUS.md` §1.7, plus one rule Phase 6 added: no
+   read may be gated on a capability that can change something.
+5. **The four dead capabilities** (§7 item 10). Small, and worth doing while
+   somebody is holding the authorization model in their head.
 
-1. **The authorization matrix, endpoint by endpoint.** There are six capability
-   families and roughly forty routes. The question for each is not "does it call
-   `authorizeAdmin`" — they all do — but "is the capability it names the one a
-   reader would expect from the URL", and "does anything it returns exceed what
-   that capability is for". `capabilities.ts` is the policy; the routes are the
-   claim; nothing has yet checked them against each other systematically.
-2. **Audit integrity end to end.** `audit_events` rejects UPDATE and DELETE by
-   trigger and is migrator-owned. The gap in §7 item 2 is the rest: the control
-   plane's own evidence tables are still application-owned, so an application
-   role that is a superuser could disable their triggers. Same root cause as
-   item 1, and worth closing together.
-3. **The superuser question in §7 item 1.** Open for four phases. Until it is
-   answered every ownership separation in the control plane is decoration in
-   production — including Phase 5's publication record.
-4. **Query performance under the admin read role.** Phase 2 bounded every query
-   and Phase 0 §17 promised it would not degrade printing. Nothing has measured
-   it against a database with realistic volume.
-
-Two owner decisions are waiting, both in `ADMIN_PHASE_5_STATUS.md` §4.1:
-
-- **Four Technical Admin capabilities** — `refund.authorize`,
-  `print.recovery.correct`, `document.retention.retry`,
-  `authenticator.manage.operator` — are operational rather than diagnostic and
-  sit oddly with the support-role model. They were left unchanged because
-  narrowing them changes shipped, tested behaviour. `refund.authorize` is the one
-  worth removing: it moves money, and the support role's reason to hold it was
-  the co-approver model that no longer exists.
-- **Whether a second Admin account will ever exist.** If so, publishing a tariff
-  is the one capability worth making a two-person act, and the digest machinery
-  it would need is already in place.
-
-Then follow the established rhythm: implement, prove the gate with integration
-tests, write `docs/ADMIN_PHASE_6_STATUS.md` in the same voice as Phase 5 (what
+Whatever is chosen, follow the established rhythm: implement, prove the gate with
+integration tests, write `docs/ADMIN_PHASE_7_STATUS.md` in the same voice (what
 was built, new dependencies and their justification, verification, security
 review including deviations and known gaps, printing performance impact, setup,
 what remains), and **let the owner make the commit** — that is the convention
 here, one commit per phase.
 
-### One trap worth knowing before touching the database
+### Two traps worth knowing before touching the database
 
 Every migration invalidates every role. `verify` fails on any table it has no
 decision for, so after a migration each of the five least-privilege roles must be
 re-provisioned before deploy. That is the mechanism working, not a nuisance — but
 it does mean `pnpm db:migrate:owner` is never the last step.
+
+And **the migrator now owns thirteen tables, not nine.** Any migration that
+alters `print_job_recovery_resolutions`, `print_job_recovery_corrections`,
+`refund_authorizations` or `cleanup_retry_requests` has to run as the owner too,
+and a role script that grants on one of them needs the owner connection — which
+is the defect Phase 5 found in `admin-append-role.mjs` and Phase 6 found again in
+`admin-reader.mjs`. If a third script is ever written, check which connection it
+issues its GRANTs on before anything else.
 
 And a migration must be applied as the owning role
 (`ADMIN_OWNER_DATABASE_URL=... pnpm db:migrate:owner`). Applying it on the

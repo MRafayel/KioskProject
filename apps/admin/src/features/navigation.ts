@@ -48,16 +48,18 @@ export const SECTION_CAPABILITY: Readonly<Record<AdminSectionId, AdminCapability
   retention: "document.retention.read",
   errors: "error.read",
   audit: "audit.read.self",
-  // The looser of the two people capabilities on purpose. A Technical Admin
-  // holds this one and not `operator.manage`, so it can see the roster it may
-  // issue an enrolment ticket against — and finds the status and kiosk controls
-  // absent when it gets there, because those are drawn from the other one.
   // Read, not write. A Technical Admin holds this and not `pricing.publish`, so
   // it finds the section present and the form absent — which is the right answer
   // for a support role: what the prices did, and when, is a diagnostic question,
   // and changing them is not its job.
   changes: "change.read",
-  people: "authenticator.manage.operator",
+  // The same shape again. A Technical Admin holds `operator.read` and not
+  // `operator.manage`, so it reaches the roster it may issue an enrolment ticket
+  // against and finds the status and kiosk controls absent, because those are
+  // drawn from the other one. Phase 6 moved this off
+  // `authenticator.manage.operator`: that capability is R2, so gating a screen
+  // on it made opening the section demand a security key.
+  people: "operator.read",
   "security-keys": "authenticator.manage.self"
 };
 

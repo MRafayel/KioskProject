@@ -543,7 +543,7 @@ content.
 | `incident.acknowledge`                                       | ✅            | ✅         | ✅                           |
 | `audit.read`                                                 | own actions   | ✅         | ✅                           |
 | `print.recovery.resolve`                                     | ✅ own kiosks | ✅         | ✅                           |
-| `refund.authorize`                                           | ❌            | ✅         | ✅                           |
+| `refund.authorize`                                           | ❌            | ✅         | ❌ (removed in Phase 6)      |
 | `document.retention.retry`                                   | ❌            | ✅         | ✅                           |
 | `print.diagnostics.read`                                     | ❌            | limited    | ✅                           |
 | `operator.manage`                                            | ❌            | ✅         | ❌                           |
@@ -565,10 +565,17 @@ proposer and co-approver of production change. As built, Technical Admin is a
 Admin cannot resolve from the operational surface. It is not a second operator
 and not a co-approver, and nothing routine requires both roles. Running the
 business — money, people, kiosks, pricing — is an Admin's job, and an Admin does
-not need anybody else's agreement to do it. Four capabilities granted in Phases 4
-and 4B sit oddly with that model and were left unchanged rather than silently
-narrowed; they are recorded as an open decision in
-`docs/ADMIN_PHASE_5_STATUS.md` §4.1.
+not need anybody else's agreement to do it.
+
+**Amended again in Phase 6, by owner decision (§23.6): Technical Admin no longer
+holds `refund.authorize`.** Four capabilities granted in Phases 4 and 4B sat
+oddly with the support-role model and were carried as an open question through
+Phase 5. The one that moved money is gone — a single compromised support account
+can no longer cause a payout, and exactly one role in the system can. The other
+three were kept deliberately: `print.recovery.correct` and
+`document.retention.retry` are recovery work that must not wait for an Admin at
+03:00, and `authenticator.manage.operator` is the reason the role exists at that
+hour. None of the three can cause a payout.
 
 ### 14.1 `print.recovery.resolve` — constrained, and separated from money
 
@@ -583,9 +590,9 @@ The split, which is the important part:
 - `print.recovery.resolve` (Operator and above) **records an observation**:
   what the person saw at the tray. It can record that a paid print appears to
   need recovery and that a refund may be owed. **It cannot move money.**
-- `refund.authorize` (Admin and Technical Admin only) is what actually creates
-  or settles a monetary obligation, and follows the existing payment/refund
-  rules and triggers.
+- `refund.authorize` (**Admin only**, since Phase 6 — Technical Admin held it
+  until then) is what actually creates or settles a monetary obligation, and
+  follows the existing payment/refund rules and triggers.
 
 An Operator can therefore surface and document a problem, but cannot
 unilaterally cause a payout. Compromising an Operator account yields a stream
@@ -631,8 +638,9 @@ design is "safe to run three times"). Capability + validation + audit + rate
 limit.
 
 **R2 — sensitive, reversible or compensable.** `print.recovery.resolve`
-(constrained; Operator and above — §14.1), `refund.authorize` (Admin and above;
-moves money), `authenticator.manage`, and **`pricing.publish`** (see below).
+(constrained; Operator and above — §14.1), `refund.authorize` (**Admin only**
+since Phase 6; moves money), `authenticator.manage`, and **`pricing.publish`**
+(see below).
 Confirmation + mandatory reason + step-up WebAuthn + current-state revalidation +
 idempotency key + audit with before/after. Operator-held R2 is additionally
 kiosk-scoped.
@@ -746,7 +754,7 @@ Phase 2 to draw a sparkline nobody asked for would violate §3 of the brief.
 | --- | ------------------------------------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | T1  | Attacker gets an Operator account                      | —                                                | No human auth exists yet                                                                                                                       |
 | T2  | Attacker gets an Admin account                         | —                                                | Must not reach documents (§12). **Phase 5 accepts** that it can change the prices — there is one Admin — but not without an unforgeable record |
-| T3  | Attacker gets one Technical Admin account              | —                                                | **Narrowed in Phase 5**: Technical Admin is a support role. It cannot change the prices, suspend an account, or move a kiosk assignment        |
+| T3  | Attacker gets one Technical Admin account              | —                                                | **Narrowed in Phase 5 and again in Phase 6**: it cannot change the prices, suspend an account, move a kiosk assignment, or authorize a refund  |
 | T4  | Admin reads customer documents via credential issuance | —                                                | **Closed by decision**: no kiosk-credential capability exists in the dashboard at any level (§14)                                              |
 | T5  | Admin rewrites audit history                           | none                                             | `audit_events` lacks an update/delete trigger                                                                                                  |
 | T6  | Dashboard queries degrade printing                     | good indexes                                     | Needs bounded queries, timeouts, read-only role                                                                                                |
@@ -900,6 +908,28 @@ a single Admin, atomically, on a fresh WebAuthn assertion. The protection moved
 from prevention to evidence, and the evidence is enforced by the database rather
 than by the application: see `docs/ADMIN_PHASE_5_STATUS.md` §4.1 for the
 reasoning and the accepted residual risk.
+
+**Settled in Phase 6: there will be one Admin, permanently.** Phase 5 left this
+open because a second Admin would have made a two-person rule over the tariff
+worth reinstating, and the digest machinery it would need was already built. The
+owner has now closed it. Nothing in the control plane waits for a second
+account, `pricing.publish` stays R2, and the R3 branch in `authorizeAdmin` stays
+as a fail-closed backstop rather than as a workflow anybody intends to use.
+
+**23.6 Technical Admin cannot move money.** _Added in Phase 6._ The last of the
+four capabilities Phase 5 flagged as sitting oddly with the support-role model.
+`refund.authorize` was granted to Technical Admin in Phase 4, when this plan
+still made it a co-approver of production change; that model was removed in
+Phase 5 and the grant outlived its reason. It is gone. Exactly one role can now
+cause a payout, and a compromised support account cannot.
+
+The other three — `print.recovery.correct`, `document.retention.retry`,
+`authenticator.manage.operator` — were kept on the same decision, and the reason
+is the role's purpose rather than inertia. Two of them are recovery work at an
+hour when there may be no Admin awake: a dead-lettered cleanup means customer
+documents that should have been destroyed still exist, and putting an Admin
+between a support engineer and "try again" protects nothing. None of the three
+can cause a payout, which is the line this decision draws.
 
 ---
 

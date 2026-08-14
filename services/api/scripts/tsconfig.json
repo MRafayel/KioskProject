@@ -1,0 +1,19 @@
+{
+  // Operator tooling, checked but never built. The package's own tsconfig emits
+  // `dist/` from `src/` and must keep `rootDir` there, so a script that imports
+  // from `../src` cannot live in it — and a TypeScript file nothing typechecks
+  // is worse than a `.mjs` one, because it looks checked.
+  //
+  // Named `tsconfig.json` rather than something more descriptive so that
+  // typescript-eslint's project service finds it as the nearest config for the
+  // files in this directory. `pnpm --filter @printing-kiosk/api typecheck` runs
+  // it explicitly.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["**/*.ts"]
+}

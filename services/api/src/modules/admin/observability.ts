@@ -1526,8 +1526,19 @@ export class AdminObservabilityService {
     });
 
     const page = rows.slice(0, ADMIN_PAGE_SIZE);
+    // Named actors only. An admin event written before anybody was
+    // authenticated — a failed sign-in, a consumed recovery credential — carries
+    // `ANONYMOUS_ADMIN_ACTOR_ID` rather than an account, and `admin_users.id` is
+    // a UUID: asking for that row made PostgreSQL refuse the whole query, so a
+    // single failed sign-in on the page turned the audit log into a 500. Found
+    // by the Phase 6 benchmark, which was the first thing to read this table
+    // with real history in it rather than a suite's own rows.
     const adminActorIds = [
-      ...new Set(page.filter((row) => row.actorType === ADMIN_ACTOR_TYPE).map((row) => row.actorId))
+      ...new Set(
+        page
+          .filter((row) => row.actorType === ADMIN_ACTOR_TYPE && isUuid(row.actorId))
+          .map((row) => row.actorId)
+      )
     ];
     const names = new Map<string, string>();
     if (adminActorIds.length > 0) {
@@ -1843,6 +1854,20 @@ function scopedViaSessionFilter(
 ): { session?: { kioskId: KioskSelector } } {
   const filter = scopedKioskFilter(scope, requested);
   return filter.kioskId === undefined ? {} : { session: { kioskId: filter.kioskId } };
+}
+
+/**
+ * Whether an actor identifier names an account row.
+ *
+ * `audit_events.actor_id` is free text because it holds a kiosk id, a provider
+ * name or `anonymous` as readily as an account's UUID. Anything asking the
+ * accounts table about one has to check first, or PostgreSQL refuses the query
+ * rather than returning no rows.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value);
 }
 
 function scopeKey(scope: AdminReadScope): string {

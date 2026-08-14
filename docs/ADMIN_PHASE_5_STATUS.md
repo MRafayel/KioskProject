@@ -456,16 +456,29 @@ verify` reports two known development failures — the application role is a
 
 ## 7. What remains
 
+> **All four items below were answered in Phase 6.** Kept as written so the
+> phase reads as it was, with the outcomes noted. See
+> `docs/ADMIN_PHASE_6_STATUS.md`.
+
 **For the owner.**
 
 1. The four Technical Admin capabilities in §4.1. `refund.authorize` in
    particular.
+   — **Answered.** `refund.authorize` was removed from Technical Admin; the
+   other three were kept deliberately, with the reason recorded in
+   `ADMIN_PHASE_0.md` §23.6.
 2. Whether a second Admin account will ever exist. If so, whether publishing a
    tariff should require both — the machinery is already in place.
+   — **Answered: no, one Admin permanently.** The question is closed rather than
+   carried; `ADMIN_PHASE_0.md` §23.5.
 
 **For a later phase.**
 
 3. Phase 0 §22's sixth row: hardening. Authorization matrix review per endpoint,
    IDOR, CSRF, XSS, secret leakage, query performance, audit integrity.
+   — **Done in Phase 6.** All seven, gated on
+   `tests/integration/admin-security.test.ts`.
 4. The panel replacement the owner has signalled. The business logic to preserve
    is in §1.7.
+   — **Still open**, and Phase 6 adds one rule to that list: no read may be
+   gated on a capability that can change something.
