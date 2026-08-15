@@ -24,11 +24,18 @@ $ErrorActionPreference = 'Stop'
 
 $StateDirectory = Join-Path $env:ProgramData 'PrintingKiosk\device-host'
 $RenderDirectory = Join-Path $StateDirectory 'render'
+$DiagnosticDirectory = Join-Path $env:LOCALAPPDATA 'PrintingKiosk\device-host'
+$DiagnosticPath = Join-Path $DiagnosticDirectory 'diagnostics.jsonl'
+$DiagnosticArchivePath = Join-Path $DiagnosticDirectory 'diagnostics.previous.jsonl'
+$DiagnosticMaxBytes = 1MB
 $SupportedDriverName = 'Canon Generic Plus UFR II'
 $MaximumCopies = 10
 $MaximumSelectedPages = 200
 $RenderLongEdgePixels = 3508 # A4 at 300 DPI.
 $script:SubmissionTouched = $false
+$script:DiagnosticOperation = 'startup'
+$script:DiagnosticOperationId = $null
+$script:DiagnosticStage = 'startup'
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -296,6 +303,55 @@ function Write-Failure {
   exit 0
 }
 
+function Write-LocalDiagnostic {
+  param(
+    [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord] $ErrorRecord,
+    [string] $Stage = $script:DiagnosticStage
+  )
+
+  # Diagnostics are deliberately best-effort and local. A logging failure must
+  # never change the host's protocol answer or its submission ambiguity.
+  try {
+    if (-not (Test-Path $DiagnosticDirectory)) {
+      New-Item -ItemType Directory -Path $DiagnosticDirectory -Force | Out-Null
+    }
+    if (Test-Path $DiagnosticPath) {
+      $diagnosticFile = Get-Item -LiteralPath $DiagnosticPath
+      if ($diagnosticFile.Length -ge $DiagnosticMaxBytes) {
+        Move-Item -LiteralPath $DiagnosticPath -Destination $DiagnosticArchivePath -Force
+      }
+    }
+
+    $exceptions = @()
+    $current = $ErrorRecord.Exception
+    while ($null -ne $current) {
+      $message = ([string]$current.Message -replace '[\r\n]+', ' ').Trim()
+      if ($message.Length -gt 512) { $message = $message.Substring(0, 512) }
+      $exceptions += @{
+        type = $current.GetType().FullName
+        hresult = '0x{0}' -f $current.HResult.ToString('X8')
+        message = $message
+      }
+      $current = $current.InnerException
+    }
+
+    $record = [ordered]@{
+      timestamp = (Get-Date).ToUniversalTime().ToString('o')
+      operation = $script:DiagnosticOperation
+      operationId = $script:DiagnosticOperationId
+      stage = $Stage
+      submissionTouched = [bool]$script:SubmissionTouched
+      errorId = [string]$ErrorRecord.FullyQualifiedErrorId
+      category = [string]$ErrorRecord.CategoryInfo.Category
+      exceptions = $exceptions
+    }
+    Add-Content -LiteralPath $DiagnosticPath `
+      -Value (ConvertTo-Json $record -Depth 8 -Compress) -Encoding UTF8
+  } catch {
+    # The protocol and safety decision are more important than diagnostics.
+  }
+}
+
 function Get-QueueOrFail {
   param([string] $QueueName, [bool] $RequireCertifiedUsb = $true)
   if ([string]::IsNullOrWhiteSpace($QueueName)) {
@@ -391,14 +447,18 @@ function Get-SelectedPageNumbers {
 function Render-PdfSelection {
   param([string] $Path, $PageRanges, [string] $TargetDirectory, [int] $Position)
 
+  $script:DiagnosticStage = "submit.document.$Position.pdf-open"
   $fileOperation = [Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)
   $file = Complete-WinRtOperation -Operation $fileOperation -ResultType ([Windows.Storage.StorageFile])
+  $script:DiagnosticStage = "submit.document.$Position.pdf-load"
   $pdfOperation = [Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($file)
   $pdf = Complete-WinRtOperation -Operation $pdfOperation -ResultType ([Windows.Data.Pdf.PdfDocument])
+  $script:DiagnosticStage = "submit.document.$Position.page-selection"
   $pageNumbers = @(Get-SelectedPageNumbers -PageRanges $PageRanges -PageCount ([int]$pdf.PageCount))
   $paths = @()
 
   for ($index = 0; $index -lt $pageNumbers.Count; $index++) {
+    $script:DiagnosticStage = "submit.document.$Position.page.$index.open"
     $pageNumber = [int]$pageNumbers[$index]
     $page = $pdf.GetPage([uint32]($pageNumber - 1))
     $stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
@@ -417,14 +477,17 @@ function Render-PdfSelection {
       $options.DestinationWidth = [uint32]$renderWidth
       $options.DestinationHeight = [uint32]$renderHeight
 
+      $script:DiagnosticStage = "submit.document.$Position.page.$index.render"
       Complete-WinRtAction -Action ($page.RenderToStreamAsync($stream, $options))
       $stream.Seek(0)
+      $script:DiagnosticStage = "submit.document.$Position.page.$index.read"
       $reader = [Windows.Storage.Streams.DataReader]::new($stream.GetInputStreamAt(0))
       [void](Complete-WinRtOperation -Operation ($reader.LoadAsync([uint32]$stream.Size)) -ResultType ([uint32]))
       $bytes = New-Object byte[] ([int]$stream.Size)
       $reader.ReadBytes($bytes)
 
       $outputPath = Join-Path $TargetDirectory ("{0:D3}-{1:D4}.png" -f $Position, $index)
+      $script:DiagnosticStage = "submit.document.$Position.page.$index.write"
       [System.IO.File]::WriteAllBytes($outputPath, $bytes)
       $paths += $outputPath
     } finally {
@@ -514,13 +577,16 @@ function Invoke-Health {
 
 function Invoke-Submit {
   param($Request)
+  $script:DiagnosticStage = 'submit.queue'
   $printer = Get-QueueOrFail -QueueName $Request.queue
   if ((ConvertTo-QueueState -Printer $printer) -ne 'READY') {
     Write-Failure -Code 'PRINTER_OFFLINE' -Ambiguous $false
   }
+  $script:DiagnosticStage = 'submit.configuration'
   if (-not (Test-A4MonochromeConfiguration -Configuration (Get-QueueConfiguration $printer.Name))) {
     Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false
   }
+  $script:DiagnosticStage = 'submit.manifest'
   if ([string]$Request.media -ne 'iso_a4_210x297mm' -or [string]$Request.colorMode -ne 'monochrome') {
     Write-Failure -Code 'MANIFEST_INVALID' -Ambiguous $false
   }
@@ -528,6 +594,7 @@ function Invoke-Submit {
     Write-Failure -Code 'MANIFEST_INVALID' -Ambiguous $false
   }
 
+  $script:DiagnosticStage = 'submit.render-directory'
   $renderPath = Get-RenderPath -OperationId $Request.operationId
   if (Test-Path $renderPath) { Remove-Item -LiteralPath $renderPath -Recurse -Force }
   New-Item -ItemType Directory -Path $renderPath -Force | Out-Null
@@ -535,6 +602,8 @@ function Invoke-Submit {
   $prepared = @()
   try {
     foreach ($document in @($Request.documents)) {
+      $position = [int]$document.position
+      $script:DiagnosticStage = "submit.document.$position.validation"
       $copies = [int]$document.copies
       $sides = [string]$document.sides
       if ($copies -lt 1 -or $copies -gt $MaximumCopies -or
@@ -546,8 +615,9 @@ function Invoke-Submit {
         Write-Failure -Code 'ARTIFACT_UNAVAILABLE' -Ambiguous $false
       }
 
+      $script:DiagnosticStage = "submit.document.$position.render"
       $rendered = Render-PdfSelection -Path $document.path -PageRanges $document.pageRanges `
-        -TargetDirectory $renderPath -Position ([int]$document.position)
+        -TargetDirectory $renderPath -Position $position
       $isDuplex = $sides -eq 'two-sided-long-edge'
       $blankSeparators = if ($isDuplex -and $rendered.selectedPages % 2 -eq 1) { $copies - 1 } else { 0 }
       $expectedPages = ($rendered.selectedPages * $copies) + $blankSeparators
@@ -567,6 +637,7 @@ function Invoke-Submit {
       }
     }
 
+    $script:DiagnosticStage = 'submit.state.initialize'
     $state = [pscustomobject]@{
       operationId = $Request.operationId
       queue       = $printer.Name
@@ -578,7 +649,9 @@ function Invoke-Submit {
     $submitted = 0
     foreach ($item in $prepared) {
       $job = $null
+      $position = [int]$item.document.position
       try {
+        $script:DiagnosticStage = "submit.document.$position.start-doc"
         $job = [DriverRenderedPrintJob]::new(
           $printer.Name,
           [string]$item.document.jobName,
@@ -586,6 +659,7 @@ function Invoke-Submit {
         )
         $script:SubmissionTouched = $true
         $submitted++
+        $script:DiagnosticStage = "submit.document.$position.persist-job"
         $state.jobs += @{
           position       = [int]$item.document.position
           jobId          = $job.JobId
@@ -597,6 +671,7 @@ function Invoke-Submit {
         }
         Write-OperationState -OperationId $Request.operationId -State $state
 
+        $script:DiagnosticStage = "submit.document.$position.draw-pages"
         for ($copy = 0; $copy -lt $item.copies; $copy++) {
           foreach ($path in $item.paths) { $job.PrintImage($path) }
           if ($item.duplex -and $item.selectedPages % 2 -eq 1 -and $copy -lt $item.copies - 1) {
@@ -604,14 +679,17 @@ function Invoke-Submit {
             $job.PrintBlankPage()
           }
         }
+        $script:DiagnosticStage = "submit.document.$position.end-doc"
         $job.Complete()
       } catch {
+        Write-LocalDiagnostic -ErrorRecord $_
         Write-Failure -Code 'DEVICE_ERROR' -Ambiguous ($submitted -gt 0)
       } finally {
         if ($null -ne $job) { $job.Dispose() }
       }
     }
 
+    $script:DiagnosticStage = 'submit.observe'
     Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
       -QueueName $printer.Name -WaitForCompletion $true)
   } finally {
@@ -763,6 +841,14 @@ try {
   Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false
 }
 
+$operationProperty = $request.PSObject.Properties['op']
+if ($null -ne $operationProperty) { $script:DiagnosticOperation = [string]$operationProperty.Value }
+$operationIdProperty = $request.PSObject.Properties['operationId']
+if ($null -ne $operationIdProperty -and [string]$operationIdProperty.Value -match '^[0-9a-fA-F-]{36}$') {
+  $script:DiagnosticOperationId = ([string]$operationIdProperty.Value).ToLowerInvariant()
+}
+$script:DiagnosticStage = "$($script:DiagnosticOperation).dispatch"
+
 if ($request.protocol -ne 1) { Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false }
 
 try {
@@ -778,6 +864,7 @@ try {
     default        { Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false }
   }
 } catch {
+  Write-LocalDiagnostic -ErrorRecord $_
   Write-Failure -Code 'DEVICE_ERROR' -Ambiguous (
     $request.op -eq 'submit' -and $script:SubmissionTouched
   )

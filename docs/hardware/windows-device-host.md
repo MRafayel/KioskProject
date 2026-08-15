@@ -181,3 +181,27 @@ queue using `Canon Generic Plus UFR II`. It also refuses a queue whose current
 defaults are not A4 and monochrome. The exact queue name and USB port number are
 deployment data, not source-code constants, so another certified installation
 of the same printer may use `USB002` or a different operator-chosen queue name.
+
+### Local diagnostics
+
+Unexpected host exceptions remain `DEVICE_ERROR` on standard output; internal
+exception details never cross the device protocol or enter the control-plane
+ledger. The reference host writes a bounded JSON-lines diagnostic log for the
+Windows account running the agent instead:
+
+```text
+%LOCALAPPDATA%\PrintingKiosk\device-host\diagnostics.jsonl
+```
+
+Each entry contains the operation ID, the host stage, whether `StartDoc` had
+already succeeded, and a bounded exception chain. It does not contain the
+request, document bytes, or customer filenames. At 1 MiB the current file is
+rotated to `diagnostics.previous.jsonl`, so at most two diagnostic files are
+retained. Logging is best-effort and can never change the protocol response or
+the host's submission-confidence decision.
+
+Read the newest failures locally with:
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\PrintingKiosk\device-host\diagnostics.jsonl" -Tail 20
+```
