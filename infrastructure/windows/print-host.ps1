@@ -186,6 +186,12 @@ public sealed class DriverRenderedPrintJob : IDisposable
             using (Image image = Image.FromFile(path))
             using (Graphics graphics = Graphics.FromHdc(deviceContext))
             {
+                // HORZRES and VERTRES are device pixels. Printer Graphics
+                // defaults to display units (normally 1/100 inch), so make the
+                // drawing rectangle use the same units as the driver metrics.
+                graphics.PageUnit = GraphicsUnit.Pixel;
+                graphics.PageScale = 1.0f;
+
                 // The physical medium is always A4, but source pages may be
                 // portrait or landscape. Rotate when their orientations differ
                 // so the selected page uses the printable area automatically.

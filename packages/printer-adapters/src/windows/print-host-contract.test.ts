@@ -40,4 +40,9 @@ describe("Windows PowerShell print host contract", () => {
   it("does not leak WinRT action completion values into renderer output", () => {
     expect(hostSource).toContain("[void]$task.GetAwaiter().GetResult()");
   });
+
+  it("draws rendered pages in the printer metrics' pixel coordinate system", () => {
+    expect(hostSource).toContain("graphics.PageUnit = GraphicsUnit.Pixel");
+    expect(hostSource).toContain("graphics.PageScale = 1.0f");
+  });
 });
