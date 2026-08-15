@@ -286,7 +286,11 @@ function Complete-WinRtOperation {
 function Complete-WinRtAction {
   param($Action)
   $task = $script:AsTaskActionMethod.Invoke($null, @($Action))
-  $task.GetAwaiter().GetResult()
+  # PowerShell dispatches against the task's runtime Task<VoidTaskResult> type,
+  # so GetResult emits a value even though IAsyncAction is logically void. If
+  # that value escapes, Render-PdfSelection returns an array of completion
+  # values plus its result object and strict-mode property access fails.
+  [void]$task.GetAwaiter().GetResult()
 }
 
 function Write-Result {

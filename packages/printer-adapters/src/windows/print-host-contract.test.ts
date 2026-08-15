@@ -36,4 +36,8 @@ describe("Windows PowerShell print host contract", () => {
     expect(hostSource).toContain("submissionTouched = [bool]$script:SubmissionTouched");
     expect(hostSource).not.toContain("request = $Request");
   });
+
+  it("does not leak WinRT action completion values into renderer output", () => {
+    expect(hostSource).toContain("[void]$task.GetAwaiter().GetResult()");
+  });
 });
