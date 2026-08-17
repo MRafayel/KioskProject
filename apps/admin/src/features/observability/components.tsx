@@ -61,15 +61,18 @@ export function Panel({
 export function Table({
   columns,
   children,
-  caption
+  caption,
+  className
 }: {
   columns: readonly string[];
   children: ReactNode;
   caption?: string;
+  /** An extra class on the table, for a panel that restyles or stacks its own. */
+  className?: string;
 }) {
   return (
     <div className="table-scroll">
-      <table className="table">
+      <table className={className ? `table ${className}` : "table"}>
         {caption ? <caption>{caption}</caption> : null}
         <thead>
           <tr>
@@ -143,10 +146,47 @@ function Counter({ item }: { item: CounterItem }) {
   );
 }
 
-/** A state or code, drawn so an unusual one is visible at a glance. */
-export function StateBadge({ value, tone }: { value: string | null; tone?: Tone }) {
+/**
+ * A state or code, drawn so an unusual one is visible at a glance.
+ *
+ * `humanize` is opt-in rather than the default because these are the system's
+ * own state names, and on most panels reading them verbatim is the point — an
+ * operator quoting `DEAD_LETTER` into a search box wants the string that is
+ * actually in the database. Where a screen is built to be scanned rather than
+ * quoted, the readable form wins and the raw value survives on hover.
+ */
+export function StateBadge({
+  value,
+  tone,
+  humanize = false,
+  quiet = false
+}: {
+  value: string | null;
+  tone?: Tone;
+  humanize?: boolean;
+  /** Drops an ordinary state back to a plain label, so unusual ones carry the page. */
+  quiet?: boolean;
+}) {
   if (!value) return <span className="muted">—</span>;
-  return <span className={`badge badge--${tone ?? toneFor(value)}`}>{value}</span>;
+  const resolved = tone ?? toneFor(value);
+  const classes = `badge badge--${resolved}${quiet ? " badge--quiet" : ""}`;
+  return (
+    <span className={classes} title={humanize ? value : undefined}>
+      {humanize ? humanizeState(value) : value}
+    </span>
+  );
+}
+
+/**
+ * `RECOVERY_REQUIRED` → `Recovery required`.
+ *
+ * Presentation only, and reversible by eye: the underlying value is unchanged,
+ * is still what gets sent and compared, and is kept on the element's `title` so
+ * the exact string is one hover away.
+ */
+export function humanizeState(value: string): string {
+  const words = value.replace(/_/g, " ").toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 export type Tone = "neutral" | "good" | "warn" | "bad";

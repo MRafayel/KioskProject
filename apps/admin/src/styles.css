@@ -1,74 +1,91 @@
 /**
  * The control plane's visual language.
  *
- * A layered dark interface: near-black page, deep navy rail, navy surfaces and
- * a slightly lifted card on top of them. Depth comes from tone rather than from
- * shadow or gradient, so four flat fills separate the page, the frame, a
- * section and the thing you can click, and nothing needs a blur to read as
- * raised.
+ * A soft light interface with one dark edge: a warm off-white page, near-white
+ * cards, and a near-black rail down the left. Depth comes from a short tonal
+ * ladder plus a hairline border and the faintest shadow — enough to tell a card
+ * from the page it sits on, and never enough to look like it is floating.
  *
- * Blue is structural here — it is what a surface is made of — so it cannot also
- * mean "urgent". Urgency is carried by the status ramp below (red, amber,
- * green) and, in every case, by words as well. Colour never carries meaning on
- * its own: every badge, counter and worklist entry says in text what its colour
- * repeats, because an operations dashboard is read under bad lighting by people
- * who may not distinguish these hues.
+ * The rail is deliberately the only dark surface. It is the frame rather than
+ * the content, and keeping it black stops the eye treating navigation as one
+ * more card to read.
+ *
+ * Orange is the one accent and it is spent on "somebody has to do something" —
+ * marks, fills and the active section. It cannot be read as text on a light
+ * surface (`--accent` measures 2.3:1 there), so anything with a label uses
+ * `--accent-strong` for text or `--accent-deep` for a fill. Urgency beyond that
+ * is carried by the status ramp (red, amber, green) and, in every case, by
+ * words as well: colour never carries meaning on its own, because this screen
+ * is read under bad lighting by people who may not distinguish these hues.
  *
  * Contrast: every foreground token below clears WCAG 2.2 AA (4.5:1) against
- * every structural surface it is used on. The tightest pairing is `--ink-dim`
- * on `--card-lift` at 5.0:1, and white on `--accent-deep` at 5.2:1. Check any
- * replacement against `--card-lift` — it is the lightest surface in the set and
- * the one that fails first. `--accent` is 3.8:1 there, which is why it marks
- * things and never labels them.
+ * every structural surface it is used on. The tightest pairings are `--ink-dim`
+ * on `--card-lift` at 4.8:1 and `--warn` there at 5.0:1. Check any replacement
+ * against `--card-lift` — it is the darkest of the light surfaces and the one
+ * that fails first for dark text.
  */
 
 :root {
   /* Committing to one scheme keeps the tonal ladder honest rather than letting
      a second set of tokens drift out of step with it. */
-  color-scheme: dark;
+  color-scheme: light;
 
-  /* The four structural surfaces, darkest to lightest. Page, rail, section,
-     card. Anything interactive lifts one more step to `--card-lift`. */
-  --paper: #070a12;
-  --rail: #0a1120;
-  --card: #0f1826;
-  --card-soft: #16223a;
-  --card-lift: #1d2c48;
+  /* The light surfaces. The page is the darkest of them so that a card reads as
+     lifted off it; `--card-lift` goes the other way, one step *down* from a
+     card, because on a light interface an interactive surface is picked out by
+     being slightly recessed rather than slightly brighter. */
+  --paper: #f0f0f1;
+  --card: #fdfdfd;
+  --card-soft: #f6f6f7;
+  --card-lift: #edeef0;
 
-  --ink: #f3f6fb;
-  --ink-soft: #a3b2c9;
+  --ink: #1b1917;
+  --ink-soft: #5c5754;
   /* Metadata and timestamps. Quieter than `--ink-soft` and deliberately not
      used for anything a person has to read to do their job. Still held above
-     4.5:1 on `--card-lift`, which is the lightest surface it ever lands on —
+     4.5:1 on `--card-lift`, which is the darkest surface it ever lands on —
      "de-emphasised" is not licence to make it unreadable. */
-  --ink-dim: #8a9cba;
-  --line: #22304a;
-  --line-strong: #33456a;
+  --ink-dim: #6b6763;
+  --line: #e2e1e3;
+  --line-strong: #c9c7ca;
 
-  /* Structural blue: selection, focus, the active section. Never a status.
-     `--accent` is a decoration and a marker, and at 3.8:1 on `--card-lift` it
-     clears the 3:1 that a non-text indicator needs. It is *not* dark enough to
-     carry white text, so anything filled with a label uses `--accent-deep`
-     instead — that pairing measures 5.2:1. */
-  --accent: #3b82f6;
-  --accent-deep: #2563eb;
-  --accent-strong: #7fb0ff;
-  --accent-soft: #16233d;
+  /* The rail is the one dark surface, so it carries its own foregrounds. Using
+     `--ink` on it would put near-black text on near-black. */
+  --rail: #141312;
+  --rail-ink: #f7f5f3;
+  --rail-ink-soft: #a8a29c;
+  --rail-line: #2c2926;
+  --rail-lift: #262320;
 
-  /* The status ramp. Each pairs a foreground with the tinted surface it sits
-     on; both are checked against the card behind them. */
-  --critical: #f87171;
-  --critical-soft: #2a1417;
-  --warn: #fbbf24;
-  --warn-soft: #2a2110;
-  --good: #4ade80;
-  --good-soft: #10241a;
+  /* The accent, in three strengths for three jobs. `--accent` is the brand
+     orange and is only ever a fill or a mark — at 2.3:1 on a light surface it
+     is not text. `--accent-strong` is the same hue darkened until it can be
+     read (5.1:1). `--accent-deep` is dark enough to carry white (5.2:1). */
+  --accent: #f47f45;
+  --accent-strong: #b03e0d;
+  --accent-deep: #c2410c;
+  --accent-soft: #fdeee4;
 
-  /* Retained so the inverted-surface rules keep a name that means what it says
-     now that the interface itself is dark. */
-  --dark: #060911;
-  --dark-ink: #f3f6fb;
-  --dark-line: #1e2b45;
+  /* The status ramp. Each pairs a readable foreground with the pale tint it
+     sits on; both are checked against the card behind them. The tints are
+     deliberately faint — a status is announced by a word and a border, and a
+     saturated card for every state is how a dashboard becomes unreadable. */
+  --critical: #b42318;
+  --critical-soft: #fdecea;
+  --warn: #96560a;
+  --warn-soft: #fdf3e3;
+  --good: #157347;
+  --good-soft: #e8f5ee;
+
+  /* Retained for the few places that deliberately invert: the enrolment code
+     block, and anything else that wants to read as a plate rather than a card. */
+  --dark: #141312;
+  --dark-ink: #f7f5f3;
+
+  /* Barely there. Enough to separate a card from the page at a glance, not
+     enough to read as elevation. */
+  --shadow-card: 0 1px 2px rgb(27 25 23 / 5%);
+  --shadow-lift: 0 2px 6px rgb(27 25 23 / 8%);
 
   --radius-card: 16px;
   --radius-control: 10px;
@@ -106,9 +123,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* A control has to be visibly a control on a dark surface, where an outline
-   alone nearly disappears. So it lifts one tonal step above whatever it sits on
-   and takes the stronger border, and hovering lifts it one step further. */
+/* A control reads as a control by being slightly recessed from the card it sits
+   on and taking the stronger border; hovering recesses it one step further and
+   warms the border to the accent. */
 button {
   font: inherit;
   /* 0.5rem of padding on a 1.5 line-height puts this at ~40px tall, which is
@@ -136,9 +153,8 @@ button:disabled {
   cursor: not-allowed;
 }
 
-/* The focus ring is drawn in the structural blue and separated from the control
-   by an offset in the page colour, so it stays visible whether the control sits
-   on the rail, a panel or a lifted card. */
+/* The focus ring is separated from the control by an offset in the page colour,
+   so the ring never merges into the control's own border. */
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -146,6 +162,13 @@ textarea:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
+}
+
+/* The darkened accent is what makes the ring readable on a light card, and it
+   is nearly invisible on the black rail. Controls there take the bright orange
+   instead, which measures 7:1 against it. */
+.shell__rail button:focus-visible {
+  outline-color: var(--accent);
 }
 
 /* Text-shaped controls: the recovery disclosure, and identifiers inside a
@@ -329,8 +352,8 @@ code {
   gap: 0.15rem;
   padding: 1.4rem 0.75rem 1.1rem;
   background: var(--rail);
-  border-right: 1px solid var(--line);
-  color: var(--ink);
+  border-right: 1px solid var(--rail-line);
+  color: var(--rail-ink);
   position: sticky;
   top: 0;
   height: 100vh;
@@ -350,7 +373,7 @@ code {
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--rail-ink-soft);
 }
 
 /* Pushed to the foot of the rail by `margin-top: auto`, so it stays put
@@ -360,33 +383,34 @@ code {
 .shell__account {
   margin-top: auto;
   padding-top: 1rem;
-  border-top: 1px solid var(--dark-line);
+  border-top: 1px solid var(--rail-line);
 }
 
 .shell__account-name {
   margin: 0;
   padding: 0 0.7rem;
   font-weight: 600;
+  color: var(--rail-ink);
 }
 
 .shell__account-role {
   margin: 0 0 0.7rem;
   padding: 0 0.7rem;
   font-size: 0.8rem;
-  color: var(--ink-soft);
+  color: var(--rail-ink-soft);
 }
 
 .shell__signout {
   width: 100%;
-  border-color: var(--dark-line);
+  border-color: var(--rail-line);
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--rail-ink-soft);
 }
 
 .shell__signout:hover:not(:disabled) {
-  border-color: var(--line-strong);
-  background: var(--card-soft);
-  color: var(--ink);
+  border-color: var(--rail-ink-soft);
+  background: var(--rail-lift);
+  color: var(--rail-ink);
 }
 
 /* Square-ish rather than a pill: the active tab carries a marker bar down its
@@ -397,7 +421,7 @@ code {
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--rail-ink-soft);
   padding: 0.5rem 0.85rem;
   text-align: left;
   font-size: 0.92rem;
@@ -405,18 +429,20 @@ code {
 
 .nav-tab:hover:not(:disabled) {
   border-color: transparent;
-  background: var(--card-soft);
-  color: var(--ink);
+  background: var(--rail-lift);
+  color: var(--rail-ink);
 }
 
 /* The current section is marked three ways, because a fill alone is a colour
    and this has to survive being read by somebody who cannot see it: a lifted
    surface, a solid bar on the leading edge, and heavier text. `aria-current`
-   carries the same fact to a screen reader. */
+   carries the same fact to a screen reader.
+   The bar is the accent orange, which measures 7:1 on the rail — comfortably
+   past the 3:1 a non-text indicator needs. */
 .nav-tab.is-active {
-  background: var(--card-lift);
-  border-color: var(--line-strong);
-  color: var(--ink);
+  background: var(--rail-lift);
+  border-color: var(--rail-line);
+  color: var(--rail-ink);
   font-weight: 600;
   padding-left: 1.05rem;
 }
@@ -503,6 +529,7 @@ code {
   background: var(--card);
   padding: 1.25rem 1.4rem 1.4rem;
   min-width: 0;
+  box-shadow: var(--shadow-card);
 }
 
 .panel h2 {
@@ -787,6 +814,7 @@ code {
   border-radius: var(--radius-card);
   background: var(--card);
   min-width: 0;
+  box-shadow: var(--shadow-card);
 }
 
 .attention__item--critical {
@@ -907,11 +935,17 @@ code {
   border-radius: var(--radius-card);
   background: var(--card);
   min-width: 0;
+  box-shadow: var(--shadow-card);
 }
 
+/* On a light interface the lifted card cannot be "one step brighter" — there is
+   nowhere brighter to go. It takes the accent tint instead, which is honest
+   twice over: it stands out, and orange already means "somebody has to do
+   something", which is the only condition under which this class is applied. */
 .kpi--elevated {
-  background: var(--card-lift);
-  border-color: var(--line-strong);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: var(--shadow-lift);
 }
 
 .kpi__label {
@@ -1008,6 +1042,7 @@ code {
   border-radius: var(--radius-card);
   background: var(--card);
   min-width: 0;
+  box-shadow: var(--shadow-card);
 }
 
 .module__head {
@@ -1308,6 +1343,118 @@ code {
   box-shadow: inset 3px 0 0 var(--critical);
 }
 
+/* A row that merely ended early. Marked, because "canceled" is still worth
+   spotting, but in the quiet tone so it never competes with a row somebody has
+   to act on. */
+.table tbody tr.is-quiet-row td:first-child {
+  box-shadow: inset 3px 0 0 var(--line-strong);
+}
+
+/* ---------------------------------------------------------------------------
+   Sessions
+   ---------------------------------------------------------------------------
+   The table stays the investigation surface. What is added is hierarchy: a row
+   needing a person marks itself and names the reason, and the states that are
+   simply normal step back so they stop competing for the same attention.
+   ------------------------------------------------------------------------- */
+
+.sessions-table {
+  font-size: 0.87rem;
+}
+
+.sessions-table tbody tr {
+  cursor: pointer;
+}
+
+.sessions-table td {
+  padding-top: 0.6rem;
+  padding-bottom: 0.6rem;
+}
+
+/* The cross-state verdict, said on the row rather than left for somebody to
+   work out by comparing two cells eight columns apart. */
+.session-flags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+@media (max-width: 60rem) {
+  /* Below this the eight columns stop being a table anybody can read and become
+     a horizontal scroll nobody does. Each row becomes a card, and every cell
+     carries its column name from `data-label`, so the same information survives
+     without the header row it lost. */
+  .sessions-table,
+  .sessions-table thead,
+  .sessions-table tbody,
+  .sessions-table tr,
+  .sessions-table td {
+    display: block;
+  }
+
+  .sessions-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .sessions-table tbody tr {
+    margin-bottom: 0.7rem;
+    padding: 0.35rem 0.15rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
+    background: var(--card);
+  }
+
+  .sessions-table tbody tr.is-alarming-row {
+    border-color: color-mix(in srgb, var(--critical) 45%, transparent);
+    background: var(--critical-soft);
+  }
+
+  .sessions-table tbody tr.is-selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  /* The inset bar was drawn on the first cell of a table row and there is no
+     longer a row for it to sit on. */
+  .sessions-table tbody tr.is-alarming-row td:first-child,
+  .sessions-table tbody tr.is-quiet-row td:first-child {
+    box-shadow: none;
+  }
+
+  .sessions-table td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.3rem 0.7rem;
+    border-bottom: none;
+    white-space: normal;
+    text-align: right;
+  }
+
+  .sessions-table td::before {
+    content: attr(data-label);
+    flex: none;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    text-align: left;
+  }
+
+  .session-flags {
+    margin-left: 0;
+  }
+}
+
 /* Every badge is a tinted surface with a matching foreground rather than a
    solid fill, so the four tones sit at the same visual weight and none of them
    shouts louder than its meaning warrants. The word inside is the actual
@@ -1341,6 +1488,21 @@ code {
   background: var(--critical-soft);
   border-color: color-mix(in srgb, var(--critical) 40%, transparent);
   color: var(--critical);
+}
+
+/* An ordinary state on a screen full of states.
+   `Captured` and `Done` are true on almost every row, and drawing them with the
+   same weight as `Recovery required` is what makes a table of badges unreadable
+   — the eye learns that every cell is shouting and stops reading any of them.
+   These drop to plain text so the abnormal ones are the only things wearing a
+   pill. The word is unchanged, so nothing is hidden; it is only quiet. */
+.badge--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-soft);
+  font-weight: 400;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .muted {
