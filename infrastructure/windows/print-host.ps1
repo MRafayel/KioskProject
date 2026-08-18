@@ -18,6 +18,11 @@
   soon as StartDoc returns, before a page is drawn, so a process or service
   restart cannot turn a possibly printed operation into a safe retry.
 
+  The printing runtime — the PDF renderer and the inline printing type — is
+  loaded only by `submit`. It is the most expensive thing this script does and
+  nothing else needs it, so a health check or a status poll no longer pays for
+  a C# compilation it will not use.
+
 .PARAMETER AsLibrary
   Define the host's functions and return without touching a device, a queue or
   standard input. It exists so the decision this host makes about whether a
@@ -66,11 +71,44 @@ $script:SubmissionTouched = $false
 $script:DiagnosticOperation = 'startup'
 $script:DiagnosticOperationId = $null
 $script:DiagnosticStage = 'startup'
+$script:PrintingRuntimeReady = $false
 
-# Everything from here to the end of the WinRT reflection below is Windows-only
-# and costs a second of type compilation. A library load skips it so the pure
-# decision functions can be exercised on any platform that has PowerShell.
-if (-not $AsLibrary) {
+# Where the time goes. The host is a short-lived child process, so the only way
+# to find out whether a slow print was the renderer, the driver or PowerShell's
+# own start-up is to record it here — one process's stopwatch, reported once.
+$script:PhaseWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:PhaseMarks = [ordered]@{}
+# PowerShell has already been running for a while by the time the first line of
+# this script executes. That interval is invisible to the stopwatch above and is
+# paid on every single request, so it is measured separately.
+$script:ProcessStartMilliseconds = try {
+  [int]((Get-Date) - [System.Diagnostics.Process]::GetCurrentProcess().StartTime).TotalMilliseconds
+} catch {
+  -1
+}
+
+function Add-PhaseMark {
+  param([Parameter(Mandatory = $true)][string] $Name)
+  $script:PhaseMarks[$Name] = [int]$script:PhaseWatch.ElapsedMilliseconds
+}
+
+<#
+.SYNOPSIS
+  Load the printing runtime. Only `submit` needs it.
+
+.DESCRIPTION
+  `Add-Type -TypeDefinition` runs the C# compiler, and the WinRT loads pull in
+  the PDF renderer. Together they are the most expensive thing this script does,
+  and the transport starts a fresh process per request — so paying for them on a
+  health check or a status poll bought nothing and was charged every 30 seconds
+  by the heartbeat, and again on every poll of a job in progress.
+
+  Nothing outside printing needs either. Queue discovery, health, capabilities,
+  status, cancel and discard use the print spooler cmdlets and plain
+  System.Drawing, which is an assembly load rather than a compilation.
+#>
+function Initialize-PrintingRuntime {
+  if ($script:PrintingRuntimeReady) { return }
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -197,13 +235,6 @@ public sealed class DriverRenderedPrintJob : IDisposable
         active = true;
     }
 
-    public static bool SupportsDuplex(string queueName)
-    {
-        PrinterSettings printer = new PrinterSettings();
-        printer.PrinterName = queueName;
-        return printer.IsValid && printer.CanDuplex;
-    }
-
     public void PrintImage(string path)
     {
         EnsureActive();
@@ -317,7 +348,9 @@ $script:AsTaskActionMethod = [System.WindowsRuntimeSystemExtensions].GetMethods(
   } |
   Select-Object -First 1
 
-} # end platform initialisation
+  $script:PrintingRuntimeReady = $true
+  Add-PhaseMark -Name 'printingRuntimeReady'
+}
 
 function Complete-WinRtOperation {
   param($Operation, [Type] $ResultType)
@@ -648,6 +681,23 @@ function Get-QueueConfiguration {
   return Get-PrintConfiguration -PrinterName $QueueName -ErrorAction SilentlyContinue
 }
 
+<#
+.SYNOPSIS
+  Whether the driver reports a duplex unit.
+
+.DESCRIPTION
+  Deliberately plain System.Drawing rather than the printing type: loading an
+  assembly costs milliseconds, compiling one costs seconds, and this is asked on
+  every heartbeat. It reads the same driver capability the printing path does.
+#>
+function Test-QueueDuplex {
+  param([string] $QueueName)
+  Add-Type -AssemblyName System.Drawing
+  $settings = New-Object System.Drawing.Printing.PrinterSettings
+  $settings.PrinterName = $QueueName
+  return ([bool]$settings.IsValid -and [bool]$settings.CanDuplex)
+}
+
 function Test-A4MonochromeConfiguration {
   param($Configuration)
   return $null -ne $Configuration -and
@@ -689,7 +739,7 @@ function Invoke-Capabilities {
   $printer = Get-QueueOrFail -QueueName $QueueName
   $configuration = Get-QueueConfiguration -QueueName $printer.Name
   $a4Ready = Test-A4MonochromeConfiguration -Configuration $configuration
-  $duplex = [DriverRenderedPrintJob]::SupportsDuplex($printer.Name)
+  $duplex = Test-QueueDuplex -QueueName $printer.Name
   Write-Result -Result @{
     mediaSizes      = @(if ($a4Ready) { 'A4' })
     sides           = @(if ($duplex) { 'OneSided'; 'TwoSidedLongEdge' } else { 'OneSided' })
@@ -743,6 +793,7 @@ function Invoke-Submit {
   # The queue is resolved before anything else so the name handed to the spooler
   # below is one the operator certified, never one the request supplied.
   $printer = Get-QueueOrFail -QueueName $Request.queue
+  Add-PhaseMark -Name 'queueResolved'
 
   $script:DiagnosticStage = 'submit.idempotency'
   # A submission is identified by its operation, and an operation is printed at
@@ -793,6 +844,12 @@ function Invoke-Submit {
     Write-Failure -Code 'MANIFEST_INVALID' -Ambiguous $false
   }
 
+  # Nothing above this point needs the PDF renderer or the printing type, and
+  # everything above it can refuse the request. Paying for the compiler only
+  # here keeps a rejected submission as cheap as a health check.
+  $script:DiagnosticStage = 'submit.runtime'
+  Initialize-PrintingRuntime
+
   $script:DiagnosticStage = 'submit.render-directory'
   $renderPath = Get-RenderPath -OperationId $Request.operationId
   if (Test-Path $renderPath) { Remove-Item -LiteralPath $renderPath -Recurse -Force }
@@ -835,6 +892,7 @@ function Invoke-Submit {
         expectedSheets = $expectedSheets
       }
     }
+    Add-PhaseMark -Name 'rendered'
 
     $script:DiagnosticStage = 'submit.state.initialize'
     $state = [pscustomobject]@{
@@ -858,6 +916,7 @@ function Invoke-Submit {
         )
         $script:SubmissionTouched = $true
         $submitted++
+        Add-PhaseMark -Name "document.$position.startDoc"
         $script:DiagnosticStage = "submit.document.$position.persist-job"
         $entry = [pscustomobject]@{
           position       = [int]$item.document.position
@@ -897,6 +956,7 @@ function Invoke-Submit {
             queue = $printer.Name; jobId = $job.JobId; position = $position
           }
         }
+        Add-PhaseMark -Name "document.$position.jobObserved"
 
         $script:DiagnosticStage = "submit.document.$position.draw-pages"
         for ($copy = 0; $copy -lt $item.copies; $copy++) {
@@ -906,8 +966,10 @@ function Invoke-Submit {
             $job.PrintBlankPage()
           }
         }
+        Add-PhaseMark -Name "document.$position.drawn"
         $script:DiagnosticStage = "submit.document.$position.end-doc"
         $job.Complete()
+        Add-PhaseMark -Name "document.$position.endDoc"
         Write-LocalEvent -EventName 'submit.document-spooled' -Fields @{
           queue = $printer.Name; jobId = $job.JobId; position = $position
           expectedPages = [int]$item.expectedPages; expectedSheets = [int]$item.expectedSheets
@@ -1216,8 +1278,10 @@ function Get-OperationReport {
   # cleanly, however it looks from the queue afterwards.
   $cancelRequested = [bool](Get-Field -Source $state -Name 'cancelRequested' -Default $false)
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
+  $polls = 0
 
   while ($true) {
+    $polls++
     $stateChanged = $false
     $observations = @()
     foreach ($job in @($state.jobs)) {
@@ -1250,6 +1314,7 @@ function Get-OperationReport {
     }
 
     if ([int]$outcome.open -eq 0 -or -not $WaitForCompletion -or (Get-Date) -ge $deadline) {
+      Add-PhaseMark -Name 'reported'
       Write-LocalEvent -EventName 'operation.report' -Fields @{
         queue = $QueueName
         reportState = [string]$report.state
@@ -1257,6 +1322,13 @@ function Get-OperationReport {
         failureCode = [string]$report.failureCode
         sheetsProduced = $report.sheetsProduced
         openJobs = [int]$outcome.open
+        pollCount = $polls
+        # Milliseconds since this process reached its first line, plus how long
+        # PowerShell itself took to get there. One line per operation rather
+        # than one per poll: the phases are what a slow print is diagnosed from,
+        # and the polls in between say nothing.
+        processStartMs = $script:ProcessStartMilliseconds
+        phaseMs = $script:PhaseMarks
         jobs = @(@($observations) | ForEach-Object {
           @{
             jobId = $_.jobId; position = $_.position; present = [bool]$_.present
@@ -1289,6 +1361,7 @@ if ($null -ne $operationIdProperty -and [string]$operationIdProperty.Value -matc
   $script:DiagnosticOperationId = ([string]$operationIdProperty.Value).ToLowerInvariant()
 }
 $script:DiagnosticStage = "$($script:DiagnosticOperation).dispatch"
+Add-PhaseMark -Name 'requestRead'
 
 if ($request.protocol -ne 1) { Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false }
 

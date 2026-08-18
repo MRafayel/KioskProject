@@ -275,6 +275,22 @@ Describe 'Get-RequestedWaitSeconds' {
   }
 }
 
+Describe 'Printing runtime' {
+  It 'is not loaded by simply defining the host' {
+    # `Add-Type -TypeDefinition` runs the C# compiler and the WinRT loads pull in
+    # the PDF renderer. The transport starts a fresh process per request, so
+    # paying for them on a health check or a status poll bought nothing and was
+    # charged on every heartbeat.
+    $script:PrintingRuntimeReady | Should -BeFalse
+  }
+
+  It 'records where the time went' {
+    Add-PhaseMark -Name 'unit-test'
+    $script:PhaseMarks['unit-test'] | Should -BeOfType [int]
+    $script:PhaseMarks['unit-test'] | Should -BeGreaterOrEqual 0
+  }
+}
+
 Describe 'Get-Field and Set-Field' {
   It 'reads a default for a field an older state file does not carry' {
     # Under Set-StrictMode -Version Latest a missing property is a terminating
