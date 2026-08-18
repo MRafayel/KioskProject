@@ -56,6 +56,8 @@ export async function recordPrintJobEvent(
     failureCode?: string | null;
     warningCode?: string | null;
     detail?: Prisma.InputJsonValue;
+    /** The device's own account, in the bounded shape the agent contract validates. */
+    deviceDetail?: Prisma.InputJsonValue;
   }
 ): Promise<number> {
   const sequence = await nextPrintJobEventSequence(transaction, input.printJobId);
@@ -71,6 +73,7 @@ export async function recordPrintJobEvent(
       failureCode: input.failureCode ?? null,
       warningCode: input.warningCode ?? null,
       ...(input.detail === undefined ? {} : { detail: input.detail }),
+      ...(input.deviceDetail === undefined ? {} : { deviceDetail: input.deviceDetail }),
       createdAt: input.now
     }
   });
@@ -148,6 +151,13 @@ export interface ApplyPrintJobSettlementInput {
   newId: () => string;
   /** Retention grace for the documents this outcome finishes with. */
   retentionPolicy: RetentionPolicy;
+  /**
+   * What the device reported seeing. Recorded on the ledger entry, never read
+   * to decide anything: the settlement above is already final by the time this
+   * is written, and a device that lied about its own diagnostics must not be
+   * able to change an outcome or a refund by doing so.
+   */
+  deviceDiagnostics?: Prisma.InputJsonValue | undefined;
 }
 
 export interface PrintJobSettlementOutcome {
@@ -229,7 +239,8 @@ export async function applyPrintJobSettlement(
     detail: {
       sheetsProduced: input.sheetsProduced,
       ...(refundId ? { refundRecorded: true } : {})
-    }
+    },
+    ...(input.deviceDiagnostics === undefined ? {} : { deviceDetail: input.deviceDiagnostics })
   });
 
   const session = await transaction.printSession.findUnique({ where: { id: job.sessionId } });

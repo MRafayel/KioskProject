@@ -269,6 +269,45 @@ export const reportAgentCommandProgressBodySchema = z
   })
   .strict();
 
+/**
+ * What the device saw, kept alongside the outcome it reported.
+ *
+ * It is evidence, never a decision — the settlement reducer never reads it —
+ * and it is bounded on every axis because it crosses from a kiosk into the
+ * control plane. Deliberately restricted to operational facts: identifiers the
+ * operating system assigned, the raw status strings it produced, counts and
+ * elapsed milliseconds. A document's name, its contents and any local path are
+ * absent by construction, because the device side never receives them.
+ */
+export const deviceJobEvidenceSchema = z
+  .object({
+    position: z.number().int().min(0).max(999),
+    /** The operating system's own job identifier for this document. */
+    jobId: z.number().int().min(0).max(4_294_967_295),
+    present: z.boolean(),
+    observed: z.boolean(),
+    completed: z.boolean(),
+    faulted: z.boolean(),
+    /** The device's raw status word, so an unrecognised one is still legible. */
+    status: z.string().max(120).nullable(),
+    pagesPrinted: z.number().int().min(0).max(100_000),
+    expectedPages: z.number().int().min(0).max(100_000),
+    expectedSheets: z.number().int().min(0).max(100_000)
+  })
+  .strict();
+
+export const deviceDiagnosticsSchema = z
+  .object({
+    queueName: z.string().max(220).nullable().optional(),
+    /** Where the device refused, when it named a stage. */
+    stage: z.string().max(120).nullable().optional(),
+    processStartMs: z.number().int().min(0).max(3_600_000).nullable().optional(),
+    pollCount: z.number().int().min(0).max(100_000).nullable().optional(),
+    phaseMs: z.record(z.string().max(64), z.number().int().min(0).max(3_600_000)).optional(),
+    jobs: z.array(deviceJobEvidenceSchema).max(16).optional()
+  })
+  .strict();
+
 export const reportAgentCommandResultBodySchema = z
   .object({
     claimToken: z.string().uuid(),
@@ -276,7 +315,8 @@ export const reportAgentCommandResultBodySchema = z
     confidence: z.enum(["CONFIRMED", "UNCONFIRMED"]),
     failureCode: printFailureCodeSchema.nullable(),
     warningCode: printWarningCodeSchema.nullable(),
-    sheetsProduced: sheetCountSchema.nullable()
+    sheetsProduced: sheetCountSchema.nullable(),
+    deviceDiagnostics: deviceDiagnosticsSchema.nullable().optional()
   })
   .strict()
   .superRefine((result, context) => {

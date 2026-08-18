@@ -39,6 +39,12 @@ say is assumed to have left work at a printer, because the alternative is a
 duplicate print. Saying `false` is a claim, and it is only true when the host
 knows nothing was sent.
 
+A refusal may also carry `stage` — a fixed internal identifier naming where the
+host gave up, such as `submit.document.0.render`. It reaches the control plane
+with the failure, because `DEVICE_ERROR` alone cannot separate a busy queue from
+a document that would not render. It is never a path, a filename, or anything a
+customer supplied.
+
 Error codes: `PRINTER_OFFLINE`, `OPERATION_ID_INVALID`, `MANIFEST_INVALID`,
 `ARTIFACT_UNAVAILABLE`, `OUTPUT_WRITE_FAILED`, `SUBMISSION_UNCONFIRMED`,
 `QUEUE_NOT_FOUND`, `QUEUE_NOT_APPROVED`, `DEVICE_UNREACHABLE`, `DEVICE_ERROR`.
@@ -64,8 +70,24 @@ it.
 
 ### `describe`
 
-`{ deviceId, makeAndModel, driverName, firmware }`, each nullable. This is the
-record a printer/driver/firmware combination is certified against.
+`{ deviceId, makeAndModel, driverName, driverVersion, firmware }`, each
+nullable. This is the record a printer/driver combination is certified against,
+and the four identity fields are deliberately distinct:
+
+| Field | What it is |
+| --- | --- |
+| `makeAndModel` | The **physical printer**, from the device tree — e.g. `Canon LBP361/362` |
+| `driverName` | The installed driver — e.g. `Canon Generic Plus UFR II` |
+| `driverVersion` | That driver's version |
+| `firmware` | The device's own firmware, `null` on Windows GDI queues |
+
+The host previously reported the driver name as the make and model, and the
+driver version as the firmware. Both were wrong in the same direction: one
+driver serves most of a product line, so the certification record could not name
+the machine an operator actually certified.
+
+`makeAndModel` answers `null` when the device tree offers more than one present
+printer, because a certification record is worth nothing if it is a guess.
 
 ### `capabilities`
 
@@ -160,12 +182,49 @@ deadline.
 ```json
 {
   "state": "COMPLETED",
-  "confidence": "UNCONFIRMED",
+  "confidence": "CONFIRMED",
   "failureCode": null,
   "warningCode": null,
-  "sheetsProduced": 6
+  "sheetsProduced": 6,
+  "diagnostics": {
+    "queue": "Kiosk A4",
+    "pollCount": 1,
+    "processStartMs": 812,
+    "phaseMs": { "queueResolved": 40, "rendered": 900, "document.0.endDoc": 1500 },
+    "jobs": [
+      {
+        "position": 0,
+        "jobId": 20,
+        "present": false,
+        "observed": true,
+        "completed": true,
+        "faulted": false,
+        "status": "",
+        "pagesPrinted": 0,
+        "expectedPages": 6,
+        "expectedSheets": 6
+      }
+    ]
+  }
 }
 ```
+
+`diagnostics` is **evidence, never a decision.** The state, the confidence and
+the sheet count above are the whole outcome; nothing downstream reads this to
+settle a job or a refund, so a device cannot move its own result by what it
+claims to have seen. It exists so the control plane — not a file on the kiosk —
+holds the spooler job identifier, the evidence a completion was confirmed from,
+and where the host spent its time.
+
+The agent re-types and caps every field before forwarding it (16 jobs, 40 phase
+marks, bounded strings), and the control plane stores it in
+`print_job_events.device_detail`: a column granted to the operator role on its
+own terms, rather than in the free-form `detail` that no reader may see.
+
+Everything in it is operational — identifiers the operating system assigned, the
+raw status words it produced, counts and elapsed milliseconds. No path, no
+filename, and nothing a customer supplied; the device side never receives any of
+those.
 
 `state` is one of `NOT_SUBMITTED`, `SUBMITTED`, `PRINTING`, `COMPLETED`,
 `FAILED`, `CANCELED`, `UNKNOWN`. A report the agent cannot read a state from is
@@ -300,17 +359,24 @@ never contains the request, document bytes, page content, customer filenames or
 spool paths.
 
 ```text
-%LOCALAPPDATA%\PrintingKiosk\device-host\diagnostics.jsonl
+%ProgramData%\PrintingKiosk\device-host\diagnostics\diagnostics.jsonl
 ```
 
-At 1 MiB the current file is rotated to `diagnostics.previous.jsonl`, so at most
-two diagnostic files are retained. Logging is best-effort and can never change
-the protocol response or the host's submission-confidence decision.
+It lives under the state tree, not in an account's profile, so the installer's
+restrictive ACL covers it: a kiosk is a machine strangers stand in front of.
+
+**It is a fallback, not the record.** An operation's own evidence now travels to
+the control plane inside the protocol response (below), so this file exists for
+what could not be reported — a host killed mid-request, or a machine that lost
+power. It is bounded on both axes: 256 KiB rotated once to
+`diagnostics.previous.jsonl`, and nothing older than 48 hours survives the
+retention sweep. Logging is best-effort and can never change the protocol
+response or the host's submission-confidence decision.
 
 Read the newest entries locally with:
 
 ```powershell
-Get-Content "$env:LOCALAPPDATA\PrintingKiosk\device-host\diagnostics.jsonl" -Tail 20
+Get-Content "$env:ProgramData\PrintingKiosk\device-host\diagnostics\diagnostics.jsonl" -Tail 20
 ```
 
 Follow one operation across the host and the agent by its `operationId`, and

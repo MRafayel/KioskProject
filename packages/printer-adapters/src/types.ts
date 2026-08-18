@@ -137,6 +137,43 @@ export interface PrintOperationStatus {
   warningCode: PrintWarningCode | null;
   /** Physical sheets the device believes it produced, when it can say. */
   sheetsProduced: number | null;
+  /**
+   * What the device saw, for the record the control plane keeps.
+   *
+   * It never changes the outcome — the state, the confidence and the sheet
+   * count above are the whole decision. This is the evidence behind it, so an
+   * operator can tell a printer that jammed from one that was never asked,
+   * without standing in front of the kiosk.
+   */
+  deviceDiagnostics?: PrintDeviceDiagnostics | null;
+}
+
+/** Operational detail only: identifiers, raw device status, counts, timings. */
+export interface PrintDeviceDiagnostics {
+  queueName?: string | null;
+  /** Where the device refused, when it named a stage. */
+  stage?: string | null;
+  /** How long the device host process took to reach its first instruction. */
+  processStartMs?: number | null;
+  /** How many times the device was polled before it answered. */
+  pollCount?: number | null;
+  /** Elapsed milliseconds at each device-side phase. */
+  phaseMs?: Record<string, number>;
+  jobs?: PrintDeviceJobEvidence[];
+}
+
+export interface PrintDeviceJobEvidence {
+  position: number;
+  /** The operating system's own job identifier for this document. */
+  jobId: number;
+  present: boolean;
+  observed: boolean;
+  completed: boolean;
+  faulted: boolean;
+  status: string | null;
+  pagesPrinted: number;
+  expectedPages: number;
+  expectedSheets: number;
 }
 
 export type PrinterHealthState = "READY" | "WARNING" | "OFFLINE";
@@ -198,8 +235,11 @@ export interface PrinterBinding {
   queueName: string | null;
   /** A stable device identity, so a swapped printer is detectable. */
   deviceId: string | null;
+  /** The physical printer, not the driver that happens to drive it. */
   makeAndModel: string | null;
   driverName: string | null;
+  /** The installed driver's version, which used to be reported as firmware. */
+  driverVersion: string | null;
   firmware: string | null;
 }
 
@@ -276,7 +316,14 @@ export class PrinterAdapterError extends Error {
      * Whether the device may already have started printing. A caller must not
      * resubmit an operation whose submission is ambiguous.
      */
-    public readonly submissionAmbiguous = false
+    public readonly submissionAmbiguous = false,
+    /**
+     * Where the device refused, when it said. A fixed identifier from the
+     * device side — never a path or anything a customer supplied — kept so a
+     * generic device error can still be told apart from a queue that was busy
+     * or a document that would not render.
+     */
+    public readonly deviceStage: string | null = null
   ) {
     super(code);
     this.name = "PrinterAdapterError";

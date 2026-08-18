@@ -693,6 +693,7 @@ describe("IppPrinterAdapter device reporting", () => {
 
     expect(binding).toEqual({
       adapter: "IPP",
+      driverVersion: null,
       queueName: "Kiosk A4",
       deviceId: "urn:uuid:1f2a",
       makeAndModel: "Kiosk Laser 400",

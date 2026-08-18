@@ -106,9 +106,19 @@ describe("Windows print host prohibitions", () => {
 
   it("never writes request payloads or document paths to the diagnostic log", () => {
     expect(hostSource).toContain("diagnostics.jsonl");
-    expect(hostSource).toContain("$DiagnosticMaxBytes = 1MB");
     expect(hostSource).not.toContain("request = $Request");
     expect(hostSource).not.toContain("path = $document.path");
+  });
+
+  it("keeps the local diagnostic footprint bounded and off the user profile", () => {
+    // A public kiosk is a machine strangers stand in front of. The operation's
+    // own evidence now reaches the control plane in the protocol response, so
+    // what stays here is a small fallback under the installer's locked-down
+    // state tree rather than an unbounded log in an account's profile.
+    expect(hostSource).toContain("$DiagnosticMaxBytes = 256KB");
+    expect(hostSource).toContain("$DiagnosticMaxAgeHours");
+    expect(hostSource).toContain("$DiagnosticDirectory = Join-Path $StateDirectory 'diagnostics'");
+    expect(hostSource).not.toContain("$env:LOCALAPPDATA");
   });
 
   it("keeps the driver's own units when drawing a rendered page", () => {

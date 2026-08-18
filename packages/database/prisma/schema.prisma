@@ -92,7 +92,10 @@ model Printer {
   driverName     String?   @map("driver_name") @db.VarChar(400)
   portName       String?   @map("port_name") @db.VarChar(400)
   deviceId       String?   @map("device_id") @db.VarChar(400)
+  /// The physical printer, not the driver that happens to drive it.
   makeAndModel   String?   @map("make_and_model") @db.VarChar(400)
+  /// The installed driver's version, which used to be stored as firmware.
+  driverVersion  String?   @map("driver_version") @db.VarChar(400)
   firmware       String?   @db.VarChar(400)
   health         String    @default("OFFLINE") @db.VarChar(16)
   warningCode    String?   @map("warning_code") @db.VarChar(32)
@@ -671,6 +674,10 @@ model PrintJobEvent {
   failureCode String?  @map("failure_code") @db.VarChar(48)
   warningCode String?  @map("warning_code") @db.VarChar(32)
   detail      Json?
+  /// What the device reported seeing. Separate from `detail` because that is
+  /// free-form and ungranted: this holds only the bounded operational shape the
+  /// agent contract validates, so the control plane can read it.
+  deviceDetail Json?   @map("device_detail")
   createdAt   DateTime @default(now()) @map("created_at")
   printJob    PrintJob @relation(fields: [printJobId], references: [id], onDelete: Cascade)
 

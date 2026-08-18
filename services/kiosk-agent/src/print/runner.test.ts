@@ -466,6 +466,79 @@ function completed(): PrintOperationStatus {
   };
 }
 
+describe("PrintCommandRunner device evidence", () => {
+  it("reports what the device saw alongside the outcome", async () => {
+    // The spooler's job identifier and the confirmation evidence used to exist
+    // only in a file on the kiosk, so an operator could not explain an outcome
+    // without physically visiting the machine.
+    const transport = buildTransport([buildCommand()]);
+    const adapter = stubAdapter(() => ({
+      operationId,
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      failureCode: null,
+      warningCode: null,
+      sheetsProduced: 2,
+      deviceDiagnostics: {
+        queueName: "Kiosk A4",
+        pollCount: 1,
+        processStartMs: 800,
+        phaseMs: { rendered: 900 },
+        jobs: [
+          {
+            position: 0,
+            jobId: 20,
+            present: false,
+            observed: true,
+            completed: true,
+            faulted: false,
+            status: null,
+            pagesPrinted: 0,
+            expectedPages: 2,
+            expectedSheets: 2
+          }
+        ]
+      }
+    }));
+
+    await buildRunner(adapter, transport.fetch as typeof fetch).runOnce();
+
+    const reported = transport.results()[0]?.body as Record<string, unknown>;
+    expect(reported.state).toBe("COMPLETED");
+    const diagnostics = reported.deviceDiagnostics as Record<string, unknown>;
+    expect(diagnostics).toMatchObject({ queueName: "Kiosk A4", processStartMs: 800 });
+    expect((diagnostics.jobs as { jobId: number }[])[0]?.jobId).toBe(20);
+  });
+
+  it("reports where a definite refusal happened", async () => {
+    // A refusal that never reached the spooler still owes an operator the step
+    // that produced it: the failure code alone cannot separate a busy queue
+    // from a document that would not render.
+    const transport = buildTransport([buildCommand()]);
+    const adapter = stubAdapter(() => {
+      throw new PrinterAdapterError("DEVICE_ERROR", false, "submit.document.0.render");
+    });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch).runOnce();
+
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "NOT_SUBMITTED",
+      confidence: "CONFIRMED",
+      failureCode: "DEVICE_ERROR",
+      deviceDiagnostics: { stage: "submit.document.0.render" }
+    });
+  });
+
+  it("omits the field entirely when the device said nothing", async () => {
+    const transport = buildTransport([buildCommand()]);
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch).runOnce();
+
+    expect(transport.results()[0]?.body).not.toHaveProperty("deviceDiagnostics");
+  });
+});
+
 describe("PrintCommandRunner while the device holds the work", () => {
   it("renews the lease for as long as the device is printing", async () => {
     // A print slower than one lease used to be reclaimed mid-flight: the paper
@@ -637,6 +710,7 @@ function stubAdapter(
         deviceId: null,
         makeAndModel: null,
         driverName: null,
+        driverVersion: null,
         firmware: null
       }),
     getHealth: () => Promise.resolve({ state: "READY", warningCode: null }),

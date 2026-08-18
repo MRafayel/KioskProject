@@ -106,6 +106,7 @@ export class MockPrinterAdapter implements PrinterAdapter, PrinterQueueDiscovery
       deviceId: "mock-printer",
       makeAndModel: "Printing Kiosk Mock Printer",
       driverName: "Mock Printer Driver",
+      driverVersion: "0.0.0",
       firmware: "0.0.0"
     });
   }

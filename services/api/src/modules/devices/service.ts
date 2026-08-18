@@ -361,6 +361,7 @@ export class DeviceRegistryService {
       portName: discovered?.portName ?? null,
       deviceId: input.body.deviceId,
       makeAndModel: input.body.makeAndModel,
+      driverVersion: input.body.driverVersion ?? null,
       firmware: input.body.firmware,
       health: input.body.health,
       warningCode: input.body.warningCode,

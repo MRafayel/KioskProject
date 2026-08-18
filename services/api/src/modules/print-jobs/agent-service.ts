@@ -183,7 +183,13 @@ export class AgentCommandService {
           requestId: input.requestId,
           now,
           newId: () => this.options.random.uuid(now),
-          retentionPolicy: this.options.retentionPolicy
+          retentionPolicy: this.options.retentionPolicy,
+          // Recorded after the settlement above has already been decided. The
+          // contract bounds every field, and the reducer never reads it, so a
+          // device cannot move its own outcome by what it claims to have seen.
+          ...(input.body.deviceDiagnostics
+            ? { deviceDiagnostics: input.body.deviceDiagnostics }
+            : {})
         });
 
         return this.acknowledge(transaction, command.printJobId, outcome.applied);

@@ -149,8 +149,10 @@ export const reportPrinterStateBodySchema = z
     queueName: printerQueueNameSchema.nullable(),
     approval: printerApprovalStateSchema,
     deviceId: deviceTextSchema.nullable(),
+    /** The physical printer, not the driver that happens to drive it. */
     makeAndModel: deviceTextSchema.nullable(),
     driverName: deviceTextSchema.nullable(),
+    driverVersion: deviceTextSchema.nullable().optional(),
     firmware: deviceTextSchema.nullable(),
     health: printerHealthStateSchema,
     warningCode: z.enum(["TONER_LOW", "PAPER_LOW", "OUTPUT_TRAY_FULL"]).nullable(),

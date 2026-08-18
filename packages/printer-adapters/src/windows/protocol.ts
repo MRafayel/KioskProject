@@ -7,6 +7,8 @@ import {
   type PrintOperationState,
   type PrintResultConfidence,
   type PrinterHealth,
+  type PrintDeviceDiagnostics,
+  type PrintDeviceJobEvidence,
   type PrintWarningCode
 } from "../types.js";
 import type { DeviceCapabilityDeclaration } from "../capabilities.js";
@@ -82,12 +84,14 @@ export interface DeviceHostOperationReport {
   failureCode: PrintFailureCode | null;
   warningCode: PrintWarningCode | null;
   sheetsProduced: number | null;
+  diagnostics: PrintDeviceDiagnostics | null;
 }
 
 export interface DeviceHostBinding {
   deviceId: string | null;
   makeAndModel: string | null;
   driverName: string | null;
+  driverVersion: string | null;
   firmware: string | null;
 }
 
@@ -107,7 +111,10 @@ export function readHostResult(value: unknown): unknown {
   const error = asRecord(response.error);
   const code = typeof error.code === "string" ? error.code : "DEVICE_ERROR";
   const ambiguous = error.ambiguous === false ? false : true;
-  throw new PrinterAdapterError(hostErrorCode(code), ambiguous);
+  // The stage the host refused at. A fixed internal identifier, kept because a
+  // bare DEVICE_ERROR says nothing about whether a submission failed at the
+  // queue, the renderer or the driver.
+  throw new PrinterAdapterError(hostErrorCode(code), ambiguous, boundedString(error.stage));
 }
 
 const HOST_ERROR_CODES = new Set<PrinterAdapterErrorCode>([
@@ -222,7 +229,61 @@ export function readHostBinding(value: unknown): DeviceHostBinding {
     deviceId: boundedString(binding.deviceId),
     makeAndModel: boundedString(binding.makeAndModel),
     driverName: boundedString(binding.driverName),
+    driverVersion: boundedString(binding.driverVersion),
     firmware: boundedString(binding.firmware)
+  };
+}
+
+/**
+ * A host is a separate program with its own version and its own bugs, so
+ * nothing it reports here is taken on trust: every field is re-typed and every
+ * collection is capped before it can reach the control plane.
+ */
+const MAX_DIAGNOSTIC_JOBS = 16;
+const MAX_DIAGNOSTIC_PHASES = 40;
+const MAX_PHASE_NAME_LENGTH = 64;
+
+export function readDiagnostics(value: unknown): PrintDeviceDiagnostics | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const diagnostics = value as Record<string, unknown>;
+
+  const phaseMs: Record<string, number> = {};
+  const phases = diagnostics.phaseMs;
+  if (phases && typeof phases === "object" && !Array.isArray(phases)) {
+    for (const [name, elapsed] of Object.entries(phases).slice(0, MAX_DIAGNOSTIC_PHASES)) {
+      if (typeof elapsed === "number" && Number.isSafeInteger(elapsed) && elapsed >= 0) {
+        phaseMs[name.slice(0, MAX_PHASE_NAME_LENGTH)] = elapsed;
+      }
+    }
+  }
+
+  const jobs: PrintDeviceJobEvidence[] = [];
+  if (Array.isArray(diagnostics.jobs)) {
+    for (const entry of diagnostics.jobs.slice(0, MAX_DIAGNOSTIC_JOBS)) {
+      const job = asRecord(entry);
+      jobs.push({
+        position: boundedCount(job.position) ?? 0,
+        jobId: boundedCount(job.jobId) ?? 0,
+        present: job.present === true,
+        observed: job.observed === true,
+        completed: job.completed === true,
+        faulted: job.faulted === true,
+        // The raw Windows status, verbatim, so one nobody has seen is legible.
+        status: boundedString(job.status),
+        pagesPrinted: boundedCount(job.pagesPrinted) ?? 0,
+        expectedPages: boundedCount(job.expectedPages) ?? 0,
+        expectedSheets: boundedCount(job.expectedSheets) ?? 0
+      });
+    }
+  }
+
+  return {
+    queueName: boundedString(diagnostics.queue),
+    pollCount: boundedCount(diagnostics.pollCount),
+    processStartMs: boundedCount(diagnostics.processStartMs),
+    phaseMs,
+    jobs,
+    stage: boundedString(diagnostics.stage)
   };
 }
 
@@ -253,7 +314,8 @@ export function readOperationReport(value: unknown): DeviceHostOperationReport {
     failureCode,
     warningCode,
     sheetsProduced:
-      typeof sheets === "number" && Number.isSafeInteger(sheets) && sheets >= 0 ? sheets : null
+      typeof sheets === "number" && Number.isSafeInteger(sheets) && sheets >= 0 ? sheets : null,
+    diagnostics: readDiagnostics(report.diagnostics)
   };
 }
 
@@ -272,6 +334,11 @@ function boundedString(value: unknown): string | null {
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
   return trimmed.slice(0, MAX_FIELD_LENGTH);
+}
+
+/** A count from the host. Negative or nonsensical values become unknown. */
+function boundedCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function stringList(value: unknown): string[] {

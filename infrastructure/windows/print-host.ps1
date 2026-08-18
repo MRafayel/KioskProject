@@ -43,15 +43,22 @@ $ErrorActionPreference = 'Stop'
 # a machine that has PowerShell but not Windows, which is what lets the decision
 # tests run somewhere other than the kiosk itself.
 $StateRoot = if ($env:ProgramData) { $env:ProgramData } else { [System.IO.Path]::GetTempPath() }
-$DiagnosticRoot =
-  if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.IO.Path]::GetTempPath() }
 
 $StateDirectory = Join-Path $StateRoot 'PrintingKiosk\device-host'
 $RenderDirectory = Join-Path $StateDirectory 'render'
-$DiagnosticDirectory = Join-Path $DiagnosticRoot 'PrintingKiosk\device-host'
+# Under the state tree rather than the account's local profile. The installer
+# locks that tree down to the service account and administrators; a kiosk is a
+# machine strangers stand in front of, and a user-profile path is not a place to
+# leave an operational record of what the device did.
+$DiagnosticDirectory = Join-Path $StateDirectory 'diagnostics'
 $DiagnosticPath = Join-Path $DiagnosticDirectory 'diagnostics.jsonl'
 $DiagnosticArchivePath = Join-Path $DiagnosticDirectory 'diagnostics.previous.jsonl'
-$DiagnosticMaxBytes = 1MB
+# Small on purpose. The operation's own evidence now travels to the control
+# plane inside the protocol response, so this file is only a fallback for what
+# could not be reported — a host killed mid-request, or a machine that lost
+# power. Two files of this size is the whole local footprint.
+$DiagnosticMaxBytes = 256KB
+$DiagnosticMaxAgeHours = 48
 $SupportedDriverName = 'Canon Generic Plus UFR II'
 $MaximumCopies = 10
 $MaximumSelectedPages = 200
@@ -379,7 +386,14 @@ function Write-Failure {
     [Parameter(Mandatory = $true)][string] $Code,
     [bool] $Ambiguous = $true
   )
-  Write-Output (ConvertTo-Json @{ ok = $false; error = @{ code = $Code; ambiguous = $Ambiguous } } -Compress)
+  # The stage says where in the host the refusal happened. It is a fixed
+  # internal identifier — never a path, a filename or anything a customer
+  # supplied — and it is what turns a bare DEVICE_ERROR in the control plane
+  # into something an operator can act on without opening the kiosk.
+  Write-Output (ConvertTo-Json @{
+    ok = $false
+    error = @{ code = $Code; ambiguous = $Ambiguous; stage = $script:DiagnosticStage }
+  } -Compress)
   exit 0
 }
 
@@ -722,15 +736,52 @@ function Invoke-ListQueues {
   Write-Result -Result $queues
 }
 
+<#
+.SYNOPSIS
+  The model of the printer that is physically attached, if it can be known.
+
+.DESCRIPTION
+  A driver name is not a printer. `Canon Generic Plus UFR II` drives most of a
+  product line, so recording it as the make and model left the certification
+  record unable to say which machine was certified.
+
+  Windows does not hand a GDI print queue its device's model, so this asks the
+  device tree instead. The kiosk profile is a single local USB printer, so one
+  present printer device is unambiguous. More than one, or none, answers null —
+  a certification record is worth nothing if it is a guess.
+#>
+function Get-PhysicalPrinterModel {
+  try {
+    $devices = @(
+      Get-PnpDevice -Class 'Printer' -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.Status -eq 'OK' -and -not [string]::IsNullOrWhiteSpace([string]$_.FriendlyName)
+        }
+    )
+    if ($devices.Count -eq 1) { return [string]$devices[0].FriendlyName }
+    Write-LocalEvent -EventName 'describe.model-ambiguous' -Level 'warn' -Fields @{
+      candidates = $devices.Count
+      friendlyNames = @($devices | ForEach-Object { [string]$_.FriendlyName })
+    }
+  } catch {
+    Write-LocalDiagnostic -ErrorRecord $_
+  }
+  return $null
+}
+
 function Invoke-Describe {
   param([string] $QueueName)
   $printer = Get-QueueOrFail -QueueName $QueueName
   $driver = Get-PrinterDriver -Name $printer.DriverName -ErrorAction SilentlyContinue
   Write-Result -Result @{
-    deviceId     = $printer.PortName
-    makeAndModel = $printer.DriverName
-    driverName   = $printer.DriverName
-    firmware     = if ($null -ne $driver) { [string]$driver.DriverVersion } else { $null }
+    deviceId      = $printer.PortName
+    makeAndModel  = Get-PhysicalPrinterModel
+    driverName    = $printer.DriverName
+    driverVersion = if ($null -ne $driver) { [string]$driver.DriverVersion } else { $null }
+    # Windows does not expose device firmware for a GDI USB queue. It was
+    # previously filled with the driver version, which made the two
+    # indistinguishable in the certification record.
+    firmware      = $null
   }
 }
 
@@ -1074,6 +1125,21 @@ function Invoke-Discard {
       }
     }
   }
+
+  # Diagnostics keep their own, longer age than an operation's output: they are
+  # the fallback for an outcome that never reached the control plane, and that
+  # is worth a couple of days. Bounded on both axes — two files of
+  # $DiagnosticMaxBytes, none older than this — so an unattended kiosk cannot
+  # accumulate a record of what it printed.
+  $diagnosticCutoff = (Get-Date).ToUniversalTime().AddHours(-$DiagnosticMaxAgeHours)
+  foreach ($path in @($DiagnosticPath, $DiagnosticArchivePath)) {
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $file = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -ne $file -and $file.LastWriteTimeUtc -lt $diagnosticCutoff) {
+      Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   Write-Result -Result @{ discarded = $discarded }
 }
 
@@ -1305,38 +1371,51 @@ function Get-OperationReport {
     if ($stateChanged) { Write-OperationState -OperationId $OperationId -State $state }
 
     $outcome = Resolve-OperationOutcome -Observations $observations -CancelRequested $cancelRequested
+    # The evidence the decision was made from, and where the time went, travel
+    # back with the answer. That is what lets the control plane explain an
+    # outcome without anybody opening the kiosk — and it is why the local file
+    # can stay small enough to be only a fallback.
+    $jobEvidence = @(@($observations) | ForEach-Object {
+      @{
+        position = [int]$_.position
+        jobId = [int]$_.jobId
+        present = [bool]$_.present
+        observed = [bool]$_.observed
+        completed = [bool]$_.completed
+        faulted = [bool]$_.faulted
+        status = [string]$_.status
+        pagesPrinted = [int]$_.pagesPrinted
+        expectedPages = [int]$_.expectedPages
+        expectedSheets = [int]$_.expectedSheets
+      }
+    })
     $report = @{
       state = $outcome.state
       confidence = $outcome.confidence
       failureCode = $outcome.failureCode
       warningCode = $outcome.warningCode
       sheetsProduced = $outcome.sheetsProduced
+      diagnostics = @{
+        queue = $QueueName
+        pollCount = $polls
+        processStartMs = $script:ProcessStartMilliseconds
+        phaseMs = $script:PhaseMarks
+        jobs = $jobEvidence
+      }
     }
 
     if ([int]$outcome.open -eq 0 -or -not $WaitForCompletion -or (Get-Date) -ge $deadline) {
       Add-PhaseMark -Name 'reported'
+      # One line per operation, never one per poll. The same evidence the
+      # response carries is written locally as well, so an answer the agent
+      # never received is still recoverable from the machine.
       Write-LocalEvent -EventName 'operation.report' -Fields @{
-        queue = $QueueName
         reportState = [string]$report.state
         confidence = [string]$report.confidence
         failureCode = [string]$report.failureCode
         sheetsProduced = $report.sheetsProduced
         openJobs = [int]$outcome.open
-        pollCount = $polls
-        # Milliseconds since this process reached its first line, plus how long
-        # PowerShell itself took to get there. One line per operation rather
-        # than one per poll: the phases are what a slow print is diagnosed from,
-        # and the polls in between say nothing.
-        processStartMs = $script:ProcessStartMilliseconds
-        phaseMs = $script:PhaseMarks
-        jobs = @(@($observations) | ForEach-Object {
-          @{
-            jobId = $_.jobId; position = $_.position; present = [bool]$_.present
-            status = [string]$_.status; observed = [bool]$_.observed
-            faulted = [bool]$_.faulted; completed = [bool]$_.completed
-            pagesPrinted = [int]$_.pagesPrinted; expectedPages = [int]$_.expectedPages
-          }
-        })
+        diagnostics = $report.diagnostics
       }
       return $report
     }

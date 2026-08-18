@@ -56,6 +56,7 @@ class StubAdapter implements PrinterAdapter {
       deviceId: "urn:uuid:1f2a",
       makeAndModel: "Kiosk Laser 400",
       driverName: "Generic PCL6",
+      driverVersion: null,
       firmware: "4.2.1"
     });
   }

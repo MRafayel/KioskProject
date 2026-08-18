@@ -282,6 +282,7 @@ export class DeviceRegistryReporter {
       deviceId: binding?.deviceId ?? null,
       makeAndModel: binding?.makeAndModel ?? null,
       driverName: binding?.driverName ?? null,
+      driverVersion: binding?.driverVersion ?? null,
       firmware: binding?.firmware ?? null,
       health: reading.health,
       warningCode: reading.warningCode,

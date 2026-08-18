@@ -134,6 +134,9 @@ export class IppPrinterAdapter implements PrinterAdapter {
         "printer-make-and-model"
       ),
       driverName: null,
+      // An IPP printer is driven over the wire, so there is no installed driver
+      // to have a version. Its firmware is the device's own answer.
+      driverVersion: null,
       firmware: readStringAttribute(
         response,
         IPP_DELIMITER.PRINTER_ATTRIBUTES,

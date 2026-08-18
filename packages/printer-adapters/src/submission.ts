@@ -75,7 +75,8 @@ export function operationStatus(
     confidence: input.confidence,
     failureCode: input.failureCode,
     warningCode: input.warningCode ?? null,
-    sheetsProduced: input.sheetsProduced
+    sheetsProduced: input.sheetsProduced,
+    ...(input.deviceDiagnostics ? { deviceDiagnostics: input.deviceDiagnostics } : {})
   };
 }
 

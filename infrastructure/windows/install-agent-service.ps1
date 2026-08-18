@@ -94,7 +94,19 @@ foreach ($identity in @("NT SERVICE\$ServiceName", 'BUILTIN\Administrators', 'NT
 }
 Set-Acl -Path $stateDirectory -AclObject $acl
 
+# A service has no console, so the agent's only local channel for "I could not
+# start" is the event log. Registering the source needs administrative rights,
+# which is why it happens here rather than at first use — the service account
+# deliberately has none.
+$eventSource = 'PrintingKioskAgent'
+if (-not [System.Diagnostics.EventLog]::SourceExists($eventSource)) {
+  New-EventLog -LogName Application -Source $eventSource
+  Write-Host "Registered event source $eventSource in the Application log."
+}
+
 Start-Service -Name $ServiceName
 Write-Host "$DisplayName installed and started."
 Write-Host "State directory: $stateDirectory"
+Write-Host "Agent lifecycle events: Get-WinEvent -LogName Application -MaxEvents 20 |"
+Write-Host "  Where-Object ProviderName -eq '$eventSource'"
 Write-Host "Confirm the kiosk registered: check the API for a kiosk_agents row with a recent heartbeat."

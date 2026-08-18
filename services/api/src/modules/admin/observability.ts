@@ -1,5 +1,6 @@
 import {
   ADMIN_PAGE_SIZE,
+  adminDeviceDetailSchema,
   classifyKioskLiveness,
   decodeAdminCursor,
   deriveAttention,
@@ -9,6 +10,7 @@ import {
   isAdminUserStatus,
   minimumAuthenticators,
   type AdminAttentionCode,
+  type AdminDeviceDetail,
   type AdminAuditResponse,
   type AdminDocumentsResponse,
   type AdminErrorsResponse,
@@ -884,6 +886,10 @@ export class AdminObservabilityService {
               confidence: true,
               failureCode: true,
               warningCode: true,
+              // The device's own account of the operation. Bounded by the agent
+              // contract on the way in, and granted to the reader on its own
+              // terms — unlike `detail`, which stays free-form and ungranted.
+              deviceDetail: true,
               createdAt: true
             }
           })
@@ -982,6 +988,10 @@ export class AdminObservabilityService {
           confidence: event.confidence,
           failureCode: event.failureCode,
           warningCode: event.warningCode,
+          // Re-read through the contract rather than trusted from the column.
+          // It was bounded on the way in, but a stored shape outlives the code
+          // that wrote it, and this response is a grant boundary.
+          deviceDetail: readDeviceDetail(event.deviceDetail),
           createdAt: event.createdAt.toISOString()
         })) ?? null,
       command: command
@@ -2168,3 +2178,17 @@ type UnacknowledgedErrorGroup = Omit<
   AdminErrorsResponse["groups"][number],
   "acknowledgedAt" | "acknowledgedBy" | "recurredSinceAcknowledgement"
 >;
+
+/**
+ * The device's account of an operation, as the control plane may show it.
+ *
+ * Read through the contract rather than trusted from the column. It was bounded
+ * when the agent reported it, but stored shapes outlive the code that wrote
+ * them and this response crosses a grant boundary. A row that no longer parses
+ * is shown as absent rather than as itself.
+ */
+function readDeviceDetail(value: unknown): AdminDeviceDetail | null {
+  if (value === null || value === undefined) return null;
+  const parsed = adminDeviceDetailSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}

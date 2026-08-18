@@ -483,6 +483,38 @@ export const adminPrintJobsResponseSchema = z.object({
 });
 
 /** The device ledger. Technical Admins only; still no raw event payloads. */
+/**
+ * What the device reported seeing, for the entry that settled a job.
+ *
+ * Operational facts only: identifiers the operating system assigned, the raw
+ * status words it produced, counts and elapsed milliseconds. Nothing here names
+ * a document, a customer or a path — the device side never receives any of
+ * them. It explains an outcome; it never decided one.
+ */
+export const adminDeviceJobEvidenceSchema = z.object({
+  position: z.number().int().nonnegative(),
+  /** The print spooler's own job identifier, as seen in the operating system. */
+  jobId: z.number().int().nonnegative(),
+  present: z.boolean(),
+  observed: z.boolean(),
+  completed: z.boolean(),
+  faulted: z.boolean(),
+  status: z.string().max(120).nullable(),
+  pagesPrinted: z.number().int().nonnegative(),
+  expectedPages: z.number().int().nonnegative(),
+  expectedSheets: z.number().int().nonnegative()
+});
+
+export const adminDeviceDetailSchema = z.object({
+  queueName: z.string().max(220).nullable().optional(),
+  /** Where the device refused, when it named a step. */
+  stage: z.string().max(120).nullable().optional(),
+  processStartMs: z.number().int().nonnegative().nullable().optional(),
+  pollCount: z.number().int().nonnegative().nullable().optional(),
+  phaseMs: z.record(z.string().max(64), z.number().int().nonnegative()).optional(),
+  jobs: z.array(adminDeviceJobEvidenceSchema).max(16).optional()
+});
+
 export const adminPrintJobEventSchema = z.object({
   sequence: z.number().int().nonnegative(),
   type: z.string().max(32),
@@ -490,6 +522,7 @@ export const adminPrintJobEventSchema = z.object({
   confidence: operationalState.nullable(),
   failureCode: operationalCode.nullable(),
   warningCode: operationalCode.nullable(),
+  deviceDetail: adminDeviceDetailSchema.nullable().default(null),
   createdAt: isoTimestamp
 });
 
@@ -931,6 +964,7 @@ export type AdminTimelineResponse = z.infer<typeof adminTimelineResponseSchema>;
 export type AdminDocumentsResponse = z.infer<typeof adminDocumentsResponseSchema>;
 export type AdminPrintJobsResponse = z.infer<typeof adminPrintJobsResponseSchema>;
 export type AdminPrintJobDetailResponse = z.infer<typeof adminPrintJobDetailResponseSchema>;
+export type AdminDeviceDetail = z.infer<typeof adminDeviceDetailSchema>;
 export type AdminRecoveryResolution = z.infer<typeof adminRecoveryResolutionSchema>;
 export type AdminRecoveryCorrection = z.infer<typeof adminRecoveryCorrectionSchema>;
 export type AdminPaymentsResponse = z.infer<typeof adminPaymentsResponseSchema>;

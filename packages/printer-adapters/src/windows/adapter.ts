@@ -36,6 +36,7 @@ import {
   readHostResult,
   readOperationReport,
   readQueueList,
+  type DeviceHostOperationReport,
   type DeviceHostRequest
 } from "./protocol.js";
 
@@ -212,7 +213,7 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
       )
     );
 
-    return withHonestConfidence(operationStatus(submission.operationId, report));
+    return withHonestConfidence(operationStatus(submission.operationId, withDiagnostics(report)));
   }
 
   public async getOperationStatus(operationId: string): Promise<PrintOperationStatus> {
@@ -239,7 +240,7 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
     // is evidence that nothing printed.
     if (report.state === "NOT_SUBMITTED" && record) return unknownStatus(operationId);
 
-    return withHonestConfidence(operationStatus(operationId, report));
+    return withHonestConfidence(operationStatus(operationId, withDiagnostics(report)));
   }
 
   public async cancel(operationId: string): Promise<PrintOperationStatus> {
@@ -276,7 +277,7 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
       });
     }
     if (report.state === "COMPLETED") {
-      return withHonestConfidence(operationStatus(operationId, report));
+      return withHonestConfidence(operationStatus(operationId, withDiagnostics(report)));
     }
 
     // Work already at the device may have put ink on paper before the stop took
@@ -340,6 +341,27 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
     }
     return readHostResult(response);
   }
+}
+
+/**
+ * Carry the device's own account of an operation onto the status.
+ *
+ * It is evidence, never a decision: the state, the confidence and the sheet
+ * count are settled before this is attached, and nothing downstream reads it to
+ * decide anything. It exists so an operator can see which spooler job an
+ * outcome refers to, and where the time went, without opening the kiosk.
+ */
+function withDiagnostics(
+  report: DeviceHostOperationReport
+): Omit<PrintOperationStatus, "operationId"> {
+  return {
+    state: report.state,
+    confidence: report.confidence,
+    failureCode: report.failureCode,
+    warningCode: report.warningCode,
+    sheetsProduced: report.sheetsProduced,
+    ...(report.diagnostics ? { deviceDiagnostics: report.diagnostics } : {})
+  };
 }
 
 function notSubmitted(operationId: string): PrintOperationStatus {

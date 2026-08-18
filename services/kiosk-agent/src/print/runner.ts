@@ -440,7 +440,13 @@ export class PrintCommandRunner {
       confidence: "CONFIRMED",
       failureCode: adapterFailureCode(error),
       warningCode: null,
-      sheetsProduced: 0
+      sheetsProduced: 0,
+      // Where the device refused. A definite failure still owes an operator an
+      // explanation of which step produced it, and the failure code alone does
+      // not distinguish a busy queue from a document that would not render.
+      ...(adapterError?.deviceStage
+        ? { deviceDiagnostics: { stage: adapterError.deviceStage } }
+        : {})
     };
   }
 
@@ -483,7 +489,10 @@ export class PrintCommandRunner {
         confidence: status.confidence,
         failureCode: status.failureCode,
         warningCode: status.warningCode,
-        sheetsProduced: status.sheetsProduced
+        sheetsProduced: status.sheetsProduced,
+        // What the device saw, for the record the control plane keeps. It never
+        // changes the outcome above; it is why an operator can explain one.
+        ...(status.deviceDiagnostics ? { deviceDiagnostics: status.deviceDiagnostics } : {})
       }
     );
     if (!response.ok) {
