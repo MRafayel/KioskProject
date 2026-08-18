@@ -20,6 +20,15 @@ type UpstreamFetch = (input: string | URL, init?: RequestInit) => Promise<Respon
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const REQUEST_TIMEOUT_MS = 10_000;
+/** How often the device is asked about work it has not finished describing. */
+const DEVICE_POLL_INTERVAL_MS = 5_000;
+/** A renewal cadence below this would beat on the control plane for no gain. */
+const MIN_LEASE_RENEWAL_MS = 5_000;
+/** Device states that describe work whose outcome is still open. */
+const OPEN_DEVICE_STATES: ReadonlySet<PrintOperationStatus["state"]> = new Set([
+  "SUBMITTED",
+  "PRINTING"
+]);
 
 export interface PrintRunnerLogger {
   info(fields: Record<string, unknown>, message: string): void;
@@ -34,6 +43,10 @@ export interface PrintCommandRunnerOptions {
   ledger?: LocalPrintLedger;
   spool?: PrintSpool;
   pollIntervalMilliseconds?: number;
+  /** How often the lease is renewed while the device holds the work. */
+  leaseRenewalMilliseconds?: number;
+  /** How often a device that has not finished describing its work is asked. */
+  devicePollIntervalMilliseconds?: number;
 }
 
 /**
@@ -258,6 +271,22 @@ export class PrintCommandRunner {
     }
 
     let status: PrintOperationStatus;
+    const startedAt = Date.now();
+    // The device is about to be given the work, and it may hold it for longer
+    // than one lease. Renewal starts before the handover rather than after it,
+    // so no window exists in which the control plane could take the command
+    // back while a printer is already acting on it.
+    const stopLeaseRenewal = this.startLeaseRenewal(command);
+    this.options.logger.info(
+      {
+        operationId: command.operationId,
+        printJobId: command.printJobId,
+        documents: documents.length,
+        physicalSheets: command.manifest.physicalSheets,
+        redelivered: command.redelivered
+      },
+      "handing print operation to the device"
+    );
     try {
       status = await this.options.adapter.submit({
         operationId: command.operationId,
@@ -271,15 +300,114 @@ export class PrintCommandRunner {
           sizeBytes: document.sizeBytes
         }))
       });
+      status = await this.awaitDeviceOutcome(command, status);
     } catch (error) {
       status = await this.resolveAdapterFailure(command, error);
     } finally {
+      stopLeaseRenewal();
       // The local copy of a customer's document lives no longer than the print.
       await this.spool.discard(command.operationId).catch(() => undefined);
     }
 
+    this.options.logger.info(
+      {
+        operationId: command.operationId,
+        printJobId: command.printJobId,
+        state: status.state,
+        confidence: status.confidence,
+        failureCode: status.failureCode,
+        warningCode: status.warningCode,
+        sheetsProduced: status.sheetsProduced,
+        elapsedMs: Date.now() - startedAt
+      },
+      "device finished with print operation"
+    );
+
     const accepted = await this.report(command, status);
     if (accepted) await this.ledger.record(command.operationId, "RESULT_REPORTED");
+  }
+
+  /**
+   * Hold the command lease for as long as the device has the work.
+   *
+   * `submit` blocks until the printer is done, and the control plane offers a
+   * command to somebody else the moment its lease expires. Without this, any
+   * print slower than one lease was reclaimed mid-flight: the paper came out,
+   * the agent's result was refused as stale, and a healthy job settled into
+   * operator recovery.
+   *
+   * It only ever renews — it never cancels, and a failure never propagates into
+   * the print. Renewal stops at the first refusal because a released command
+   * has a new claim token, so the old one can never be accepted again; retrying
+   * would only produce a log line per interval for the rest of the job.
+   */
+  private startLeaseRenewal(command: AgentPrintCommand): () => void {
+    const leaseMilliseconds = this.options.environment.PRINT_COMMAND_LEASE_SECONDS * 1_000;
+    const interval =
+      this.options.leaseRenewalMilliseconds ??
+      Math.max(MIN_LEASE_RENEWAL_MS, Math.floor(leaseMilliseconds / 3));
+    const timer = setInterval(() => {
+      void this.progress(command, "PRINTING").catch((error: unknown) => {
+        // The control plane has already taken this command back. The print is
+        // deliberately left running: stopping now would change nothing at the
+        // printer and would discard the only account of what it did.
+        clearInterval(timer);
+        this.options.logger.warn(
+          {
+            operationId: command.operationId,
+            printJobId: command.printJobId,
+            errorName: error instanceof Error ? error.message : "UnknownError"
+          },
+          "print command lease could not be renewed while the device held the work"
+        );
+      });
+    }, interval);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
+
+  /**
+   * Wait out an operation the device has not finished describing.
+   *
+   * The host answers when its own observation budget runs out, not when the
+   * printer stops, so a long job can come back as `PRINTING`. That is not a
+   * result: reporting it as one settles a perfectly healthy print into operator
+   * recovery. Asking for status is read-only — it can never put a second sheet
+   * in the tray — so the outcome is waited for rather than guessed at.
+   *
+   * The job's own deadline bounds the wait. Past it, the work is still open and
+   * that is reported honestly as unknown.
+   */
+  private async awaitDeviceOutcome(
+    command: AgentPrintCommand,
+    submitted: PrintOperationStatus
+  ): Promise<PrintOperationStatus> {
+    let status = submitted;
+    const pollInterval = this.options.devicePollIntervalMilliseconds ?? DEVICE_POLL_INTERVAL_MS;
+    const deadline = Date.parse(command.deadlineAt);
+    while (OPEN_DEVICE_STATES.has(status.state)) {
+      if (!Number.isFinite(deadline) || Date.now() + pollInterval >= deadline) {
+        this.options.logger.warn(
+          {
+            operationId: command.operationId,
+            printJobId: command.printJobId,
+            state: status.state
+          },
+          "device still printing at the job deadline"
+        );
+        return {
+          operationId: command.operationId,
+          state: "UNKNOWN",
+          confidence: "UNCONFIRMED",
+          failureCode: "SUBMISSION_UNCONFIRMED",
+          warningCode: status.warningCode,
+          sheetsProduced: null
+        };
+      }
+      await delay(pollInterval);
+      status = await this.askDevice(command);
+    }
+    return status;
   }
 
   /**
@@ -453,6 +581,13 @@ const PRINTER_ADAPTER_ERROR_CODES = new Set([
   "SUBMISSION_UNCONFIRMED",
   "DEVICE_ERROR"
 ]);
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+  });
+}
 
 function notSubmitted(command: AgentPrintCommand, error: unknown): PrintOperationStatus {
   return {

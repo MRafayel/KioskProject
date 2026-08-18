@@ -59,7 +59,27 @@ export interface WindowsPrinterAdapterOptions {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_SUBMIT_TIMEOUT_MS = 240_000;
+const DEFAULT_SUBMIT_TIMEOUT_MS = 300_000;
+
+/**
+ * The share of the submission budget the host may spend watching the queue.
+ *
+ * The rest pays for everything that happens before it can watch anything:
+ * starting a PowerShell process, compiling the host's inline type, loading the
+ * PDF renderer, rasterising the paid pages and drawing them through the driver.
+ * The two numbers used to be independent constants that happened to be equal;
+ * a deployment that shortened the job timeout silently started killing the host
+ * mid-print and turning finished work into an unresolvable result.
+ */
+const HOST_OBSERVE_BUDGET_RATIO = 0.8;
+const MIN_HOST_WAIT_SECONDS = 5;
+
+export function hostWaitSeconds(submitTimeoutMilliseconds: number): number {
+  return Math.max(
+    MIN_HOST_WAIT_SECONDS,
+    Math.floor((submitTimeoutMilliseconds * HOST_OBSERVE_BUDGET_RATIO) / 1_000)
+  );
+}
 
 /**
  * A printer driven through the Windows print subsystem.
@@ -175,6 +195,7 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
     // still leaves evidence that something may have reached a printer.
     await this.journal.open(record);
 
+    const submitTimeout = this.options.submitTimeoutMilliseconds ?? DEFAULT_SUBMIT_TIMEOUT_MS;
     const report = readOperationReport(
       await this.call(
         {
@@ -184,9 +205,10 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
           operationId: submission.operationId,
           media,
           colorMode,
-          documents
+          documents,
+          waitSeconds: hostWaitSeconds(submitTimeout)
         },
-        this.options.submitTimeoutMilliseconds ?? DEFAULT_SUBMIT_TIMEOUT_MS
+        submitTimeout
       )
     );
 

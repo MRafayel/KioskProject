@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { deviceJobName } from "../operation-journal.js";
 import { PrinterAdapterError, type PrintJobManifest, type PrintSubmission } from "../types.js";
-import { WindowsPrinterAdapter, type DeviceHostTransport } from "./adapter.js";
+import { hostWaitSeconds, WindowsPrinterAdapter, type DeviceHostTransport } from "./adapter.js";
 import type { DeviceHostRequest } from "./protocol.js";
 
 const operationId = "01900000-0000-7000-8000-0000000000a1";
@@ -28,11 +28,16 @@ afterEach(async () => {
 /** Stands in for the device host process. It records what it was asked. */
 class FakeDeviceHost implements DeviceHostTransport {
   public readonly requests: DeviceHostRequest[] = [];
+  public readonly timeouts: number[] = [];
   public readonly answers = new Map<string, unknown>();
   public failWith: Error | null = null;
 
-  public request(request: DeviceHostRequest): Promise<unknown> {
+  public request(
+    request: DeviceHostRequest,
+    options?: { timeoutMilliseconds: number }
+  ): Promise<unknown> {
     this.requests.push(request);
+    if (options) this.timeouts.push(options.timeoutMilliseconds);
     if (this.failWith) return Promise.reject(this.failWith);
     const answer = this.answers.get(request.op);
     return Promise.resolve(answer ?? { ok: true, result: {} });
@@ -341,6 +346,34 @@ describe("WindowsPrinterAdapter submission", () => {
         ]
       })
     ).rejects.toBeInstanceOf(PrinterAdapterError);
+  });
+});
+
+describe("WindowsPrinterAdapter submission budget", () => {
+  it("tells the host to stop watching before the transport stops listening", async () => {
+    // These were independent constants that happened to be equal. A deployment
+    // that shortened the job timeout started killing the host mid-print, and a
+    // submission killed mid-answer is ambiguous rather than failed — a paid job
+    // nobody can settle.
+    const host = new FakeDeviceHost();
+    host.answer("submit", { state: "COMPLETED", confidence: "CONFIRMED", sheetsProduced: 3 });
+    const adapter = buildAdapter(host, { submitTimeoutMilliseconds: 300_000 });
+
+    await adapter.submit(await submission());
+
+    const submit = host.requests.find((request) => request.op === "submit");
+    expect(submit).toMatchObject({ op: "submit", waitSeconds: 240 });
+    const submitTimeout = host.timeouts.at(-1) ?? 0;
+    expect((submit as { waitSeconds: number }).waitSeconds * 1_000).toBeLessThan(submitTimeout);
+  });
+
+  it("leaves the host room to start, render and draw before it observes", () => {
+    // The budget pays for a PowerShell start, an inline type compilation, the
+    // PDF renderer, rasterisation and drawing before any watching begins.
+    expect(hostWaitSeconds(300_000)).toBe(240);
+    expect(hostWaitSeconds(120_000)).toBe(96);
+    // Never zero or negative, however small the caller's budget is.
+    expect(hostWaitSeconds(1_000)).toBeGreaterThan(0);
   });
 });
 

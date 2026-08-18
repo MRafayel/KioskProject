@@ -60,6 +60,16 @@ export type DeviceHostRequest =
       media: string;
       colorMode: string;
       documents: readonly DeviceHostDocumentRequest[];
+      /**
+       * How long the host may watch the queue before answering `PRINTING`.
+       *
+       * It is sent rather than assumed because the caller is the side that
+       * knows when it will stop listening. A host waiting longer than that is
+       * killed mid-answer, and a submission killed mid-answer is ambiguous —
+       * which is the expensive kind of wrong. The host clamps it to its own
+       * bounds; this is a budget, not an instruction.
+       */
+      waitSeconds: number;
     }
   | { protocol: number; op: "status"; queue: string; operationId: string }
   | { protocol: number; op: "cancel"; queue: string; operationId: string }

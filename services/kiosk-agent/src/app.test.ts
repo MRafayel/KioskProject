@@ -10,6 +10,38 @@ afterEach(async () => {
   await Promise.all(openApps.splice(0).map(async (app) => app.close()));
 });
 
+describe("kiosk agent logging", () => {
+  it("has a real logger when logging is enabled", async () => {
+    // The agent shipped with `logger: false`, which makes Fastify's `app.log`
+    // a set of no-ops. `main.ts` routes the print runner and the device
+    // reporter through it, so the only component that touches a printer
+    // produced no record of anything it did — every hardware problem had to be
+    // diagnosed by guesswork.
+    const app = await buildAgent(loadEnvironment({ NODE_ENV: "test", LOG_LEVEL: "info" }), {
+      logger: true
+    });
+    openApps.push(app);
+
+    expect(app.log.level).toBe("info");
+    // The print path reports what it did at info. Note that pino stubs out any
+    // method below the configured level, so a deployment that raises LOG_LEVEL
+    // above info gives up the print trail with it.
+    expect(app.log.info.name).not.toBe("noop");
+    expect(app.log.warn.name).not.toBe("noop");
+  });
+
+  it("stays silent when logging is not asked for", async () => {
+    const app = await buildAgent(loadEnvironment({ NODE_ENV: "test" }));
+    openApps.push(app);
+
+    // The control for the assertion above: this is what the agent used to be,
+    // at every level, including the warnings.
+    expect(app.log.level).toBeUndefined();
+    expect(app.log.info.name).toBe("noop");
+    expect(app.log.warn.name).toBe("noop");
+  });
+});
+
 describe("kiosk agent health", () => {
   it("is print-only and monochrome", async () => {
     const app = await buildAgent(loadEnvironment({ NODE_ENV: "test" }));

@@ -105,13 +105,29 @@ is not one a customer may be sold a job on.
       "sides": "two-sided-long-edge",
       "jobName": "…uuid…#000of002"
     }
-  ]
+  ],
+  "waitSeconds": 240
 }
 ```
 
 Page ranges, copies and duplex are per document: one job may print selected
 pages as three double-sided copies of the first document and one single-sided
 copy of the next. Ranges are one-based, inclusive, ordered and non-overlapping.
+
+`waitSeconds` is how long the host may watch the queue before answering
+`PRINTING`. It is sent rather than assumed because the agent is the side that
+knows when it will stop listening: a host still watching when the transport
+timeout fires is killed mid-answer, and a submission killed mid-answer is
+ambiguous rather than failed. The agent derives it from its own submission
+timeout, leaving the rest of the budget for process start, type compilation,
+rasterisation and drawing. The host clamps it to 5…1500 seconds and falls back
+to 240 when it is absent.
+
+**`submit` is idempotent per `operationId`.** A repeated call never draws the
+pages again; it answers from the state the first call persisted. The state file
+is written before the spooler is touched, so its presence means work may already
+be at a printer — including when it names no jobs, because a host killed between
+`StartDoc` and the line that records the identifier leaves exactly that.
 
 `jobName` is the durable link between the operation and the spooler's own jobs.
 It carries the operation identifier, the document's position, and how many
@@ -168,6 +184,55 @@ Two rules the host does not get to bend:
    that never existed look identical from the queue, and only the journal
    separates them.
 
+### What the host may call a confirmed completion
+
+Software cannot prove a sheet physically left a printer, and the host does not
+claim to. What it can attest is the strongest evidence Windows offers, and the
+rule is deliberately narrow:
+
+> A job is complete when this host **saw that exact job alive in the queue** and
+> the job later left the queue without the spooler reporting a fault.
+
+Both halves matter. Windows deletes a finished document from the queue
+immediately, so "absent" is the ordinary shape of success — but it is also what
+a job that never existed looks like, so absence alone proves nothing. The host
+therefore looks for the job right after `StartDoc`, where it is guaranteed to
+exist, and records that sighting durably. Identity is checked as well as
+presence: a spooler restart renumbers jobs from one, so the job's `DocumentName`
+must equal the `jobName` it was submitted under.
+
+Anything else stays unconfirmed and reaches an operator:
+
+| Situation | Result |
+| --- | --- |
+| Watched, then retired with no fault | `COMPLETED` / `CONFIRMED`, sheets counted |
+| Still `Printed` in the queue | `COMPLETED` / `CONFIRMED`, sheets counted |
+| Absent, never seen alive | `COMPLETED` / `UNCONFIRMED`, no sheet count |
+| Absent after a `cancel` was requested | `COMPLETED` / `UNCONFIRMED`, no sheet count |
+| A fault was recorded for it at any point | `FAILED` / `CANCELED`, sticky |
+| Fault with no page counted anywhere | `FAILED` / `CONFIRMED`, zero sheets |
+| A sibling document still open or unaccounted for | never confirmed |
+
+The spooler's own `PagesPrinted` counter is **not** part of the rule. Drivers
+report it inconsistently and some never move it off zero; gating on it made every
+successful print unconfirmable. It is kept as positive evidence only — a job that
+moved pages can never be called a proven-zero failure.
+
+### Queue state
+
+`PrinterStatus` mixes three unrelated things and the host classifies by
+precedence: faults (`PaperJam`, `PaperOut`, `NoToner`, `DoorOpen`,
+`UserInterventionRequired`, `OutOfMemory`, …) → `ERROR`; `Offline`,
+`NotAvailable`, `PowerSave` → `OFFLINE`; `Paused`, `PendingDeletion` → `PAUSED`;
+ordinary activity and consumable warnings (`Normal`, `Idle`, `Printing`, `Busy`,
+`IOActive`, `Processing`, `Waiting`, `Initializing`, `WarmingUp`, `TonerLow`,
+`PaperLow`, `OutputBinFull`) → `READY`. A status the host does not recognise is
+`ERROR`, and both callers that can refuse work over it record the raw string.
+
+A printer that is merely busy, warming up or low on toner is a printer that can
+still be sold a job. Treating those as unusable refused paid work on healthy
+hardware and made the warning codes unreachable.
+
 ## The reference host
 
 `infrastructure/windows/print-host.ps1` implements this protocol with
@@ -178,30 +243,76 @@ operating-system job identifier before the first rendered page is drawn.
 
 The reference profile refuses anything except a local, non-shared `USBnnn`
 queue using `Canon Generic Plus UFR II`. It also refuses a queue whose current
-defaults are not A4 and monochrome. The exact queue name and USB port number are
-deployment data, not source-code constants, so another certified installation
-of the same printer may use `USB002` or a different operator-chosen queue name.
+defaults are not A4 and monochrome. The queue name is deployment data, so
+another certified installation of the same printer may use `USB002` or a
+different operator-chosen queue name.
+
+The **driver name and the port pattern are still source-code constants**
+(`$SupportedDriverName`, `'^USB\d+$'`). Approving a second printer model today
+means editing this script, which is not where that decision belongs — it is
+operator certification, like the queue allowlist. Moving both into a
+configuration-driven profile is outstanding work. Until then, an unsupported
+printer must still fail the way it does now: `QUEUE_NOT_APPROVED`, explicitly,
+never a crash and never a silent fall-back to another queue.
+
+### Running the host's tests
+
+The decisions above are covered by `infrastructure/windows/print-host.tests.ps1`,
+which loads this script with `-AsLibrary` — defining its functions without
+touching a device, a queue or standard input — and drives them directly.
+
+```powershell
+Install-Module Pester -Scope CurrentUser   # once
+Invoke-Pester -Path infrastructure/windows/print-host.tests.ps1
+```
+
+`packages/printer-adapters` runs the same suite automatically when a PowerShell
+interpreter and Pester are present, and reports loudly when it skipped them.
 
 ### Local diagnostics
 
 Unexpected host exceptions remain `DEVICE_ERROR` on standard output; internal
 exception details never cross the device protocol or enter the control-plane
 ledger. The reference host writes a bounded JSON-lines diagnostic log for the
-Windows account running the agent instead:
+Windows account running the agent instead.
+
+It records what the host *did*, not only what went wrong — a submission that
+printed but could not be confirmed used to leave no trace at all, which is the
+hardest failure to diagnose afterwards. Every line carries `timestamp`, `level`,
+`event`, `operation`, `operationId`, `stage` and `submissionTouched`. The events:
+
+| Event | When |
+| --- | --- |
+| `submit.already-submitted` | a repeated `submit` was answered without printing |
+| `submit.queue-not-ready` | work refused over queue state, with the raw status |
+| `submit.configuration-rejected` | refused over A4/monochrome, with what was read |
+| `submit.job-not-observed` | `StartDoc` returned but the job never appeared |
+| `submit.document-spooled` | `EndDoc` returned, with the spooler job identifier |
+| `job.identity-mismatch` | a queue entry under our identifier is not our job |
+| `operation.cancel-requested` | before the first `Remove-PrintJob` |
+| `operation.report` | every answer, with each job's evidence |
+| `health.unavailable` | why a queue was reported `OFFLINE` |
+| `exception` | an unexpected failure, with a bounded exception chain |
+
+Fields are restricted to operational metadata — queue name, spooler job
+identifier, job name, raw Windows status strings, counts and durations. The log
+never contains the request, document bytes, page content, customer filenames or
+spool paths.
 
 ```text
 %LOCALAPPDATA%\PrintingKiosk\device-host\diagnostics.jsonl
 ```
 
-Each entry contains the operation ID, the host stage, whether `StartDoc` had
-already succeeded, and a bounded exception chain. It does not contain the
-request, document bytes, or customer filenames. At 1 MiB the current file is
-rotated to `diagnostics.previous.jsonl`, so at most two diagnostic files are
-retained. Logging is best-effort and can never change the protocol response or
-the host's submission-confidence decision.
+At 1 MiB the current file is rotated to `diagnostics.previous.jsonl`, so at most
+two diagnostic files are retained. Logging is best-effort and can never change
+the protocol response or the host's submission-confidence decision.
 
-Read the newest failures locally with:
+Read the newest entries locally with:
 
 ```powershell
 Get-Content "$env:LOCALAPPDATA\PrintingKiosk\device-host\diagnostics.jsonl" -Tail 20
 ```
+
+Follow one operation across the host and the agent by its `operationId`, and
+across the host and the Windows queue by the `jobId` in `submit.document-spooled`
+— the same identifier the `PrintService` event log and the queue window show.

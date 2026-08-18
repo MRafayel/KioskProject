@@ -579,6 +579,35 @@ describe("loadEnvironment", () => {
   });
 
   /**
+   * The device host has to start a process, compile its inline type, load the
+   * PDF renderer and draw the paid pages before it can observe anything. The
+   * agent kills it at this timeout, and a submission killed mid-print is
+   * ambiguous rather than failed — a paid job nobody can settle.
+   */
+  it("refuses a submission budget the Windows host cannot meet", () => {
+    // A lease that satisfies the pre-existing rules on both sides — longer than
+    // the heartbeat, shorter than the timeout — so the only thing under test
+    // here is the Windows floor itself.
+    const base = { NODE_ENV: "test", PRINT_COMMAND_LEASE_SECONDS: "45" };
+    const windows = {
+      ...base,
+      PRINTER_ADAPTER: "windows",
+      PRINTER_WINDOWS_HOST_PATH: "C:\\PrintingKiosk\\print-host.ps1",
+      PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
+    };
+    expect(() => loadEnvironment({ ...windows, PRINT_JOB_TIMEOUT_SECONDS: "60" })).toThrow(
+      /PRINT_JOB_TIMEOUT_SECONDS must be at least 120/u
+    );
+    expect(loadEnvironment({ ...windows, PRINT_JOB_TIMEOUT_SECONDS: "120" })).toMatchObject({
+      PRINT_JOB_TIMEOUT_SECONDS: 120
+    });
+    // The simulated printer has no such floor: it starts no process.
+    expect(loadEnvironment({ ...base, PRINT_JOB_TIMEOUT_SECONDS: "60" })).toMatchObject({
+      PRINT_JOB_TIMEOUT_SECONDS: 60
+    });
+  });
+
+  /**
    * Approval is the only thing standing between a paid job and whatever queue
    * a driver installer left on the machine, so a deployment driving hardware
    * has to state which queue it certified — and a preference that is not itself

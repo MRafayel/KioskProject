@@ -12,6 +12,14 @@ const PROCESSOR_RUNTIME_HEADROOM_BYTES = 1024 * MEBIBYTE;
 // filesystem metadata, and temporary encoder output. Canonical pages are
 // deleted before the next page is decoded.
 const PROCESSOR_TRANSIENT_SCRATCH_BYTES = 96 * MEBIBYTE;
+/**
+ * The shortest submission budget the Windows device host can be held to.
+ *
+ * It has to start a process, compile its inline type, load the PDF renderer,
+ * rasterise the selection and draw it through the driver before it can observe
+ * anything, and only 80% of the budget is left for the observation itself.
+ */
+const MIN_WINDOWS_PRINT_JOB_TIMEOUT_SECONDS = 120;
 
 const stringBooleanSchema = z
   .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
@@ -474,6 +482,25 @@ const environmentSchema = z
         code: "custom",
         path: ["PRINTER_WINDOWS_HOST_PATH"],
         message: "PRINTER_WINDOWS_HOST_PATH is required when PRINTER_ADAPTER=windows"
+      });
+    }
+
+    // The Windows device host is a process that has to start, compile its inline
+    // type, load the PDF renderer, rasterise the paid pages and draw them
+    // through the driver before it can watch the queue at all. The agent kills
+    // it at this timeout, and a submission killed mid-print is ambiguous rather
+    // than failed — a paid job nobody can settle. A budget this short cannot be
+    // met, so it is refused at startup rather than at the first print.
+    if (
+      environment.PRINTER_ADAPTER === "windows" &&
+      environment.PRINT_JOB_TIMEOUT_SECONDS < MIN_WINDOWS_PRINT_JOB_TIMEOUT_SECONDS
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINT_JOB_TIMEOUT_SECONDS"],
+        message:
+          "PRINT_JOB_TIMEOUT_SECONDS must be at least " +
+          `${MIN_WINDOWS_PRINT_JOB_TIMEOUT_SECONDS} when PRINTER_ADAPTER=windows`
       });
     }
 

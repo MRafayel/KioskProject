@@ -17,14 +17,33 @@
   Every device job has an operating-system job identifier. It is persisted as
   soon as StartDoc returns, before a page is drawn, so a process or service
   restart cannot turn a possibly printed operation into a safe retry.
+
+.PARAMETER AsLibrary
+  Define the host's functions and return without touching a device, a queue or
+  standard input. It exists so the decision this host makes about whether a
+  submission printed can be driven directly by print-host.tests.ps1 — that
+  decision is the difference between a paid job settling and a customer being
+  sent to an operator, and asserting on the source text is not a test of it.
+  The agent never passes it: the transport launches this script with -File and
+  no arguments.
 #>
+
+param([switch] $AsLibrary)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$StateDirectory = Join-Path $env:ProgramData 'PrintingKiosk\device-host'
+# On Windows both of these are always set, so the paths below are unchanged.
+# The fallback exists only so a library load can define the host's functions on
+# a machine that has PowerShell but not Windows, which is what lets the decision
+# tests run somewhere other than the kiosk itself.
+$StateRoot = if ($env:ProgramData) { $env:ProgramData } else { [System.IO.Path]::GetTempPath() }
+$DiagnosticRoot =
+  if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.IO.Path]::GetTempPath() }
+
+$StateDirectory = Join-Path $StateRoot 'PrintingKiosk\device-host'
 $RenderDirectory = Join-Path $StateDirectory 'render'
-$DiagnosticDirectory = Join-Path $env:LOCALAPPDATA 'PrintingKiosk\device-host'
+$DiagnosticDirectory = Join-Path $DiagnosticRoot 'PrintingKiosk\device-host'
 $DiagnosticPath = Join-Path $DiagnosticDirectory 'diagnostics.jsonl'
 $DiagnosticArchivePath = Join-Path $DiagnosticDirectory 'diagnostics.previous.jsonl'
 $DiagnosticMaxBytes = 1MB
@@ -32,10 +51,26 @@ $SupportedDriverName = 'Canon Generic Plus UFR II'
 $MaximumCopies = 10
 $MaximumSelectedPages = 200
 $RenderLongEdgePixels = 3508 # A4 at 300 DPI.
+# How long the host watches a submission before answering `PRINTING`. The caller
+# supplies its own budget on the request; these only bound what it may ask for,
+# so the host and the agent's transport timeout cannot disagree by construction.
+$DefaultObserveSeconds = 240
+$MinimumObserveSeconds = 5
+$MaximumObserveSeconds = 1500
+# How hard the host looks for a job the spooler has just been given. StartDoc has
+# already returned, so the job exists; this only covers the moment before the
+# spooler publishes it to Get-PrintJob.
+$JobPresenceAttempts = 10
+$JobPresenceDelayMilliseconds = 100
 $script:SubmissionTouched = $false
 $script:DiagnosticOperation = 'startup'
 $script:DiagnosticOperationId = $null
 $script:DiagnosticStage = 'startup'
+
+# Everything from here to the end of the WinRT reflection below is Windows-only
+# and costs a second of type compilation. A library load skips it so the pure
+# decision functions can be exercised on any platform that has PowerShell.
+if (-not $AsLibrary) {
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -282,6 +317,8 @@ $script:AsTaskActionMethod = [System.WindowsRuntimeSystemExtensions].GetMethods(
   } |
   Select-Object -First 1
 
+} # end platform initialisation
+
 function Complete-WinRtOperation {
   param($Operation, [Type] $ResultType)
   $method = $script:AsTaskOperationMethod.MakeGenericMethod([Type[]]@($ResultType))
@@ -313,11 +350,8 @@ function Write-Failure {
   exit 0
 }
 
-function Write-LocalDiagnostic {
-  param(
-    [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord] $ErrorRecord,
-    [string] $Stage = $script:DiagnosticStage
-  )
+function Add-DiagnosticRecord {
+  param([Parameter(Mandatory = $true)] $Record)
 
   # Diagnostics are deliberately best-effort and local. A logging failure must
   # never change the host's protocol answer or its submission ambiguity.
@@ -331,7 +365,61 @@ function Write-LocalDiagnostic {
         Move-Item -LiteralPath $DiagnosticPath -Destination $DiagnosticArchivePath -Force
       }
     }
+    Add-Content -LiteralPath $DiagnosticPath `
+      -Value (ConvertTo-Json $Record -Depth 8 -Compress) -Encoding UTF8
+  } catch {
+    # The protocol and safety decision are more important than diagnostics.
+  }
+}
 
+# The fields every diagnostic line carries, so one operation can be followed
+# across the host's stages without correlating on timestamps alone.
+function New-DiagnosticRecord {
+  # Not named $Event: that is a PowerShell automatic variable, and binding a
+  # parameter over one is the kind of subtlety this host has already been bitten
+  # by once.
+  param([string] $Level, [string] $EventName, [string] $Stage)
+  return [ordered]@{
+    timestamp = (Get-Date).ToUniversalTime().ToString('o')
+    level = $Level
+    event = $EventName
+    operation = $script:DiagnosticOperation
+    operationId = $script:DiagnosticOperationId
+    stage = $Stage
+    submissionTouched = [bool]$script:SubmissionTouched
+  }
+}
+
+<#
+.SYNOPSIS
+  Record something the host did, not only something that went wrong.
+
+.DESCRIPTION
+  A submission that printed but could not be confirmed used to leave no trace at
+  all, which is the single hardest failure to diagnose after the fact. Fields are
+  restricted to operational metadata — queue, spooler job identifier, job name,
+  raw Windows status strings, counts and durations. Document paths, page content
+  and customer filenames never reach this file.
+#>
+function Write-LocalEvent {
+  param(
+    [Parameter(Mandatory = $true)][string] $EventName,
+    [ValidateSet('info', 'warn', 'error')][string] $Level = 'info',
+    [hashtable] $Fields = @{},
+    [string] $Stage = $script:DiagnosticStage
+  )
+  $record = New-DiagnosticRecord -Level $Level -EventName $EventName -Stage $Stage
+  foreach ($key in $Fields.Keys) { $record[[string]$key] = $Fields[$key] }
+  Add-DiagnosticRecord -Record $record
+}
+
+function Write-LocalDiagnostic {
+  param(
+    [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord] $ErrorRecord,
+    [string] $Stage = $script:DiagnosticStage
+  )
+
+  try {
     $exceptions = @()
     $current = $ErrorRecord.Exception
     while ($null -ne $current) {
@@ -345,20 +433,40 @@ function Write-LocalDiagnostic {
       $current = $current.InnerException
     }
 
-    $record = [ordered]@{
-      timestamp = (Get-Date).ToUniversalTime().ToString('o')
-      operation = $script:DiagnosticOperation
-      operationId = $script:DiagnosticOperationId
-      stage = $Stage
-      submissionTouched = [bool]$script:SubmissionTouched
-      errorId = [string]$ErrorRecord.FullyQualifiedErrorId
-      category = [string]$ErrorRecord.CategoryInfo.Category
-      exceptions = $exceptions
-    }
-    Add-Content -LiteralPath $DiagnosticPath `
-      -Value (ConvertTo-Json $record -Depth 8 -Compress) -Encoding UTF8
+    $record = New-DiagnosticRecord -Level 'error' -Event 'exception' -Stage $Stage
+    $record['errorId'] = [string]$ErrorRecord.FullyQualifiedErrorId
+    $record['category'] = [string]$ErrorRecord.CategoryInfo.Category
+    $record['exceptions'] = $exceptions
+    Add-DiagnosticRecord -Record $record
   } catch {
     # The protocol and safety decision are more important than diagnostics.
+  }
+}
+
+<#
+.SYNOPSIS
+  Read a property that an older state file may not carry.
+
+.DESCRIPTION
+  State files outlive the version of the host that wrote them, and this script
+  runs under `Set-StrictMode -Version Latest`, where reading a property that does
+  not exist is a terminating error. Every read of persisted state goes through
+  here so adding a field cannot turn an in-flight operation into a DEVICE_ERROR.
+#>
+function Get-Field {
+  param($Source, [Parameter(Mandatory = $true)][string] $Name, $Default = $null)
+  if ($null -eq $Source) { return $Default }
+  $property = $Source.PSObject.Properties[$Name]
+  if ($null -eq $property -or $null -eq $property.Value) { return $Default }
+  return $property.Value
+}
+
+function Set-Field {
+  param($Target, [Parameter(Mandatory = $true)][string] $Name, $Value)
+  if ($null -eq $Target.PSObject.Properties[$Name]) {
+    Add-Member -InputObject $Target -MemberType NoteProperty -Name $Name -Value $Value -Force
+  } else {
+    $Target.$Name = $Value
   }
 }
 
@@ -381,12 +489,31 @@ function Get-QueueOrFail {
   return $printer
 }
 
+# Windows reports one status string that mixes three unrelated things: real
+# faults, ordinary activity, and consumable warnings. Only the first two mean a
+# customer cannot be served. Reading `Printing`, `WarmingUp` or `TonerLow` as an
+# unusable printer is what made a healthy queue refuse paid work and made the
+# warning codes below unreachable.
+$QueueFaultPattern =
+  'PaperJam|PaperOut|NoToner|DoorOpen|UserInterventionRequired|OutOfMemory|PaperProblem|ManualFeed|PagePunt|ServerUnknown|Error'
+$QueueOfflinePattern = 'Offline|NotAvailable|PowerSave'
+$QueuePausedPattern = 'Paused|PendingDeletion'
+$QueueOperationalPattern =
+  'Normal|Idle|Printing|Busy|IOActive|Processing|Waiting|Initializing|WarmingUp|TonerLow|PaperLow|OutputBinFull'
+
 function ConvertTo-QueueState {
   param($Printer)
+  # The status may carry several flags at once, so order is the classification:
+  # a fault outranks whatever else the queue happens to be doing.
   $status = [string]$Printer.PrinterStatus
-  if ($Printer.PrinterStatus -eq 'Normal' -or $status -eq 'Idle') { return 'READY' }
-  if ($status -match 'Paused|Pending') { return 'PAUSED' }
-  if ($status -match 'Offline|NotAvailable|PowerSave') { return 'OFFLINE' }
+  if ($status -match $QueueFaultPattern) { return 'ERROR' }
+  if ($status -match $QueueOfflinePattern) { return 'OFFLINE' }
+  if ($status -match $QueuePausedPattern) { return 'PAUSED' }
+  if ($status -match $QueueOperationalPattern) { return 'READY' }
+  # A status this host has never seen is not a printer to sell a job on. It is
+  # not logged here — this runs once per queue on every heartbeat — but both
+  # callers that can refuse work over it record the raw status when they do, so
+  # an unsupported device fails visibly rather than looking unplugged.
   return 'ERROR'
 }
 
@@ -420,10 +547,16 @@ function Read-OperationState {
   }
 }
 
+# Written through a temporary file and renamed into place. This file is the only
+# record that separates "already sent to a printer" from "never submitted", so a
+# host killed mid-write must leave the previous record intact rather than a
+# truncated one that reads as an operation with no jobs.
 function Write-OperationState {
   param([string] $OperationId, $State)
-  Set-Content -Path (Get-StatePath -OperationId $OperationId) `
-    -Value (ConvertTo-Json $State -Depth 8) -Encoding UTF8
+  $path = Get-StatePath -OperationId $OperationId
+  $temporaryPath = "$path.tmp"
+  Set-Content -LiteralPath $temporaryPath -Value (ConvertTo-Json $State -Depth 8) -Encoding UTF8
+  Move-Item -LiteralPath $temporaryPath -Destination $path -Force
 }
 
 function Get-SelectedPageNumbers {
@@ -571,7 +704,17 @@ function Invoke-Health {
   $printer = Get-QueueOrFail -QueueName $QueueName
   $state = ConvertTo-QueueState -Printer $printer
   $configuration = Get-QueueConfiguration -QueueName $printer.Name
-  if ($state -ne 'READY' -or -not (Test-A4MonochromeConfiguration -Configuration $configuration)) {
+  $configurationReady = Test-A4MonochromeConfiguration -Configuration $configuration
+  if ($state -ne 'READY' -or -not $configurationReady) {
+    # `OFFLINE` is the only health value the protocol has for "do not sell a job
+    # on this", so an unplugged printer and a queue whose defaults were changed
+    # arrive at the same answer. Record which one it was: they need different
+    # fixes and the protocol cannot tell them apart.
+    Write-LocalEvent -EventName 'health.unavailable' -Level 'warn' -Fields @{
+      queueState = $state
+      printerStatus = [string]$printer.PrinterStatus
+      configurationReady = [bool]$configurationReady
+    }
     Write-Result -Result @{ state = 'OFFLINE'; warningCode = $null }
     return
   }
@@ -585,15 +728,61 @@ function Invoke-Health {
   }
 }
 
+function Get-RequestedWaitSeconds {
+  param($Request)
+  $requested = [int](Get-Field -Source $Request -Name 'waitSeconds' -Default $DefaultObserveSeconds)
+  if ($requested -lt $MinimumObserveSeconds) { return $MinimumObserveSeconds }
+  if ($requested -gt $MaximumObserveSeconds) { return $MaximumObserveSeconds }
+  return $requested
+}
+
 function Invoke-Submit {
   param($Request)
   $script:DiagnosticStage = 'submit.queue'
+  $waitSeconds = Get-RequestedWaitSeconds -Request $Request
+  # The queue is resolved before anything else so the name handed to the spooler
+  # below is one the operator certified, never one the request supplied.
   $printer = Get-QueueOrFail -QueueName $Request.queue
-  if ((ConvertTo-QueueState -Printer $printer) -ne 'READY') {
+
+  $script:DiagnosticStage = 'submit.idempotency'
+  # A submission is identified by its operation, and an operation is printed at
+  # most once. A repeated call is answered from what the first one left behind,
+  # never by drawing the pages again: the state file is written before the
+  # spooler is touched, so its presence means work may already be at a printer.
+  # `jobs = []` counts, because a host killed between StartDoc and the line that
+  # records the job identifier leaves exactly that.
+  $existing = Read-OperationState -OperationId $Request.operationId
+  if ($null -ne $existing) {
+    Write-LocalEvent -EventName 'submit.already-submitted' -Level 'warn' -Fields @{
+      queue = $printer.Name
+      knownJobs = @($existing.jobs).Count
+    }
+    Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
+      -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds)
+    return
+  }
+
+  $script:DiagnosticStage = 'submit.queue-state'
+  $queueState = ConvertTo-QueueState -Printer $printer
+  if ($queueState -ne 'READY') {
+    Write-LocalEvent -EventName 'submit.queue-not-ready' -Level 'warn' -Fields @{
+      queue = $printer.Name; queueState = $queueState
+      printerStatus = [string]$printer.PrinterStatus
+    }
     Write-Failure -Code 'PRINTER_OFFLINE' -Ambiguous $false
   }
   $script:DiagnosticStage = 'submit.configuration'
-  if (-not (Test-A4MonochromeConfiguration -Configuration (Get-QueueConfiguration $printer.Name))) {
+  $configuration = Get-QueueConfiguration $printer.Name
+  if (-not (Test-A4MonochromeConfiguration -Configuration $configuration)) {
+    # The protocol has one code for this and it says nothing about which of the
+    # two causes it was. Somebody changed the queue's defaults, or the queue
+    # could not be read at all, and those need opposite fixes.
+    Write-LocalEvent -EventName 'submit.configuration-rejected' -Level 'warn' -Fields @{
+      queue = $printer.Name
+      configurationReadable = [bool]($null -ne $configuration)
+      paperSize = if ($null -ne $configuration) { [string]$configuration.PaperSize } else { $null }
+      color = if ($null -ne $configuration) { [bool]$configuration.Color } else { $null }
+    }
     Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false
   }
   $script:DiagnosticStage = 'submit.manifest'
@@ -670,7 +859,7 @@ function Invoke-Submit {
         $script:SubmissionTouched = $true
         $submitted++
         $script:DiagnosticStage = "submit.document.$position.persist-job"
-        $state.jobs += @{
+        $entry = [pscustomobject]@{
           position       = [int]$item.document.position
           jobId          = $job.JobId
           jobName        = [string]$item.document.jobName
@@ -678,8 +867,36 @@ function Invoke-Submit {
           expectedSheets = [int]$item.expectedSheets
           pagesPrinted   = 0
           completed      = $false
+          # Whether this host ever saw this exact job alive in the queue. It is
+          # the difference between a job that finished and one that never ran:
+          # both are absent from the queue afterwards.
+          observed       = $false
+          faulted        = $false
+          faultCode      = ''
+          lastStatus     = ''
         }
+        $state.jobs += $entry
         Write-OperationState -OperationId $Request.operationId -State $state
+
+        # Look for the job now, while it certainly still exists. StartDoc has
+        # returned, so the spooler owns it and the document is not finished, so
+        # nothing can have deleted it yet. Once the pages are drawn and EndDoc
+        # returns, a healthy spooler removes a completed job immediately, and a
+        # job nobody ever saw cannot afterwards be told apart from one that was
+        # never created — which is what made every successful print unconfirmable.
+        $script:DiagnosticStage = "submit.document.$position.observe-job"
+        if (Confirm-DeviceJob -QueueName $printer.Name -JobId $job.JobId `
+            -JobName ([string]$item.document.jobName)) {
+          $entry.observed = $true
+          Write-OperationState -OperationId $Request.operationId -State $state
+        } else {
+          # Not fatal: the pages are still drawn and the operation still runs.
+          # It only means this operation cannot end in a confirmed completion,
+          # which is the honest answer when the evidence was never available.
+          Write-LocalEvent -EventName 'submit.job-not-observed' -Level 'warn' -Fields @{
+            queue = $printer.Name; jobId = $job.JobId; position = $position
+          }
+        }
 
         $script:DiagnosticStage = "submit.document.$position.draw-pages"
         for ($copy = 0; $copy -lt $item.copies; $copy++) {
@@ -691,6 +908,10 @@ function Invoke-Submit {
         }
         $script:DiagnosticStage = "submit.document.$position.end-doc"
         $job.Complete()
+        Write-LocalEvent -EventName 'submit.document-spooled' -Fields @{
+          queue = $printer.Name; jobId = $job.JobId; position = $position
+          expectedPages = [int]$item.expectedPages; expectedSheets = [int]$item.expectedSheets
+        }
       } catch {
         Write-LocalDiagnostic -ErrorRecord $_
         Write-Failure -Code 'DEVICE_ERROR' -Ambiguous ($submitted -gt 0)
@@ -701,22 +922,46 @@ function Invoke-Submit {
 
     $script:DiagnosticStage = 'submit.observe'
     Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-      -QueueName $printer.Name -WaitForCompletion $true)
+      -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds)
   } finally {
     Remove-Item -LiteralPath $renderPath -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
+<#
+.SYNOPSIS
+  Prove that a job this host just created is really in the queue, and is ours.
+
+.DESCRIPTION
+  Called immediately after StartDoc, where the job is guaranteed to exist: the
+  only thing being waited on is the spooler publishing it to Get-PrintJob. The
+  document name is checked as well as the identifier, because a spooler restart
+  renumbers jobs from one and an identifier alone would eventually name somebody
+  else's work.
+#>
+function Confirm-DeviceJob {
+  param([string] $QueueName, [int] $JobId, [string] $JobName)
+  for ($attempt = 0; $attempt -lt $JobPresenceAttempts; $attempt++) {
+    $current = Get-PrintJob -PrinterName $QueueName -ID $JobId -ErrorAction SilentlyContinue
+    if ($null -ne $current -and
+        [string](Get-Field -Source $current -Name 'DocumentName' -Default '') -eq $JobName) {
+      return $true
+    }
+    Start-Sleep -Milliseconds $JobPresenceDelayMilliseconds
+  }
+  return $false
+}
+
 function Invoke-Status {
   param($Request)
-  [void](Get-QueueOrFail -QueueName $Request.queue)
+  $printer = Get-QueueOrFail -QueueName $Request.queue
   Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-    -QueueName $Request.queue -WaitForCompletion $false)
+    -QueueName $printer.Name -WaitForCompletion $false)
 }
 
 function Invoke-Cancel {
   param($Request)
-  [void](Get-QueueOrFail -QueueName $Request.queue)
+  $printer = Get-QueueOrFail -QueueName $Request.queue
   $state = Read-OperationState -OperationId $Request.operationId
   if ($null -eq $state) {
     Write-Result -Result @{
@@ -725,11 +970,21 @@ function Invoke-Cancel {
     }
     return
   }
+
+  # Recorded before the first removal, and durable. A job this host deleted
+  # leaves the queue exactly the way a job that finished does, so without this
+  # marker a cancellation would afterwards read as a clean completion.
+  Set-Field -Target $state -Name 'cancelRequested' -Value $true
+  Write-OperationState -OperationId $Request.operationId -State $state
+  Write-LocalEvent -EventName 'operation.cancel-requested' -Level 'warn' -Fields @{
+    queue = $printer.Name; knownJobs = @($state.jobs).Count
+  }
+
   foreach ($job in @($state.jobs)) {
-    Remove-PrintJob -PrinterName $Request.queue -ID $job.jobId -ErrorAction SilentlyContinue
+    Remove-PrintJob -PrinterName $printer.Name -ID $job.jobId -ErrorAction SilentlyContinue
   }
   Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-    -QueueName $Request.queue -WaitForCompletion $false)
+    -QueueName $printer.Name -WaitForCompletion $false)
 }
 
 function Invoke-Discard {
@@ -743,6 +998,12 @@ function Invoke-Discard {
         $discarded++
       }
     }
+    # A state write that was interrupted between the temporary file and the
+    # rename leaves one of these behind. It is not an operation record, so it is
+    # swept rather than counted.
+    foreach ($file in Get-ChildItem -Path $StateDirectory -Filter '*.json.tmp' -File) {
+      if ($file.LastWriteTimeUtc -lt $cutoff) { Remove-Item -LiteralPath $file.FullName -Force }
+    }
   }
   if (Test-Path $RenderDirectory) {
     foreach ($directory in Get-ChildItem -Path $RenderDirectory -Directory) {
@@ -754,8 +1015,194 @@ function Invoke-Discard {
   Write-Result -Result @{ discarded = $discarded }
 }
 
+<#
+.SYNOPSIS
+  What one job's evidence means. Pure: no spooler, no clock, no state file.
+
+.DESCRIPTION
+  The rule this encodes is that a Windows job leaving the queue is the ordinary
+  shape of success — the spooler deletes a document the moment it finishes — but
+  it is only evidence when this host watched that exact job while it was alive.
+  A job nobody ever saw is indistinguishable from one that never existed, and a
+  job somebody asked to remove is not a job that printed.
+
+  It deliberately does not gate on `PagesPrinted`. Drivers report that counter
+  inconsistently and some never move it off zero, so requiring it is what made
+  every successful print unconfirmable. It is kept as positive evidence only:
+  a job that moved pages cannot later be called a proven-zero failure.
+#>
+function Resolve-JobOutcome {
+  param($Observation, [bool] $CancelRequested)
+
+  if ([bool]$Observation.completed) { return @{ outcome = 'COMPLETED'; failureCode = $null } }
+  if ([bool]$Observation.faulted) {
+    $code = [string]$Observation.faultCode
+    if ($code.Length -eq 0) { $code = 'DEVICE_ERROR' }
+    return @{ outcome = 'FAULT'; failureCode = $code }
+  }
+
+  if (-not [bool]$Observation.present) {
+    if ([bool]$Observation.observed -and -not $CancelRequested) {
+      return @{ outcome = 'COMPLETED'; failureCode = $null }
+    }
+    # Gone, and this host has nothing that says it ever ran. Something may well
+    # be in the customer's hand; nobody here can say what.
+    return @{ outcome = 'LOST'; failureCode = $null }
+  }
+
+  $status = [string]$Observation.status
+  if ($status -match 'PaperOut') { return @{ outcome = 'FAULT'; failureCode = 'OUT_OF_PAPER' } }
+  if ($status -match 'Error|Blocked') { return @{ outcome = 'FAULT'; failureCode = 'DEVICE_ERROR' } }
+  if ($status -match 'Deleted|Deleting') {
+    return @{ outcome = 'FAULT'; failureCode = 'CANCELED_AT_DEVICE' }
+  }
+  if ($status -match 'Paused|Offline') {
+    return @{ outcome = 'FAULT'; failureCode = 'PRINTER_OFFLINE' }
+  }
+  if ($status -match 'Printed|Completed') { return @{ outcome = 'COMPLETED'; failureCode = $null } }
+  return @{ outcome = 'OPEN'; failureCode = $null }
+}
+
+<#
+.SYNOPSIS
+  Turn every job's evidence into one operation report. Pure, and the unit the
+  behavioural tests in print-host.tests.ps1 drive directly.
+
+.DESCRIPTION
+  Only two shapes may claim certainty, and they are the two the agent's own
+  clamp will accept: a completion where every job was accounted for, and a
+  failure that proved no page moved anywhere. Anything with a job this host
+  cannot account for stays unconfirmed and is settled by a person.
+#>
+function Resolve-OperationOutcome {
+  param($Observations, [bool] $CancelRequested)
+
+  $open = 0
+  $lost = 0
+  $knownSheets = 0
+  $failureCode = $null
+  $anyReportedPage = $false
+
+  foreach ($observation in @($Observations)) {
+    if ([int]$observation.pagesPrinted -gt 0) { $anyReportedPage = $true }
+    $resolution = Resolve-JobOutcome -Observation $observation -CancelRequested $CancelRequested
+    switch ($resolution.outcome) {
+      'COMPLETED' { $knownSheets += [int]$observation.expectedSheets }
+      'FAULT' { if ($null -eq $failureCode) { $failureCode = [string]$resolution.failureCode } }
+      'OPEN' { $open++ }
+      default { $lost++ }
+    }
+  }
+
+  if ($null -ne $failureCode) {
+    # Nothing came out only when every job is accounted for and none of them
+    # moved paper. A sibling job still printing, or one nobody can account for,
+    # both leave that claim unavailable.
+    $provedZero = -not $anyReportedPage -and $knownSheets -eq 0 -and $lost -eq 0 -and $open -eq 0
+    return @{
+      state = if ($failureCode -eq 'CANCELED_AT_DEVICE') { 'CANCELED' } else { 'FAILED' }
+      confidence = if ($provedZero) { 'CONFIRMED' } else { 'UNCONFIRMED' }
+      failureCode = $failureCode
+      warningCode = $null
+      sheetsProduced = if ($provedZero) { 0 } else { $null }
+      open = 0
+    }
+  }
+
+  if ($open -gt 0) {
+    return @{
+      state = 'PRINTING'; confidence = 'UNCONFIRMED'; failureCode = $null
+      warningCode = $null; sheetsProduced = $null; open = $open
+    }
+  }
+
+  if ($lost -gt 0) {
+    return @{
+      state = 'COMPLETED'; confidence = 'UNCONFIRMED'; failureCode = $null
+      warningCode = $null; sheetsProduced = $null; open = 0
+    }
+  }
+
+  return @{
+    state = 'COMPLETED'; confidence = 'CONFIRMED'; failureCode = $null
+    warningCode = $null; sheetsProduced = $knownSheets; open = 0
+  }
+}
+
+<#
+.SYNOPSIS
+  Read one job's current evidence from the spooler and persist what is durable.
+
+.DESCRIPTION
+  `observed`, `faulted` and `completed` are sticky: they record something this
+  host saw at a moment that will not come back. A job seen printing and then
+  gone is a completion; the same job, unobserved, is only an absence.
+#>
+function Update-JobObservation {
+  param($Job, [string] $QueueName, [ref] $Changed)
+
+  $jobName = [string](Get-Field -Source $Job -Name 'jobName' -Default '')
+  $observation = [pscustomobject]@{
+    position = [int](Get-Field -Source $Job -Name 'position' -Default 0)
+    jobId = [int](Get-Field -Source $Job -Name 'jobId' -Default 0)
+    jobName = $jobName
+    expectedPages = [int](Get-Field -Source $Job -Name 'expectedPages' -Default 0)
+    expectedSheets = [int](Get-Field -Source $Job -Name 'expectedSheets' -Default 0)
+    pagesPrinted = [int](Get-Field -Source $Job -Name 'pagesPrinted' -Default 0)
+    observed = [bool](Get-Field -Source $Job -Name 'observed' -Default $false)
+    faulted = [bool](Get-Field -Source $Job -Name 'faulted' -Default $false)
+    faultCode = [string](Get-Field -Source $Job -Name 'faultCode' -Default '')
+    completed = [bool](Get-Field -Source $Job -Name 'completed' -Default $false)
+    present = $false
+    status = ''
+  }
+  # A job already resolved keeps its answer. Asking the spooler again could only
+  # find a different job wearing a recycled identifier.
+  if ($observation.completed -or $observation.faulted) { return $observation }
+
+  $current = Get-PrintJob -PrinterName $QueueName -ID $observation.jobId -ErrorAction SilentlyContinue
+  if ($null -ne $current) {
+    # A spooler restart renumbers jobs from one, so an identifier alone does not
+    # name this operation's work. The document name is what makes it ours.
+    $documentName = [string](Get-Field -Source $current -Name 'DocumentName' -Default '')
+    if ($documentName -ne $jobName) {
+      Write-LocalEvent -EventName 'job.identity-mismatch' -Level 'warn' -Fields @{
+        jobId = $observation.jobId; expectedJobName = $jobName
+      }
+      $current = $null
+    }
+  }
+
+  if ($null -eq $current) { return $observation }
+
+  $observation.present = $true
+  $observation.status = [string](Get-Field -Source $current -Name 'JobStatus' -Default '')
+  if (-not $observation.observed) {
+    $observation.observed = $true
+    Set-Field -Target $Job -Name 'observed' -Value $true
+    $Changed.Value = $true
+  }
+
+  $pagesPrinted = [int](Get-Field -Source $current -Name 'PagesPrinted' -Default 0)
+  if ($pagesPrinted -gt $observation.pagesPrinted) {
+    $observation.pagesPrinted = $pagesPrinted
+    Set-Field -Target $Job -Name 'pagesPrinted' -Value $pagesPrinted
+    $Changed.Value = $true
+  }
+  if ([string](Get-Field -Source $Job -Name 'lastStatus' -Default '') -ne $observation.status) {
+    Set-Field -Target $Job -Name 'lastStatus' -Value $observation.status
+    $Changed.Value = $true
+  }
+  return $observation
+}
+
 function Get-OperationReport {
-  param([string] $OperationId, [string] $QueueName, [bool] $WaitForCompletion)
+  param(
+    [string] $OperationId,
+    [string] $QueueName,
+    [bool] $WaitForCompletion,
+    [int] $WaitSeconds = $DefaultObserveSeconds
+  )
 
   $state = Read-OperationState -OperationId $OperationId
   if ($null -eq $state -or @($state.jobs).Count -eq 0) {
@@ -765,84 +1212,68 @@ function Get-OperationReport {
     }
   }
 
-  $deadline = (Get-Date).AddMinutes(4)
+  # A job this host removed on request cannot be read as one that retired
+  # cleanly, however it looks from the queue afterwards.
+  $cancelRequested = [bool](Get-Field -Source $state -Name 'cancelRequested' -Default $false)
+  $deadline = (Get-Date).AddSeconds($WaitSeconds)
+
   while ($true) {
-    $open = 0
-    $failed = $null
-    $knownSheets = 0
-    $allCompletedKnown = $true
-    $anyReportedPage = $false
     $stateChanged = $false
-
+    $observations = @()
     foreach ($job in @($state.jobs)) {
-      $current = Get-PrintJob -PrinterName $QueueName -ID $job.jobId -ErrorAction SilentlyContinue
-      if ($null -eq $current) {
-        if ([bool]$job.completed -or [int]$job.pagesPrinted -ge [int]$job.expectedPages) {
-          $knownSheets += [int]$job.expectedSheets
-        } else {
-          $allCompletedKnown = $false
-        }
-        continue
-      }
-
-      $status = [string]$current.JobStatus
-      $pagesPrinted = if ($null -ne $current.PagesPrinted) { [int]$current.PagesPrinted } else { 0 }
-      if ($pagesPrinted -gt [int]$job.pagesPrinted) {
-        $job.pagesPrinted = $pagesPrinted
+      $observation = Update-JobObservation -Job $job -QueueName $QueueName -Changed ([ref]$stateChanged)
+      $resolution = Resolve-JobOutcome -Observation $observation -CancelRequested $cancelRequested
+      # Persist the moment a job stops being open, so the answer survives a
+      # restart and a later poll cannot reach a different conclusion.
+      if ($resolution.outcome -eq 'COMPLETED' -and -not $observation.completed) {
+        $observation.completed = $true
+        Set-Field -Target $job -Name 'completed' -Value $true
+        $stateChanged = $true
+      } elseif ($resolution.outcome -eq 'FAULT' -and -not $observation.faulted) {
+        $observation.faulted = $true
+        $observation.faultCode = [string]$resolution.failureCode
+        Set-Field -Target $job -Name 'faulted' -Value $true
+        Set-Field -Target $job -Name 'faultCode' -Value $observation.faultCode
         $stateChanged = $true
       }
-      if ([int]$job.pagesPrinted -gt 0) { $anyReportedPage = $true }
-
-      if ($status -match 'PaperOut') { $failed = 'OUT_OF_PAPER' }
-      elseif ($status -match 'Error|Blocked') { $failed = 'DEVICE_ERROR' }
-      elseif ($status -match 'Deleted|Deleting') { $failed = 'CANCELED_AT_DEVICE' }
-      elseif ($status -match 'Paused|Offline') { $failed = 'PRINTER_OFFLINE' }
-      elseif ($status -match 'Printed|Completed') {
-        if ([int]$job.pagesPrinted -ge [int]$job.expectedPages) {
-          if (-not [bool]$job.completed) {
-            $job.completed = $true
-            $stateChanged = $true
-          }
-          $knownSheets += [int]$job.expectedSheets
-        } else {
-          $allCompletedKnown = $false
-        }
-      } else {
-        $open++
-        $allCompletedKnown = $false
-      }
+      $observations += $observation
     }
-
     if ($stateChanged) { Write-OperationState -OperationId $OperationId -State $state }
 
-    if ($null -ne $failed) {
-      $provedZero = -not $anyReportedPage -and $knownSheets -eq 0
-      return @{
-        state = if ($failed -eq 'CANCELED_AT_DEVICE') { 'CANCELED' } else { 'FAILED' }
-        confidence = if ($provedZero) { 'CONFIRMED' } else { 'UNCONFIRMED' }
-        failureCode = $failed
-        warningCode = $null
-        sheetsProduced = if ($provedZero) { 0 } else { $null }
-      }
+    $outcome = Resolve-OperationOutcome -Observations $observations -CancelRequested $cancelRequested
+    $report = @{
+      state = $outcome.state
+      confidence = $outcome.confidence
+      failureCode = $outcome.failureCode
+      warningCode = $outcome.warningCode
+      sheetsProduced = $outcome.sheetsProduced
     }
-    if ($open -eq 0) {
-      return @{
-        state = 'COMPLETED'
-        confidence = if ($allCompletedKnown) { 'CONFIRMED' } else { 'UNCONFIRMED' }
-        failureCode = $null
-        warningCode = $null
-        sheetsProduced = if ($allCompletedKnown) { $knownSheets } else { $null }
+
+    if ([int]$outcome.open -eq 0 -or -not $WaitForCompletion -or (Get-Date) -ge $deadline) {
+      Write-LocalEvent -EventName 'operation.report' -Fields @{
+        queue = $QueueName
+        reportState = [string]$report.state
+        confidence = [string]$report.confidence
+        failureCode = [string]$report.failureCode
+        sheetsProduced = $report.sheetsProduced
+        openJobs = [int]$outcome.open
+        jobs = @(@($observations) | ForEach-Object {
+          @{
+            jobId = $_.jobId; position = $_.position; present = [bool]$_.present
+            status = [string]$_.status; observed = [bool]$_.observed
+            faulted = [bool]$_.faulted; completed = [bool]$_.completed
+            pagesPrinted = [int]$_.pagesPrinted; expectedPages = [int]$_.expectedPages
+          }
+        })
       }
-    }
-    if (-not $WaitForCompletion -or (Get-Date) -ge $deadline) {
-      return @{
-        state = 'PRINTING'; confidence = 'UNCONFIRMED'; failureCode = $null
-        warningCode = $null; sheetsProduced = $null
-      }
+      return $report
     }
     Start-Sleep -Seconds 1
   }
 }
+
+# A library load stops here with every function defined and nothing performed.
+if ($AsLibrary) { return }
 
 try {
   $raw = [Console]::In.ReadToEnd()

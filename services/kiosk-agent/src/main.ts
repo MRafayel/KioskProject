@@ -14,7 +14,7 @@ const AGENT_VERSION = "0.0.0";
 loadWorkspaceEnvironmentFile();
 const environment = loadNonAdminEnvironment();
 const relay = new SessionEventRelay(environment);
-const app = await buildAgent(environment, { eventSource: relay });
+const app = await buildAgent(environment, { eventSource: relay, logger: true });
 const realtime = new CloudRealtimeConnection(environment, relay);
 
 // The printer lives on this machine, behind the adapter contract. Which device

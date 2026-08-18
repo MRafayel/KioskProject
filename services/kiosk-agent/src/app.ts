@@ -20,6 +20,14 @@ const API_FORWARD_TIMEOUT_MS = 10_000;
 export interface BuildAgentOptions {
   upstreamFetch?: UpstreamFetch;
   eventSource?: SessionEventSource;
+  /**
+   * Whether this instance logs. Off by default so tests stay quiet; `main.ts`
+   * turns it on. It is not merely a Fastify request log: `app.log` is what the
+   * print runner and the device reporter write through, so with it disabled the
+   * only component that touches a printer produces no record of anything it
+   * did — which is the state this kiosk shipped in.
+   */
+  logger?: boolean;
 }
 
 export async function buildAgent(
@@ -27,7 +35,26 @@ export async function buildAgent(
   options: BuildAgentOptions = {}
 ): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: false,
+    logger: options.logger
+      ? {
+          level: environment.LOG_LEVEL,
+          // The agent carries the kiosk's device credential on every upstream
+          // call and a claim token on every document fetch. Neither may reach a
+          // log file on a machine strangers stand in front of.
+          redact: {
+            paths: [
+              "req.headers.authorization",
+              "req.headers.cookie",
+              "req.headers['idempotency-key']",
+              "req.headers['x-print-claim-token']",
+              "headers.authorization",
+              "authorization",
+              "claimToken"
+            ],
+            censor: "[REDACTED]"
+          }
+        }
+      : false,
     logController: new LogController({
       disableRequestLogging: true
     })

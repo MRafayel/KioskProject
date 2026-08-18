@@ -159,7 +159,14 @@ function buildTransport(
   };
 }
 
-function buildRunner(adapter: PrinterAdapter, fetchImpl: typeof fetch) {
+function buildRunner(
+  adapter: PrinterAdapter,
+  fetchImpl: typeof fetch,
+  overrides: {
+    leaseRenewalMilliseconds?: number;
+    devicePollIntervalMilliseconds?: number;
+  } = {}
+) {
   return new PrintCommandRunner({
     environment: loadEnvironment({
       NODE_ENV: "test",
@@ -168,7 +175,8 @@ function buildRunner(adapter: PrinterAdapter, fetchImpl: typeof fetch) {
     }),
     adapter,
     logger: silentLogger,
-    fetch: fetchImpl
+    fetch: fetchImpl,
+    ...overrides
   });
 }
 
@@ -457,6 +465,164 @@ function completed(): PrintOperationStatus {
     sheetsProduced: 2
   };
 }
+
+describe("PrintCommandRunner while the device holds the work", () => {
+  it("renews the lease for as long as the device is printing", async () => {
+    // A print slower than one lease used to be reclaimed mid-flight: the paper
+    // came out, the agent's result was refused as stale, and a healthy job
+    // settled into operator recovery.
+    const transport = buildTransport([buildCommand()]);
+    const adapter = stubAdapter(() => ({
+      operationId,
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      failureCode: null,
+      warningCode: null,
+      sheetsProduced: 2
+    }));
+    const slowAdapter: PrinterAdapter = {
+      ...adapter,
+      submit: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return {
+          operationId,
+          state: "COMPLETED" as const,
+          confidence: "CONFIRMED" as const,
+          failureCode: null,
+          warningCode: null,
+          sheetsProduced: 2
+        };
+      }
+    };
+
+    await buildRunner(slowAdapter, transport.fetch as typeof fetch, {
+      leaseRenewalMilliseconds: 20
+    }).runOnce();
+
+    const states = transport.progress().map((entry) => entry.body.state);
+    expect(states.slice(0, 2)).toEqual(["PREPARING", "SUBMITTED"]);
+    // The renewals are the point: without them the lease expires mid-print.
+    expect(states.filter((state) => state === "PRINTING").length).toBeGreaterThan(0);
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED"
+    });
+  });
+
+  it("stops renewing once the control plane refuses, and still reports the outcome", async () => {
+    // A lost lease cannot be regained with the old claim token, so retrying
+    // would only produce a log line per interval. The print is deliberately
+    // left running: stopping changes nothing at the printer.
+    const transport = buildTransport([buildCommand()], undefined, "PRINTING");
+    const slowAdapter = {
+      ...stubAdapter(() => ({
+        operationId,
+        state: "COMPLETED" as const,
+        confidence: "CONFIRMED" as const,
+        failureCode: null,
+        warningCode: null,
+        sheetsProduced: 2
+      })),
+      submit: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return {
+          operationId,
+          state: "COMPLETED" as const,
+          confidence: "CONFIRMED" as const,
+          failureCode: null,
+          warningCode: null,
+          sheetsProduced: 2
+        };
+      }
+    };
+
+    await buildRunner(slowAdapter, transport.fetch as typeof fetch, {
+      leaseRenewalMilliseconds: 20
+    }).runOnce();
+
+    const renewals = transport.progress().filter((entry) => entry.body.state === "PRINTING");
+    expect(renewals).toHaveLength(1);
+    expect(transport.results()).toHaveLength(1);
+  });
+
+  it("waits out a device that has not finished describing its work", async () => {
+    // The host answers when its observation budget runs out, not when the
+    // printer stops. Reporting `PRINTING` as a final result would settle a
+    // healthy print into operator recovery.
+    const transport = buildTransport([buildCommand()]);
+    let statusCalls = 0;
+    const adapter = stubAdapter(
+      () => ({
+        operationId,
+        state: "PRINTING",
+        confidence: "UNCONFIRMED",
+        failureCode: null,
+        warningCode: null,
+        sheetsProduced: null
+      }),
+      () => {
+        statusCalls += 1;
+        return statusCalls < 2
+          ? {
+              operationId,
+              state: "PRINTING",
+              confidence: "UNCONFIRMED",
+              failureCode: null,
+              warningCode: null,
+              sheetsProduced: null
+            }
+          : {
+              operationId,
+              state: "COMPLETED",
+              confidence: "CONFIRMED",
+              failureCode: null,
+              warningCode: null,
+              sheetsProduced: 2
+            };
+      }
+    );
+
+    await buildRunner(adapter, transport.fetch as typeof fetch, {
+      devicePollIntervalMilliseconds: 10
+    }).runOnce();
+
+    expect(statusCalls).toBeGreaterThanOrEqual(2);
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      sheetsProduced: 2
+    });
+  });
+
+  it("reports work still open at the job deadline as unknown, never as done", async () => {
+    // The deadline is already behind us, so the only exit from the wait is the
+    // deadline branch. A device that never stops saying `PRINTING` must not be
+    // waited on past the point where the control plane settles the job anyway.
+    const transport = buildTransport([
+      buildCommand({ deadlineAt: new Date(Date.now() - 1_000).toISOString() })
+    ]);
+    const stillPrinting = (): PrintOperationStatus => ({
+      operationId,
+      state: "PRINTING",
+      confidence: "UNCONFIRMED",
+      failureCode: null,
+      warningCode: null,
+      sheetsProduced: null
+    });
+    const adapter = stubAdapter(stillPrinting, stillPrinting);
+
+    await buildRunner(adapter, transport.fetch as typeof fetch, {
+      devicePollIntervalMilliseconds: 10
+    }).runOnce();
+
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "UNKNOWN",
+      confidence: "UNCONFIRMED",
+      failureCode: "SUBMISSION_UNCONFIRMED",
+      sheetsProduced: null
+    });
+  });
+});
 
 function stubAdapter(
   submit: () => PrintOperationStatus,
