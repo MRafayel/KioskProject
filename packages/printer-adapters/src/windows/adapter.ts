@@ -221,34 +221,7 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
       )
     );
 
-    await this.rememberJobIds(submission.operationId, report);
     return withHonestConfidence(operationStatus(submission.operationId, withDiagnostics(report)));
-  }
-
-  /**
-   * Write the queue's own job numbers into this machine's record of the
-   * operation.
-   *
-   * The journal already proves a submission happened — that is what forbids a
-   * reprint — but until now it could not say *which* spooler job, so a machine
-   * recovered after a crash held paper it could not connect to an operation.
-   *
-   * Deliberately after the device has answered: it adds nothing to the path a
-   * customer waits on, and a failure to write it must never change an outcome
-   * that has already been decided. It is a record, not a decision.
-   */
-  private async rememberJobIds(
-    operationId: string,
-    report: DeviceHostOperationReport
-  ): Promise<void> {
-    for (const job of report.diagnostics?.jobs ?? []) {
-      if (job.jobId <= 0) continue;
-      try {
-        await this.journal.recordJobId(operationId, job.position, String(job.jobId));
-      } catch {
-        // The operation stands on the answer above, not on this.
-      }
-    }
   }
 
   public async getOperationStatus(operationId: string): Promise<PrintOperationStatus> {

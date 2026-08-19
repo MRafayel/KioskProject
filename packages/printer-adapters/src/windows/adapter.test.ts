@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -467,44 +467,6 @@ describe("WindowsPrinterAdapter cancellation and retention", () => {
     expect(discarded).toBe(1);
     expect(await readdir(journalDirectory)).toHaveLength(0);
     expect(host.requests.some((request) => request.op === "discard")).toBe(true);
-  });
-});
-
-describe("the record this machine keeps of what a device holds", () => {
-  it("stores the queue's own job number beside the operation", async () => {
-    const host = new FakeDeviceHost();
-    host.answer("submit", {
-      state: "COMPLETED",
-      confidence: "CONFIRMED",
-      sheetsProduced: 3,
-      diagnostics: { jobs: [{ position: 0, jobId: 23 }] }
-    });
-    const adapter = buildAdapter(host);
-    await adapter.submit(await submission());
-
-    // Without this, a machine recovered after a crash holds paper it cannot
-    // connect to any operation.
-    const record = JSON.parse(
-      await readFile(join(journalDirectory, `${operationId}.json`), "utf8")
-    ) as { documents: { jobId: string | null }[] };
-    expect(record.documents[0]?.jobId).toBe("23");
-  });
-
-  it("does not let a failure to write the record change a settled outcome", async () => {
-    const host = new FakeDeviceHost();
-    // A host that answered but named no job. The print still completed.
-    host.answer("submit", {
-      state: "COMPLETED",
-      confidence: "CONFIRMED",
-      sheetsProduced: 3,
-      diagnostics: { jobs: [{ position: 9, jobId: 0 }] }
-    });
-    const adapter = buildAdapter(host);
-
-    await expect(adapter.submit(await submission())).resolves.toMatchObject({
-      state: "COMPLETED",
-      confidence: "CONFIRMED"
-    });
   });
 });
 
