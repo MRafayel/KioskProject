@@ -59,7 +59,18 @@ $DiagnosticArchivePath = Join-Path $DiagnosticDirectory 'diagnostics.previous.js
 # power. Two files of this size is the whole local footprint.
 $DiagnosticMaxBytes = 256KB
 $DiagnosticMaxAgeHours = 48
-$SupportedDriverName = 'Canon Generic Plus UFR II'
+# Which printer/driver combinations are certified. The caller supplies these on
+# the request, because approving a printer model is an operator decision like
+# the queue allowlist, not a property of this script — approving a second model
+# must not mean editing a file on every kiosk.
+#
+# These are the fall-back, so a host run by hand for diagnostics still refuses
+# an uncertified queue, and a deployment that configures nothing behaves exactly
+# as it does today.
+$ReferencePrinterProfiles = @(
+  @{ driverName = 'Canon Generic Plus UFR II'; portPattern = '^USB\d+$' }
+)
+$script:ApprovedProfiles = $ReferencePrinterProfiles
 $MaximumCopies = 10
 $MaximumSelectedPages = 200
 $RenderLongEdgePixels = 3508 # A4 at 300 DPI.
@@ -517,6 +528,59 @@ function Set-Field {
   }
 }
 
+function Read-ApprovedProfiles {
+  param($Request)
+
+  $supplied = Get-Field -Source $Request -Name 'profiles'
+  if ($null -eq $supplied) { return $ReferencePrinterProfiles }
+
+  $profiles = @()
+  foreach ($entry in @($supplied)) {
+    $driverName = [string](Get-Field -Source $entry -Name 'driverName' -Default '')
+    $portPattern = [string](Get-Field -Source $entry -Name 'portPattern' -Default '')
+    if ([string]::IsNullOrWhiteSpace($driverName) -or [string]::IsNullOrWhiteSpace($portPattern)) {
+      continue
+    }
+    $profiles += @{ driverName = $driverName; portPattern = $portPattern }
+  }
+
+  # A request that carried profiles but none of them usable approves nothing.
+  # Falling back to the reference printer here would print a paid job on a model
+  # this deployment's operator never certified.
+  if ($profiles.Count -eq 0) { Write-Failure -Code 'QUEUE_NOT_APPROVED' -Ambiguous $false }
+  return $profiles
+}
+
+<#
+.SYNOPSIS
+  Whether a queue matches a certified printer profile. Pure and testable.
+.DESCRIPTION
+  Local, unshared and USB is the security boundary and is not configurable: this
+  host prints over a cable to a machine standing next to it, and nothing here
+  may open a network path. What a profile chooses is which driver and which port
+  shape are certified, not whether the printing is local.
+#>
+function Test-QueueApproved {
+  param($Printer, $Profiles)
+
+  if ([string]$Printer.Type -ne 'Local') { return $false }
+  if ([bool]$Printer.Shared) { return $false }
+
+  $driverName = [string]$Printer.DriverName
+  $portName = [string]$Printer.PortName
+  foreach ($profile in @($Profiles)) {
+    if ($driverName -ne [string]$profile.driverName) { continue }
+    # A pattern that will not compile disqualifies its own profile rather than
+    # throwing: one bad entry must not take a working printer down with it.
+    try {
+      if ($portName -match [string]$profile.portPattern) { return $true }
+    } catch {
+      continue
+    }
+  }
+  return $false
+}
+
 function Get-QueueOrFail {
   param([string] $QueueName, [bool] $RequireCertifiedUsb = $true)
   if ([string]::IsNullOrWhiteSpace($QueueName)) {
@@ -525,13 +589,8 @@ function Get-QueueOrFail {
   $printer = Get-Printer -Name $QueueName -ErrorAction SilentlyContinue
   if ($null -eq $printer) { Write-Failure -Code 'QUEUE_NOT_FOUND' -Ambiguous $false }
 
-  if ($RequireCertifiedUsb) {
-    $isLocal = [string]$printer.Type -eq 'Local'
-    $isUsb = [string]$printer.PortName -match '^USB\d+$'
-    $isDriver = [string]$printer.DriverName -eq $SupportedDriverName
-    if (-not $isLocal -or -not $isUsb -or [bool]$printer.Shared -or -not $isDriver) {
-      Write-Failure -Code 'QUEUE_NOT_APPROVED' -Ambiguous $false
-    }
+  if ($RequireCertifiedUsb -and -not (Test-QueueApproved -Printer $printer -Profiles $script:ApprovedProfiles)) {
+    Write-Failure -Code 'QUEUE_NOT_APPROVED' -Ambiguous $false
   }
   return $printer
 }
@@ -1072,6 +1131,58 @@ function Invoke-Status {
     -QueueName $printer.Name -WaitForCompletion $false)
 }
 
+<#
+.SYNOPSIS
+  Which queue entries belong to an operation, found by name alone.
+.DESCRIPTION
+  Every job this host creates is named for the operation that paid for it, so
+  the queue itself carries the link. Pure apart from the name matching: the
+  caller supplies the entries.
+
+  This exists for the one case the state file cannot answer. `status` reads
+  what this host wrote down; if that record is gone — a wiped state directory,
+  a disk that lost it, a process killed between StartDoc and the write — the
+  honest answer becomes `NOT_SUBMITTED`, and a job printing in plain sight goes
+  to a person to resolve. The queue is a second, independent witness.
+
+  It cannot answer the opposite case. Windows deletes a completed job the moment
+  it retires, so finding nothing here means "not at the device now", never "this
+  never printed". That reading has to stay ambiguous.
+#>
+function Select-OperationJobs {
+  param([string] $OperationId, $Jobs)
+
+  $found = @()
+  if ([string]::IsNullOrWhiteSpace($OperationId)) { return $found }
+  $pattern = '^' + [regex]::Escape($OperationId) + '#(\d{3})of(\d{3})$'
+
+  foreach ($job in @($Jobs)) {
+    $documentName = [string](Get-Field -Source $job -Name 'DocumentName' -Default '')
+    $match = [regex]::Match($documentName, $pattern, 'IgnoreCase')
+    if (-not $match.Success) { continue }
+    $status = [string](Get-Field -Source $job -Name 'JobStatus' -Default '')
+    $found += @{
+      position = [int]$match.Groups[1].Value
+      jobId = [int](Get-Field -Source $job -Name 'Id' -Default 0)
+      status = $status
+      faulted = [bool]($status -match $QueueFaultPattern)
+    }
+  }
+  return $found
+}
+
+function Invoke-Find {
+  param($Request)
+  $printer = Get-QueueOrFail -QueueName $Request.queue
+  $jobs = @(Get-PrintJob -PrinterName $printer.Name -ErrorAction SilentlyContinue)
+  $found = @(Select-OperationJobs -OperationId ([string]$Request.operationId) -Jobs $jobs)
+  Write-LocalEvent -EventName 'operation.find' -Fields @{
+    queue = $printer.Name
+    matched = $found.Count
+  }
+  Write-Result -Result @{ jobs = $found }
+}
+
 function Invoke-Cancel {
   param($Request)
   $printer = Get-QueueOrFail -QueueName $Request.queue
@@ -1444,6 +1555,11 @@ Add-PhaseMark -Name 'requestRead'
 
 if ($request.protocol -ne 1) { Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false }
 
+# Read once, before anything looks at a queue. Every operation that touches a
+# printer goes through Get-QueueOrFail, so this is the single point where the
+# deployment's certification takes effect.
+$script:ApprovedProfiles = Read-ApprovedProfiles -Request $request
+
 try {
   switch ($request.op) {
     'list-queues'  { Invoke-ListQueues }
@@ -1452,6 +1568,7 @@ try {
     'health'       { Invoke-Health -QueueName $request.queue }
     'submit'       { Invoke-Submit -Request $request }
     'status'       { Invoke-Status -Request $request }
+    'find'         { Invoke-Find -Request $request }
     'cancel'       { Invoke-Cancel -Request $request }
     'discard'      { Invoke-Discard -Request $request }
     default        { Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false }

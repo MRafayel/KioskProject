@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  ENV_FILE_VARIABLE,
   loadEnvironment,
   loadNonAdminEnvironment,
   loadWorkspaceEnvironmentFile,
+  parsePrinterProfiles,
   redisConnectionOptions
 } from "./index.js";
 
@@ -895,6 +897,127 @@ describe("workspace environment file", () => {
       delete process.env.PRINTING_KIOSK_TEST_ROOT_ENV;
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("loads the file a deployment names, whatever the working directory is", () => {
+    // A Windows service starts in C:\Windows\System32. Nothing above it is a
+    // workspace, so discovery is not an option there.
+    const root = mkdtempSync(join(tmpdir(), "printing-kiosk-config-"));
+    const configured = join(root, "agent.env");
+    writeFileSync(configured, "PRINTING_KIOSK_TEST_SERVICE_ENV=loaded\n", "utf8");
+    process.env[ENV_FILE_VARIABLE] = configured;
+    delete process.env.PRINTING_KIOSK_TEST_SERVICE_ENV;
+
+    try {
+      loadWorkspaceEnvironmentFile(tmpdir());
+      expect(process.env.PRINTING_KIOSK_TEST_SERVICE_ENV).toBe("loaded");
+    } finally {
+      delete process.env[ENV_FILE_VARIABLE];
+      delete process.env.PRINTING_KIOSK_TEST_SERVICE_ENV;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The failure this exists to prevent: a service whose configuration is not
+   * where it was told it would be starts on development defaults, which means
+   * `PRINTER_ADAPTER=mock`. The kiosk registers, reports healthy, takes money
+   * and writes the customer's document to a folder.
+   */
+  it("refuses to start when the named file is absent instead of falling back", () => {
+    process.env[ENV_FILE_VARIABLE] = join(tmpdir(), "printing-kiosk-absent-config.env");
+    try {
+      expect(() => loadWorkspaceEnvironmentFile(process.cwd())).toThrow(/does not exist/u);
+    } finally {
+      delete process.env[ENV_FILE_VARIABLE];
+    }
+  });
+});
+
+describe("a machine installed as a service", () => {
+  const serviceEnvironment = {
+    NODE_ENV: "development",
+    PRINTING_KIOSK_SERVICE: "true",
+    PRINTER_ADAPTER: "windows",
+    PRINTER_WINDOWS_HOST_PATH: "C:\\PrintingKiosk\\print-host.ps1",
+    PRINTER_QUEUE_ALLOWLIST: "Kiosk A4"
+  } as const;
+
+  it("accepts a deployment that drives a real device", () => {
+    expect(loadEnvironment(serviceEnvironment)).toMatchObject({
+      PRINTING_KIOSK_SERVICE: true,
+      PRINTER_ADAPTER: "windows"
+    });
+  });
+
+  /**
+   * NODE_ENV describes the build; this describes the machine. An unattended
+   * kiosk that simulates its printer is the same failure whatever the build
+   * calls itself, so the refusal cannot be gated on NODE_ENV.
+   */
+  it("refuses the simulated printer even outside production", () => {
+    expect(() =>
+      loadEnvironment({ ...serviceEnvironment, PRINTER_ADAPTER: "mock" })
+    ).toThrow(/must drive a real device when installed as a service/u);
+  });
+
+  it("refuses the switches that let a build pretend", () => {
+    expect(() =>
+      loadEnvironment({ ...serviceEnvironment, PAYMENT_TEST_OUTCOMES_ENABLED: "true" })
+    ).toThrow(/PAYMENT_TEST_OUTCOMES_ENABLED must be false when installed as a service/u);
+    expect(() =>
+      loadEnvironment({ ...serviceEnvironment, PRINT_TEST_OUTCOMES_ENABLED: "true" })
+    ).toThrow(/PRINT_TEST_OUTCOMES_ENABLED must be false when installed as a service/u);
+  });
+
+  it("leaves a development machine alone", () => {
+    // The same simulated printer, without the marker, is what development is.
+    expect(loadEnvironment({ NODE_ENV: "development", PRINTER_ADAPTER: "mock" })).toMatchObject({
+      PRINTING_KIOSK_SERVICE: false,
+      PRINTER_ADAPTER: "mock"
+    });
+  });
+});
+
+describe("certified printer profiles", () => {
+  it("keeps the reference printer when a deployment configures nothing", () => {
+    expect(parsePrinterProfiles("")).toEqual([
+      { driverName: "Canon Generic Plus UFR II", portPattern: "^USB\\d+$" }
+    ]);
+  });
+
+  it("approves a second model without the device host changing", () => {
+    const profiles = parsePrinterProfiles(
+      JSON.stringify([
+        { driverName: "Canon Generic Plus UFR II", portPattern: "^USB\\d+$" },
+        { driverName: "Brother HL-L2400 series", portPattern: "^USB\\d+$" }
+      ])
+    );
+    expect(profiles).toHaveLength(2);
+    expect(profiles?.[1]).toMatchObject({ driverName: "Brother HL-L2400 series" });
+  });
+
+  it("reports configuration nobody can act on rather than defaulting", () => {
+    // Silently returning the reference printer here would print a paid job on a
+    // model this operator never certified.
+    expect(parsePrinterProfiles("not json")).toBeNull();
+    expect(parsePrinterProfiles("[]")).toBeNull();
+    expect(parsePrinterProfiles(JSON.stringify([{ driverName: "Canon" }]))).toBeNull();
+    expect(
+      parsePrinterProfiles(JSON.stringify([{ driverName: "Canon", portPattern: "^USB(\\d+$" }]))
+    ).toBeNull();
+  });
+
+  it("refuses to start on a profile it cannot read", () => {
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: "test",
+        PRINTER_ADAPTER: "windows",
+        PRINTER_WINDOWS_HOST_PATH: "C:\\PrintingKiosk\\print-host.ps1",
+        PRINTER_QUEUE_ALLOWLIST: "Kiosk A4",
+        PRINTER_DEVICE_PROFILES: "{}"
+      })
+    ).toThrow(/PRINTER_DEVICE_PROFILES/u);
   });
 });
 

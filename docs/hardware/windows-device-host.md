@@ -306,13 +306,51 @@ defaults are not A4 and monochrome. The queue name is deployment data, so
 another certified installation of the same printer may use `USB002` or a
 different operator-chosen queue name.
 
-The **driver name and the port pattern are still source-code constants**
-(`$SupportedDriverName`, `'^USB\d+$'`). Approving a second printer model today
-means editing this script, which is not where that decision belongs — it is
-operator certification, like the queue allowlist. Moving both into a
-configuration-driven profile is outstanding work. Until then, an unsupported
-printer must still fail the way it does now: `QUEUE_NOT_APPROVED`, explicitly,
-never a crash and never a silent fall-back to another queue.
+The driver name and the port pattern are **deployment configuration**, sent on
+every request as `profiles`. Approving a second printer model is an operator
+certification decision, like the queue allowlist, and it must not mean editing
+this script on every kiosk:
+
+```dotenv
+PRINTER_DEVICE_PROFILES=[{"driverName":"Canon Generic Plus UFR II","portPattern":"^USB\\d+$"}]
+```
+
+Empty keeps the reference profile above, so a deployment that configures nothing
+behaves exactly as it does today. Configuration that cannot be read is refused
+at startup rather than defaulted — falling back to the reference printer would
+print a paid job on a model nobody certified.
+
+What is **not** configurable is the boundary itself: `Test-QueueApproved`
+refuses a shared or non-local queue whatever a profile says. This host prints
+over a cable to a machine standing beside it, and no configuration may open a
+network path. A queue matching no profile fails the way it always has —
+`QUEUE_NOT_APPROVED`, explicitly, never a crash and never a silent fall-back to
+another queue.
+
+### Finding a job when the state file is gone
+
+`status` reads what this host wrote down. If that record is lost — a wiped state
+directory, a disk that lost it, a process killed between `StartDoc` and the
+write — it answers `NOT_SUBMITTED` for work that may be printing in plain sight,
+and a healthy job settles into operator recovery.
+
+The `find` operation is the second witness. Every job is created under a name
+derived from its operation (`{operationId}#000of001`), so the queue itself
+carries the link:
+
+```json
+{ "op": "find", "queue": "...", "operationId": "..." }
+→ { "jobs": [{ "position": 0, "jobId": 23, "status": "Printing", "faulted": false }] }
+```
+
+The adapter asks only on that branch. A match that is not faulted means the work
+is still open, so the caller keeps waiting instead of giving up on it.
+
+**It cannot answer the opposite question.** Windows deletes a job the moment it
+retires, so an empty queue looks identical whether the paper came out or the job
+never existed. That reading stays `UNKNOWN`. This narrows the recovery cases; it
+does not remove them, and `find` never reconstructs the lost state file — that
+would mean inventing how many sheets were expected.
 
 ### Running the host's tests
 

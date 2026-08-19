@@ -31,13 +31,16 @@ import {
   DEVICE_HOST_PROTOCOL_VERSION,
   readCapabilityDeclaration,
   readDiscardCount,
+  readFoundJobs,
   readHostBinding,
   readHostHealth,
   readHostResult,
   readOperationReport,
   readQueueList,
+  type DeviceHostFoundJob,
   type DeviceHostOperationReport,
-  type DeviceHostRequest
+  type DeviceHostRequest,
+  type DevicePrinterProfile
 } from "./protocol.js";
 
 /** How a request is carried to the device host. */
@@ -51,6 +54,11 @@ export interface WindowsPrinterAdapterOptions {
   queueName: string;
   /** Queue names an operator certified for this kiosk. Empty approves none. */
   approvedQueues: readonly string[];
+  /**
+   * Printer/driver combinations an operator certified. Empty leaves the host on
+   * its reference profile, which is what an unconfigured deployment expects.
+   */
+  approvedProfiles?: readonly DevicePrinterProfile[];
   journalDirectory: string;
   maxCopies: number;
   requestTimeoutMilliseconds?: number;
@@ -213,7 +221,34 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
       )
     );
 
+    await this.rememberJobIds(submission.operationId, report);
     return withHonestConfidence(operationStatus(submission.operationId, withDiagnostics(report)));
+  }
+
+  /**
+   * Write the queue's own job numbers into this machine's record of the
+   * operation.
+   *
+   * The journal already proves a submission happened — that is what forbids a
+   * reprint — but until now it could not say *which* spooler job, so a machine
+   * recovered after a crash held paper it could not connect to an operation.
+   *
+   * Deliberately after the device has answered: it adds nothing to the path a
+   * customer waits on, and a failure to write it must never change an outcome
+   * that has already been decided. It is a record, not a decision.
+   */
+  private async rememberJobIds(
+    operationId: string,
+    report: DeviceHostOperationReport
+  ): Promise<void> {
+    for (const job of report.diagnostics?.jobs ?? []) {
+      if (job.jobId <= 0) continue;
+      try {
+        await this.journal.recordJobId(operationId, job.position, String(job.jobId));
+      } catch {
+        // The operation stands on the answer above, not on this.
+      }
+    }
   }
 
   public async getOperationStatus(operationId: string): Promise<PrintOperationStatus> {
@@ -238,9 +273,71 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
     // The host says the spooler has no record. If this machine wrote one, the
     // job history was purged or the host lost its state, and neither of those
     // is evidence that nothing printed.
-    if (report.state === "NOT_SUBMITTED" && record) return unknownStatus(operationId);
+    //
+    // Before settling for that, ask the queue directly. Every job is named for
+    // its operation, so the queue can answer where the host's own notes cannot.
+    if (report.state === "NOT_SUBMITTED" && record) {
+      const found = await this.findQueuedJobs(operationId);
+      // Still in the queue and not in trouble: the work is open, not lost. That
+      // keeps the caller waiting instead of sending a healthy print to a person.
+      if (found.length > 0 && !found.some((job) => job.faulted)) {
+        return operationStatus(operationId, {
+          state: "PRINTING",
+          confidence: "UNCONFIRMED",
+          failureCode: null,
+          sheetsProduced: null,
+          deviceDiagnostics: {
+            queueName: this.options.queueName,
+            pollCount: null,
+            processStartMs: null,
+            phaseMs: {},
+            jobs: found.map((job) => ({
+              position: job.position,
+              jobId: job.jobId,
+              present: true,
+              observed: true,
+              completed: false,
+              faulted: job.faulted,
+              status: job.status,
+              pagesPrinted: 0,
+              expectedPages: 0,
+              expectedSheets: 0
+            })),
+            stage: "status.found-by-job-name"
+          }
+        });
+      }
+      // Nothing there, or something faulted. Neither can be read as "nothing
+      // printed": Windows deletes a job the moment it retires, so an empty queue
+      // looks identical whether the paper came out or the job never existed.
+      return unknownStatus(operationId);
+    }
 
     return withHonestConfidence(operationStatus(operationId, withDiagnostics(report)));
+  }
+
+  /**
+   * Ask the queue which entries still carry this operation's name.
+   *
+   * Read-only and best-effort. It never reconstructs the host's lost state file
+   * — doing that would mean inventing how many sheets were expected, and a
+   * guess there is exactly what turns an ambiguous outcome into a wrong one.
+   */
+  private async findQueuedJobs(operationId: string): Promise<DeviceHostFoundJob[]> {
+    try {
+      return readFoundJobs(
+        await this.call({
+          protocol: DEVICE_HOST_PROTOCOL_VERSION,
+          op: "find",
+          queue: this.approvedQueue(),
+          operationId
+        })
+      );
+    } catch {
+      // An older host does not know this operation, and a broken one is why we
+      // are here. Either way the caller falls back to the ambiguous answer.
+      return [];
+    }
   }
 
   public async cancel(operationId: string): Promise<PrintOperationStatus> {
@@ -326,8 +423,14 @@ export class WindowsPrinterAdapter implements PrinterAdapter, PrinterQueueDiscov
 
   private async call(request: DeviceHostRequest, timeoutMilliseconds?: number): Promise<unknown> {
     let response: unknown;
+    // Attached here rather than at each call site: every operation that reaches
+    // a queue goes through this method, so this is the one place that can be
+    // wrong about which printers a deployment certified.
+    const profiles = this.options.approvedProfiles;
+    const outbound: DeviceHostRequest =
+      profiles && profiles.length > 0 ? { ...request, profiles } : request;
     try {
-      response = await this.options.transport.request(request, {
+      response = await this.options.transport.request(outbound, {
         timeoutMilliseconds:
           timeoutMilliseconds ??
           this.options.requestTimeoutMilliseconds ??

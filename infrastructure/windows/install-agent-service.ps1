@@ -32,6 +32,11 @@
 .PARAMETER NodePath
   Absolute path to the Node runtime the service runs.
 
+.PARAMETER EnvironmentFile
+  The agent's configuration file. Defaults to `.env` inside InstallPath. It is
+  passed to the service explicitly, never discovered, and the install fails if
+  it is absent.
+
 .EXAMPLE
   .\install-agent-service.ps1 -InstallPath 'C:\PrintingKiosk\agent' -NodePath 'C:\Program Files\nodejs\node.exe'
 #>
@@ -41,7 +46,8 @@ param(
   [Parameter(Mandatory = $true)][string] $InstallPath,
   [Parameter(Mandatory = $true)][string] $NodePath,
   [string] $ServiceName = 'PrintingKioskAgent',
-  [string] $DisplayName = 'Printing Kiosk Agent'
+  [string] $DisplayName = 'Printing Kiosk Agent',
+  [string] $EnvironmentFile = ''
 )
 
 Set-StrictMode -Version Latest
@@ -50,6 +56,17 @@ $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $NodePath)) { throw "Node runtime not found: $NodePath" }
 $entryPoint = Join-Path $InstallPath 'dist\main.js'
 if (-not (Test-Path -LiteralPath $entryPoint)) { throw "Agent build not found: $entryPoint" }
+
+# A service starts in C:\Windows\System32, so nothing the agent does may depend
+# on its working directory. The configuration file is therefore named outright
+# rather than discovered by walking upwards for a workspace marker — that walk
+# finds nothing from System32 and the agent would start on development
+# defaults, printing to a folder instead of the printer.
+$environmentFile = if ($EnvironmentFile) { $EnvironmentFile } else { Join-Path $InstallPath '.env' }
+if (-not (Test-Path -LiteralPath $environmentFile)) {
+  throw "Agent configuration not found: $environmentFile"
+}
+$environmentFile = (Resolve-Path -LiteralPath $environmentFile).ProviderPath
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($null -ne $existing) {
@@ -81,6 +98,33 @@ New-Service -Name $ServiceName `
 & sc.exe failure $ServiceName reset= 0 actions= restart/10000/restart/30000/restart/60000 | Out-Null
 & sc.exe failureflag $ServiceName 1 | Out-Null
 
+# The service's own environment. `sc.exe` cannot set one, so it goes where the
+# service control manager reads it from: a REG_MULTI_SZ under the service key.
+#
+# Two variables, and both are about failing closed. The first tells the agent
+# where its configuration is, so it never has to guess. The second tells it that
+# it is a deployment, which is what makes the simulated printer and the
+# test-outcome switches a startup refusal rather than a silent surprise —
+# NODE_ENV describes the build, not the machine.
+$serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+Set-ItemProperty -Path $serviceKey -Name 'Environment' -Type MultiString -Value @(
+  "PRINTING_KIOSK_ENV_FILE=$environmentFile",
+  'PRINTING_KIOSK_SERVICE=true'
+)
+
+# The install directory holds the configuration file, and that file holds this
+# kiosk's API credential. Read rights for the service, which never writes here;
+# everything else stays with administrators.
+$installAcl = Get-Acl -Path $InstallPath
+$installAcl.SetAccessRuleProtection($true, $false)
+$installAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+  "NT SERVICE\$ServiceName", 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+foreach ($identity in @('BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')) {
+  $installAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+}
+Set-Acl -Path $InstallPath -AclObject $installAcl
+
 # The agent's local state — its installation identity, its spool, and its record
 # of what it handed to a device — lives under ProgramData and must be readable
 # only by the service and administrators.
@@ -107,6 +151,7 @@ if (-not [System.Diagnostics.EventLog]::SourceExists($eventSource)) {
 Start-Service -Name $ServiceName
 Write-Host "$DisplayName installed and started."
 Write-Host "State directory: $stateDirectory"
+Write-Host "Configuration:  $environmentFile"
 Write-Host "Agent lifecycle events: Get-WinEvent -LogName Application -MaxEvents 20 |"
 Write-Host "  Where-Object ProviderName -eq '$eventSource'"
 Write-Host "Confirm the kiosk registered: check the API for a kiosk_agents row with a recent heartbeat."

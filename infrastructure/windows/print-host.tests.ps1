@@ -350,3 +350,113 @@ Describe 'Update-JobObservation' -Skip:(-not ($PSVersionTable.Platform -eq 'Win3
     $changed | Should -BeTrue
   }
 }
+
+Describe 'Test-QueueApproved' {
+  BeforeAll {
+    $script:Reference = @(@{ driverName = 'Canon Generic Plus UFR II'; portPattern = '^USB\d+$' })
+    function New-Queue {
+      param(
+        [string] $Type = 'Local',
+        [bool] $Shared = $false,
+        [string] $DriverName = 'Canon Generic Plus UFR II',
+        [string] $PortName = 'USB001'
+      )
+      [pscustomobject]@{
+        Type = $Type; Shared = $Shared; DriverName = $DriverName; PortName = $PortName
+      }
+    }
+  }
+
+  It 'approves the certified printer on a local USB port' {
+    Test-QueueApproved -Printer (New-Queue) -Profiles $script:Reference | Should -BeTrue
+  }
+
+  It 'refuses a driver nobody certified' {
+    $queue = New-Queue -DriverName 'Microsoft Print To PDF'
+    Test-QueueApproved -Printer $queue -Profiles $script:Reference | Should -BeFalse
+  }
+
+  It 'refuses a port shape the profile does not name' {
+    Test-QueueApproved -Printer (New-Queue -PortName 'IP_192.168.0.10') -Profiles $script:Reference |
+      Should -BeFalse
+  }
+
+  # The security boundary, not a profile decision: this host prints over a cable
+  # to a machine standing next to it. No configuration may open a network path.
+  It 'refuses a shared or non-local queue however it is configured' {
+    $everything = @(@{ driverName = 'Microsoft Print To PDF'; portName = 'x'; portPattern = '.*' })
+    Test-QueueApproved -Printer (New-Queue -Shared $true) -Profiles $everything | Should -BeFalse
+    Test-QueueApproved -Printer (New-Queue -Type 'Connection') -Profiles $everything |
+      Should -BeFalse
+  }
+
+  It 'approves a second model without this script changing' {
+    $profiles = @(
+      @{ driverName = 'Canon Generic Plus UFR II'; portPattern = '^USB\d+$' },
+      @{ driverName = 'Brother HL-L2400 series'; portPattern = '^USB\d+$' }
+    )
+    $queue = New-Queue -DriverName 'Brother HL-L2400 series'
+    Test-QueueApproved -Printer $queue -Profiles $profiles | Should -BeTrue
+  }
+
+  It 'lets one unusable pattern disqualify only itself' {
+    $profiles = @(
+      @{ driverName = 'Canon Generic Plus UFR II'; portPattern = '^USB(\d+$' },
+      @{ driverName = 'Canon Generic Plus UFR II'; portPattern = '^USB\d+$' }
+    )
+    Test-QueueApproved -Printer (New-Queue) -Profiles $profiles | Should -BeTrue
+  }
+}
+
+Describe 'Read-ApprovedProfiles' {
+  It 'falls back to the reference printer when the caller names none' {
+    $profiles = Read-ApprovedProfiles -Request ([pscustomobject]@{ op = 'status' })
+    @($profiles)[0].driverName | Should -Be 'Canon Generic Plus UFR II'
+  }
+
+  It 'takes what the caller certified' {
+    $request = [pscustomobject]@{
+      profiles = @([pscustomobject]@{ driverName = 'Brother HL-L2400 series'; portPattern = '^USB\d+$' })
+    }
+    $profiles = Read-ApprovedProfiles -Request $request
+    @($profiles).Count | Should -Be 1
+    @($profiles)[0].driverName | Should -Be 'Brother HL-L2400 series'
+  }
+}
+
+Describe 'Select-OperationJobs' {
+  BeforeAll {
+    $script:OperationId = '01900000-0000-7000-8000-0000000000a1'
+  }
+
+  It 'finds the queue entries an operation named, without any state file' {
+    $jobs = @(
+      [pscustomobject]@{ Id = 23; DocumentName = "$($script:OperationId)#000of001"; JobStatus = 'Printing' },
+      [pscustomobject]@{ Id = 24; DocumentName = 'somebody elses document'; JobStatus = 'Printing' }
+    )
+    $found = @(Select-OperationJobs -OperationId $script:OperationId -Jobs $jobs)
+
+    $found.Count | Should -Be 1
+    $found[0].jobId | Should -Be 23
+    $found[0].position | Should -Be 0
+    $found[0].faulted | Should -BeFalse
+  }
+
+  It 'marks a queue entry in trouble' {
+    $jobs = @(
+      [pscustomobject]@{ Id = 23; DocumentName = "$($script:OperationId)#000of001"; JobStatus = 'Error, PaperJam' }
+    )
+    @(Select-OperationJobs -OperationId $script:OperationId -Jobs $jobs)[0].faulted | Should -BeTrue
+  }
+
+  It 'never matches a different operation' {
+    $other = '01900000-0000-7000-8000-0000000000b2'
+    $jobs = @([pscustomobject]@{ Id = 23; DocumentName = "$other#000of001"; JobStatus = 'Printing' })
+    @(Select-OperationJobs -OperationId $script:OperationId -Jobs $jobs).Count | Should -Be 0
+  }
+
+  It 'answers nothing rather than everything for an empty operation id' {
+    $jobs = @([pscustomobject]@{ Id = 23; DocumentName = '#000of001'; JobStatus = 'Printing' })
+    @(Select-OperationJobs -OperationId '' -Jobs $jobs).Count | Should -Be 0
+  }
+}

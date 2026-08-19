@@ -54,7 +54,8 @@ export {
   type DeviceHostBinding,
   type DeviceHostDocumentRequest,
   type DeviceHostOperationReport,
-  type DeviceHostRequest
+  type DeviceHostRequest,
+  type DevicePrinterProfile
 } from "./windows/protocol.js";
 export {
   createPrinterAdapter,

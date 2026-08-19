@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -467,5 +467,137 @@ describe("WindowsPrinterAdapter cancellation and retention", () => {
     expect(discarded).toBe(1);
     expect(await readdir(journalDirectory)).toHaveLength(0);
     expect(host.requests.some((request) => request.op === "discard")).toBe(true);
+  });
+});
+
+describe("the record this machine keeps of what a device holds", () => {
+  it("stores the queue's own job number beside the operation", async () => {
+    const host = new FakeDeviceHost();
+    host.answer("submit", {
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      sheetsProduced: 3,
+      diagnostics: { jobs: [{ position: 0, jobId: 23 }] }
+    });
+    const adapter = buildAdapter(host);
+    await adapter.submit(await submission());
+
+    // Without this, a machine recovered after a crash holds paper it cannot
+    // connect to any operation.
+    const record = JSON.parse(
+      await readFile(join(journalDirectory, `${operationId}.json`), "utf8")
+    ) as { documents: { jobId: string | null }[] };
+    expect(record.documents[0]?.jobId).toBe("23");
+  });
+
+  it("does not let a failure to write the record change a settled outcome", async () => {
+    const host = new FakeDeviceHost();
+    // A host that answered but named no job. The print still completed.
+    host.answer("submit", {
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      sheetsProduced: 3,
+      diagnostics: { jobs: [{ position: 9, jobId: 0 }] }
+    });
+    const adapter = buildAdapter(host);
+
+    await expect(adapter.submit(await submission())).resolves.toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED"
+    });
+  });
+});
+
+describe("an operation whose host lost its own notes", () => {
+  /**
+   * The host's state file is gone — a wiped state directory, a disk that lost
+   * it, a process killed between StartDoc and the write. `status` then answers
+   * NOT_SUBMITTED for work that is printing in plain sight.
+   */
+  async function submittedAdapter(host: FakeDeviceHost) {
+    host.answer("submit", { state: "PRINTING", confidence: "UNCONFIRMED" });
+    const adapter = buildAdapter(host);
+    await adapter.submit(await submission());
+    host.answer("status", { state: "NOT_SUBMITTED", confidence: "CONFIRMED", sheetsProduced: 0 });
+    return adapter;
+  }
+
+  it("asks the queue by job name and keeps waiting on work still there", async () => {
+    const host = new FakeDeviceHost();
+    const adapter = await submittedAdapter(host);
+    host.answer("find", { jobs: [{ position: 0, jobId: 23, status: "Printing", faulted: false }] });
+
+    const status = await adapter.getOperationStatus(operationId);
+
+    // Open, not lost: a healthy print must not be sent to a person to resolve.
+    expect(status.state).toBe("PRINTING");
+    expect(status.deviceDiagnostics?.jobs?.[0]).toMatchObject({ jobId: 23 });
+    expect(host.requests.some((request) => request.op === "find")).toBe(true);
+  });
+
+  /**
+   * Windows deletes a job the instant it retires, so an empty queue looks the
+   * same whether the paper came out or the job never existed. That has to stay
+   * ambiguous — deciding either way is how a paid job gets reprinted or a
+   * refund gets issued for pages a customer is holding.
+   */
+  it("stays ambiguous when the queue holds nothing", async () => {
+    const host = new FakeDeviceHost();
+    const adapter = await submittedAdapter(host);
+    host.answer("find", { jobs: [] });
+
+    await expect(adapter.getOperationStatus(operationId)).resolves.toMatchObject({
+      state: "UNKNOWN",
+      confidence: "UNCONFIRMED",
+      failureCode: "SUBMISSION_UNCONFIRMED"
+    });
+  });
+
+  it("stays ambiguous when what it found is in trouble", async () => {
+    const host = new FakeDeviceHost();
+    const adapter = await submittedAdapter(host);
+    host.answer("find", { jobs: [{ position: 0, jobId: 23, status: "Error", faulted: true }] });
+
+    await expect(adapter.getOperationStatus(operationId)).resolves.toMatchObject({
+      state: "UNKNOWN",
+      confidence: "UNCONFIRMED"
+    });
+  });
+
+  it("falls back to ambiguous against a host that has never heard of the question", async () => {
+    const host = new FakeDeviceHost();
+    const adapter = await submittedAdapter(host);
+    host.refuse("find", { code: "DEVICE_ERROR", ambiguous: false });
+
+    await expect(adapter.getOperationStatus(operationId)).resolves.toMatchObject({
+      state: "UNKNOWN"
+    });
+  });
+});
+
+describe("certified printer profiles", () => {
+  it("tells the device host which printers this deployment approved", async () => {
+    const host = new FakeDeviceHost();
+    host.answer("submit", { state: "COMPLETED", confidence: "CONFIRMED", sheetsProduced: 3 });
+    const adapter = buildAdapter(host, {
+      approvedProfiles: [{ driverName: "Brother HL-L2400 series", portPattern: "^USB\\d+$" }]
+    });
+    await adapter.submit(await submission());
+
+    // Every request, not only submit: whichever one looks at a queue first has
+    // to be judging it against the same certification.
+    for (const request of host.requests) {
+      expect(request.profiles).toEqual([
+        { driverName: "Brother HL-L2400 series", portPattern: "^USB\\d+$" }
+      ]);
+    }
+  });
+
+  it("leaves the host on its own reference profile when nothing is configured", async () => {
+    const host = new FakeDeviceHost();
+    host.answer("submit", { state: "COMPLETED", confidence: "CONFIRMED", sheetsProduced: 3 });
+    await buildAdapter(host).submit(await submission());
+
+    expect(host.requests.every((request) => request.profiles === undefined)).toBe(true);
   });
 });

@@ -99,8 +99,16 @@ describe("Windows print host prohibitions", () => {
     expect(hostSource).not.toContain('pDatatype = "RAW"');
   });
 
-  it("keeps the approved queue profile narrow and local", () => {
-    expect(hostSource).toContain("$printer.PortName -match '^USB\\d+$'");
+  /**
+   * Which driver and which port shape are certified is now configuration, so
+   * the reference profile is a default rather than the rule. What must not
+   * become configurable is the boundary itself: this host prints over a cable
+   * to a machine standing next to it, and no profile may open a network path.
+   */
+  it("keeps the approved queue local and unshared whatever a profile says", () => {
+    expect(hostSource).toContain("if ([string]$Printer.Type -ne 'Local') { return $false }");
+    expect(hostSource).toContain("if ([bool]$Printer.Shared) { return $false }");
+    expect(hostSource).toContain("portPattern = '^USB\\d+$'");
     expect(hostSource).not.toContain("DUPLEX_SHORT_EDGE");
   });
 

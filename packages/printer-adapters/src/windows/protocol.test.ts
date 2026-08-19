@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { PrinterAdapterError } from "../types.js";
-import { readDiagnostics, readHostBinding, readHostResult, readOperationReport } from "./protocol.js";
+import {
+  readDiagnostics,
+  readFoundJobs,
+  readHostBinding,
+  readHostResult,
+  readOperationReport
+} from "./protocol.js";
 
 describe("device diagnostics from an untrusted host", () => {
   it("carries the evidence an outcome was decided from", () => {
@@ -117,6 +123,34 @@ describe("device refusals", () => {
       expect((error as PrinterAdapterError).submissionAmbiguous).toBe(true);
       expect((error as PrinterAdapterError).deviceStage).toBeNull();
     }
+  });
+});
+
+describe("queue entries found by job name", () => {
+  it("reads what the queue still holds for an operation", () => {
+    expect(
+      readFoundJobs({
+        jobs: [{ position: 0, jobId: 23, status: "Printing", faulted: false }]
+      })
+    ).toEqual([{ position: 0, jobId: 23, status: "Printing", faulted: false }]);
+  });
+
+  it("treats anything it cannot read as nothing found", () => {
+    // Narrowing what the caller believes is safe; widening it is not. Every one
+    // of these must leave the outcome ambiguous rather than claim a job exists.
+    expect(readFoundJobs({})).toEqual([]);
+    expect(readFoundJobs({ jobs: "one" })).toEqual([]);
+    expect(readFoundJobs(null)).toEqual([]);
+  });
+
+  it("caps and defaults a malformed entry instead of trusting it", () => {
+    const [job] = readFoundJobs({ jobs: [{ jobId: "twenty", status: 42, faulted: "yes" }] });
+    expect(job).toEqual({ position: 0, jobId: 0, status: null, faulted: false });
+  });
+
+  it("bounds how many entries a host can report", () => {
+    const jobs = Array.from({ length: 100 }, () => ({ position: 0, jobId: 1 }));
+    expect(readFoundJobs({ jobs }).length).toBeLessThanOrEqual(16);
   });
 });
 

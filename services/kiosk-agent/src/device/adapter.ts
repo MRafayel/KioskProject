@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import type { NonAdminEnvironment } from "@printing-kiosk/config";
+import { parsePrinterProfiles, type NonAdminEnvironment } from "@printing-kiosk/config";
 import {
   createPrinterAdapter,
   parseQueueAllowlist,
@@ -25,6 +25,10 @@ export function buildPrinterAdapter(environment: NonAdminEnvironment): PrinterAd
   const approvedQueues = parseQueueAllowlist(environment.PRINTER_QUEUE_ALLOWLIST);
   const queueName =
     environment.PRINTER_QUEUE_NAME || (approvedQueues.length === 1 ? approvedQueues[0]! : "");
+  // Configuration validated this at startup, so a null here cannot happen. If
+  // it somehow did, an empty list approves nothing rather than approving the
+  // reference printer on a kiosk certified for something else.
+  const approvedProfiles = parsePrinterProfiles(environment.PRINTER_DEVICE_PROFILES) ?? [];
 
   return createPrinterAdapter({
     adapter: environment.PRINTER_ADAPTER,
@@ -35,7 +39,8 @@ export function buildPrinterAdapter(environment: NonAdminEnvironment): PrinterAd
     windows: {
       hostExecutablePath: environment.PRINTER_WINDOWS_HOST_PATH,
       queueName,
-      approvedQueues
+      approvedQueues,
+      approvedProfiles
     }
   });
 }

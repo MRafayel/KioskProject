@@ -49,7 +49,20 @@ export interface DeviceHostDocumentRequest {
   jobName: string;
 }
 
-export type DeviceHostRequest =
+/**
+ * A printer/driver combination an operator certified.
+ *
+ * Sent on every request rather than compiled into the host, because which
+ * printer models a fleet has approved is a deployment decision that changes
+ * without the device host changing. The host refuses a queue matching none of
+ * them; it never falls back to another queue.
+ */
+export interface DevicePrinterProfile {
+  driverName: string;
+  portPattern: string;
+}
+
+export type DeviceHostRequest = (
   | { protocol: number; op: "list-queues" }
   | { protocol: number; op: "describe"; queue: string }
   | { protocol: number; op: "capabilities"; queue: string }
@@ -75,7 +88,12 @@ export type DeviceHostRequest =
     }
   | { protocol: number; op: "status"; queue: string; operationId: string }
   | { protocol: number; op: "cancel"; queue: string; operationId: string }
-  | { protocol: number; op: "discard"; before: string };
+  | { protocol: number; op: "find"; queue: string; operationId: string }
+  | { protocol: number; op: "discard"; before: string }
+) & {
+  /** Absent leaves the host on its built-in reference profile. */
+  profiles?: readonly DevicePrinterProfile[];
+};
 
 /** How the host reports what it did with one operation. */
 export interface DeviceHostOperationReport {
@@ -317,6 +335,37 @@ export function readOperationReport(value: unknown): DeviceHostOperationReport {
       typeof sheets === "number" && Number.isSafeInteger(sheets) && sheets >= 0 ? sheets : null,
     diagnostics: readDiagnostics(report.diagnostics)
   };
+}
+
+/** One queue entry the host matched to an operation by its job name. */
+export interface DeviceHostFoundJob {
+  position: number;
+  jobId: number;
+  status: string | null;
+  faulted: boolean;
+}
+
+/**
+ * Queue entries still carrying an operation's name.
+ *
+ * Bounded like every other host answer: this is a separate program's account of
+ * what it saw, and a malformed one may narrow what the caller believes but must
+ * never be able to widen it.
+ */
+export function readFoundJobs(value: unknown): DeviceHostFoundJob[] {
+  const result = asRecord(value);
+  if (!Array.isArray(result.jobs)) return [];
+  const jobs: DeviceHostFoundJob[] = [];
+  for (const entry of result.jobs.slice(0, MAX_DIAGNOSTIC_JOBS)) {
+    const job = asRecord(entry);
+    jobs.push({
+      position: boundedCount(job.position) ?? 0,
+      jobId: boundedCount(job.jobId) ?? 0,
+      status: boundedString(job.status),
+      faulted: job.faulted === true
+    });
+  }
+  return jobs;
 }
 
 export function readDiscardCount(value: unknown): number {

@@ -2,6 +2,7 @@ import { MockPrinterAdapter, type MockPrinterScenario } from "./mock/adapter.js"
 import { PrinterAdapterError, type PrinterAdapter } from "./types.js";
 import { WindowsPrinterAdapter } from "./windows/adapter.js";
 import { ChildProcessDeviceHost } from "./windows/child-process-host.js";
+import type { DevicePrinterProfile } from "./windows/protocol.js";
 
 export const PRINTER_ADAPTER_KINDS = ["mock", "windows"] as const;
 export type PrinterAdapterKind = (typeof PRINTER_ADAPTER_KINDS)[number];
@@ -22,6 +23,8 @@ export interface PrinterAdapterFactoryOptions {
     hostExecutablePath: string;
     queueName: string;
     approvedQueues: readonly string[];
+    /** Certified printer/driver combinations. Empty keeps the host's default. */
+    approvedProfiles?: readonly DevicePrinterProfile[];
   };
 }
 
@@ -53,6 +56,9 @@ export function createPrinterAdapter(options: PrinterAdapterFactoryOptions): Pri
     }),
     queueName: options.windows.queueName,
     approvedQueues: options.windows.approvedQueues,
+    ...(options.windows.approvedProfiles
+      ? { approvedProfiles: options.windows.approvedProfiles }
+      : {}),
     journalDirectory: options.journalDirectory,
     maxCopies: options.maxCopies,
     ...(options.jobTimeoutMilliseconds

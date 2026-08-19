@@ -28,6 +28,14 @@ const stringBooleanSchema = z
 const environmentSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+    // Set by the Windows service installer, never by hand.
+    //
+    // `NODE_ENV` describes how the code was built; this describes where it is
+    // running. A machine that installed the agent as a service is a deployment
+    // — it starts unattended, nobody watches it, and it is the machine a
+    // customer stands in front of — whatever `NODE_ENV` happens to say. The
+    // simulation switches below are refused on the strength of this alone.
+    PRINTING_KIOSK_SERVICE: stringBooleanSchema.default(false),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     API_HOST: z.string().default("127.0.0.1"),
     API_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -240,6 +248,17 @@ const environmentSchema = z
     PRINTER_ALLOW_SHARED_QUEUE: stringBooleanSchema.default(false),
     // The Windows device host executable. See docs/hardware/windows-device-host.md.
     PRINTER_WINDOWS_HOST_PATH: z.string().max(400).default(""),
+    // Which printer/driver combinations an operator has certified, as JSON:
+    //   [{"driverName":"Canon Generic Plus UFR II","portPattern":"^USB\\d+$"}]
+    //
+    // Approving a printer model is a certification decision, exactly like the
+    // queue allowlist beside it — somebody tested that this driver renders what
+    // a customer paid for. It used to be a constant inside the device host,
+    // which meant approving a second model required editing a script on every
+    // kiosk. Empty keeps the reference profile, so an existing deployment
+    // behaves identically. A queue matching no profile is refused with
+    // QUEUE_NOT_APPROVED; it is never a fall-back to another printer.
+    PRINTER_DEVICE_PROFILES: z.string().max(4_000).default(""),
     // Where the agent keeps its record of what it handed to a device. It is
     // what separates "never submitted" from "submitted and forgotten", so it
     // has to survive a restart on the same machine as the agent.
@@ -515,6 +534,48 @@ const environmentSchema = z
         path: ["PRINTER_QUEUE_ALLOWLIST"],
         message: "PRINTER_QUEUE_ALLOWLIST must name at least one certified queue"
       });
+    }
+
+    // A profile nobody can read approves nothing, and a kiosk that silently
+    // fell back to the reference printer would be printing on a model its
+    // operator never certified.
+    if (parsePrinterProfiles(environment.PRINTER_DEVICE_PROFILES) === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRINTER_DEVICE_PROFILES"],
+        message:
+          "PRINTER_DEVICE_PROFILES must be a JSON array of " +
+          "{ driverName, portPattern } with a valid regular expression"
+      });
+    }
+
+    // An installed service is a deployment, so the switches that let a build
+    // pretend are refused here as well as in production. Until now they were
+    // gated on `NODE_ENV` alone, which a service install does not have to set —
+    // and the failure mode is silent: a kiosk that reports healthy, takes
+    // payment, and writes the customer's document to a folder.
+    if (environment.PRINTING_KIOSK_SERVICE) {
+      if (environment.PRINTER_ADAPTER === "mock") {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_ADAPTER"],
+          message: "PRINTER_ADAPTER must drive a real device when installed as a service"
+        });
+      }
+      if (environment.PAYMENT_TEST_OUTCOMES_ENABLED) {
+        context.addIssue({
+          code: "custom",
+          path: ["PAYMENT_TEST_OUTCOMES_ENABLED"],
+          message: "PAYMENT_TEST_OUTCOMES_ENABLED must be false when installed as a service"
+        });
+      }
+      if (environment.PRINT_TEST_OUTCOMES_ENABLED) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINT_TEST_OUTCOMES_ENABLED"],
+          message: "PRINT_TEST_OUTCOMES_ENABLED must be false when installed as a service"
+        });
+      }
     }
 
     // Naming a preference that is not itself approved would either be ignored
@@ -1058,6 +1119,66 @@ function parseAllowlist(value: string): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+/** A printer/driver combination an operator certified for this fleet. */
+export interface PrinterDeviceProfile {
+  driverName: string;
+  /** Anchored regular expression the Windows port name must match. */
+  portPattern: string;
+}
+
+/**
+ * The printer this fleet was built around.
+ *
+ * Kept as the default rather than as the only option: an empty configuration
+ * must behave exactly as the deployment does today, and adding a second
+ * approved model must not require touching the device host.
+ */
+export const REFERENCE_PRINTER_PROFILES: readonly PrinterDeviceProfile[] = [
+  { driverName: "Canon Generic Plus UFR II", portPattern: "^USB\\d+$" }
+];
+
+const printerDeviceProfileSchema = z
+  .object({
+    driverName: z.string().min(1).max(220),
+    // Bounded and compiled at startup. It is operator configuration rather than
+    // customer input, but it is evaluated once per queue check on a machine
+    // nobody is watching, so a pattern that cannot terminate is worth refusing
+    // at the point somebody can still read the error.
+    portPattern: z.string().min(1).max(200)
+  })
+  .strict();
+
+/**
+ * Read the certified printer profiles, falling back to the reference printer.
+ *
+ * Returns `null` when the configuration is unusable so the caller can refuse at
+ * startup. Silently returning the default there would approve the Canon on a
+ * kiosk whose operator meant to approve something else.
+ */
+export function parsePrinterProfiles(value: string): PrinterDeviceProfile[] | null {
+  const text = value.trim();
+  if (text.length === 0) return [...REFERENCE_PRINTER_PROFILES];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+
+  const profiles = z.array(printerDeviceProfileSchema).min(1).max(16).safeParse(parsed);
+  if (!profiles.success) return null;
+
+  for (const profile of profiles.data) {
+    try {
+      new RegExp(profile.portPattern, "u");
+    } catch {
+      return null;
+    }
+  }
+  return profiles.data;
+}
+
 function isPostgresUrl(value: string): boolean {
   try {
     return ["postgres:", "postgresql:"].includes(new URL(value).protocol);
@@ -1233,11 +1354,48 @@ export function loadNonAdminEnvironment(
 }
 
 /**
- * Workspace commands execute with the package as cwd. Locate the repository
- * root explicitly so the documented root .env file behaves the same on every
- * service and on Windows, macOS, and Linux.
+ * The variable a deployment uses to say where its configuration lives, instead
+ * of leaving it to be discovered. Read before the schema, because it decides
+ * what the schema will see.
+ */
+export const ENV_FILE_VARIABLE = "PRINTING_KIOSK_ENV_FILE";
+
+/**
+ * Load the configuration file.
+ *
+ * Two very different situations, and only one of them may be quiet about a
+ * missing file.
+ *
+ * A developer runs workspace commands with the package as cwd, so the root
+ * `.env` is found by walking upwards. Nothing is wrong if it is absent — the
+ * defaults are development defaults and that is what development wants.
+ *
+ * A deployed service has no such luxury. Windows starts a service in
+ * `C:\Windows\System32`, so the walk above climbs to the drive root, finds no
+ * workspace marker, and returns having loaded nothing at all. The agent then
+ * starts on schema defaults — including `PRINTER_ADAPTER=mock` — and a kiosk
+ * that takes money and writes documents to a folder looks, from the outside,
+ * exactly like a kiosk that works.
+ *
+ * So a deployment names its file explicitly and a missing one is fatal. The
+ * discovery walk stays for development, where silence is correct.
  */
 export function loadWorkspaceEnvironmentFile(startDirectory = process.cwd()): void {
+  const configured = process.env[ENV_FILE_VARIABLE]?.trim();
+  if (configured) {
+    if (!existsSync(configured)) {
+      // Deliberately before any parsing: there is no safe way to continue.
+      // Whatever this process would do next, it would do it with the wrong
+      // configuration, and on a kiosk that means the wrong printer.
+      throw new Error(
+        `${ENV_FILE_VARIABLE} names a file that does not exist. ` +
+          "A deployment must not fall back to development defaults."
+      );
+    }
+    loadDotenv({ path: configured, override: false, quiet: true });
+    return;
+  }
+
   let directory = resolve(startDirectory);
   while (true) {
     if (existsSync(join(directory, "pnpm-workspace.yaml"))) {
