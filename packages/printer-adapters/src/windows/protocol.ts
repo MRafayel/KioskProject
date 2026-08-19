@@ -135,18 +135,31 @@ export function readHostResult(value: unknown): unknown {
   throw new PrinterAdapterError(hostErrorCode(code), ambiguous, boundedString(error.stage));
 }
 
-const HOST_ERROR_CODES = new Set<PrinterAdapterErrorCode>([
-  "PRINTER_OFFLINE",
-  "OPERATION_ID_INVALID",
-  "MANIFEST_INVALID",
-  "ARTIFACT_UNAVAILABLE",
-  "OUTPUT_WRITE_FAILED",
-  "SUBMISSION_UNCONFIRMED",
-  "QUEUE_NOT_FOUND",
-  "QUEUE_NOT_APPROVED",
-  "DEVICE_UNREACHABLE",
-  "DEVICE_ERROR"
-]);
+/**
+ * Which codes a device host is allowed to name.
+ *
+ * Written as a total map rather than a list so the compiler enforces both
+ * directions. A code the host may send that the adapter does not define is
+ * already impossible; this closes the other side — adding a member to
+ * `PrinterAdapterErrorCode` without deciding whether a host may send it stops
+ * being a silent omission that would quietly degrade to `DEVICE_ERROR`.
+ */
+const HOST_ERROR_CODE_MAP: Record<PrinterAdapterErrorCode, true> = {
+  PRINTER_OFFLINE: true,
+  OPERATION_ID_INVALID: true,
+  MANIFEST_INVALID: true,
+  ARTIFACT_UNAVAILABLE: true,
+  OUTPUT_WRITE_FAILED: true,
+  SUBMISSION_UNCONFIRMED: true,
+  QUEUE_NOT_FOUND: true,
+  QUEUE_NOT_APPROVED: true,
+  DEVICE_UNREACHABLE: true,
+  DEVICE_ERROR: true
+};
+
+const HOST_ERROR_CODES = new Set(
+  Object.keys(HOST_ERROR_CODE_MAP) as PrinterAdapterErrorCode[]
+);
 
 /** A code from a newer host is a device error, never a silently ignored one. */
 function hostErrorCode(code: string): PrinterAdapterErrorCode {

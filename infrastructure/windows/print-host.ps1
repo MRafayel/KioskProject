@@ -73,7 +73,23 @@ $ReferencePrinterProfiles = @(
 $script:ApprovedProfiles = $ReferencePrinterProfiles
 $MaximumCopies = 10
 $MaximumSelectedPages = 200
-$RenderLongEdgePixels = 3508 # A4 at 300 DPI.
+# How large a page is rasterised, in pixels along its long edge.
+#
+# Derived from the printer rather than assumed: this used to be a constant at
+# A4/300 DPI, which quietly upscaled on a 600 DPI device and wasted work on a
+# coarser one. What the driver reports for its own printable area is the size
+# that maps one rendered pixel to one device pixel, with nothing left for GDI to
+# rescale.
+#
+# Bounded on both sides because the cost is quadratic and a kiosk has a customer
+# standing at it. Doubling the long edge quadruples both the rasterise and the
+# draw; measured on the reference printer those are ~1.4s and ~2.4s at 3508px,
+# so an unbounded 1200 DPI device would turn an 11-second print into a minute.
+# The floor is what keeps a driver reporting something implausible from printing
+# a blurred page.
+$MinRenderLongEdgePixels = 2480 # A4 at ~212 DPI.
+$MaxRenderLongEdgePixels = 4960 # A4 at ~424 DPI.
+$FallbackRenderLongEdgePixels = 3508 # A4 at 300 DPI, used when the driver will not say.
 # How long the host watches a submission before answering `PRINTING`. The caller
 # supplies its own budget on the request; these only bound what it may ask for,
 # so the host and the agent's transport timeout cannot disagree by construction.
@@ -182,6 +198,37 @@ public sealed class DriverRenderedPrintJob : IDisposable
 
     private const int HORZRES = 8;
     private const int VERTRES = 10;
+    private const int LOGPIXELSX = 88;
+    private const int LOGPIXELSY = 90;
+
+    /// <summary>
+    /// The printable area and resolution the driver actually offers, in device
+    /// pixels and dots per inch.
+    ///
+    /// Asked before any job exists, because the pages are rasterised before the
+    /// spooler is touched — creating the job first would leave a phantom entry
+    /// in the queue if rendering then failed. The default DEVMODE is enough:
+    /// duplex changes which side paper is drawn on, never the resolution.
+    /// </summary>
+    public static int[] SurfaceMetrics(string queueName)
+    {
+        IntPtr dc = CreateDC("WINSPOOL", queueName, null, IntPtr.Zero);
+        if (dc == IntPtr.Zero)
+            throw new InvalidOperationException("DEVICE_CONTEXT_FAILED:" + Marshal.GetLastWin32Error());
+        try
+        {
+            return new int[] {
+                GetDeviceCaps(dc, HORZRES),
+                GetDeviceCaps(dc, VERTRES),
+                GetDeviceCaps(dc, LOGPIXELSX),
+                GetDeviceCaps(dc, LOGPIXELSY)
+            };
+        }
+        finally
+        {
+            DeleteDC(dc);
+        }
+    }
 
     private IntPtr deviceContext = IntPtr.Zero;
     private bool active;
@@ -693,8 +740,57 @@ function Get-SelectedPageNumbers {
   return $pages.ToArray()
 }
 
+<#
+.SYNOPSIS
+  How large to rasterise a page, from what the driver says about itself.
+.DESCRIPTION
+  Pure, so the clamping is testable without a printer. The device's own
+  printable area is the target: rendering to it maps one rendered pixel to one
+  device pixel and leaves GDI nothing to rescale. The bounds exist because the
+  cost is quadratic in this number and somebody is waiting at the kiosk.
+#>
+function Resolve-RenderLongEdge {
+  param([int] $HorizontalPixels, [int] $VerticalPixels)
+
+  $longEdge = [Math]::Max($HorizontalPixels, $VerticalPixels)
+  # A driver that will not describe its own surface is not one to guess from.
+  if ($longEdge -le 0) { return $FallbackRenderLongEdgePixels }
+  if ($longEdge -lt $MinRenderLongEdgePixels) { return $MinRenderLongEdgePixels }
+  if ($longEdge -gt $MaxRenderLongEdgePixels) { return $MaxRenderLongEdgePixels }
+  return $longEdge
+}
+
+function Get-RenderLongEdge {
+  param([string] $QueueName)
+
+  try {
+    $metrics = [PrintingKiosk.DriverRenderedPrintJob]::SurfaceMetrics($QueueName)
+    $longEdge = Resolve-RenderLongEdge -HorizontalPixels ([int]$metrics[0]) -VerticalPixels ([int]$metrics[1])
+    Write-LocalEvent -EventName 'submit.surface' -Fields @{
+      queue = $QueueName
+      horizontalPixels = [int]$metrics[0]
+      verticalPixels = [int]$metrics[1]
+      dpiX = [int]$metrics[2]
+      dpiY = [int]$metrics[3]
+      renderLongEdgePixels = $longEdge
+    }
+    return $longEdge
+  } catch {
+    # Asking is an optimisation. A driver that will not answer still prints, at
+    # the size this host used before it started asking.
+    Write-LocalDiagnostic -ErrorRecord $_
+    return $FallbackRenderLongEdgePixels
+  }
+}
+
 function Render-PdfSelection {
-  param([string] $Path, $PageRanges, [string] $TargetDirectory, [int] $Position)
+  param(
+    [string] $Path,
+    $PageRanges,
+    [string] $TargetDirectory,
+    [int] $Position,
+    [int] $LongEdgePixels = $FallbackRenderLongEdgePixels
+  )
 
   $script:DiagnosticStage = "submit.document.$Position.pdf-open"
   $fileOperation = [Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)
@@ -717,11 +813,11 @@ function Render-PdfSelection {
       $width = [double]$page.Size.Width
       $height = [double]$page.Size.Height
       if ($width -ge $height) {
-        $renderWidth = $RenderLongEdgePixels
-        $renderHeight = [Math]::Max(1, [int][Math]::Round($RenderLongEdgePixels * $height / $width))
+        $renderWidth = $LongEdgePixels
+        $renderHeight = [Math]::Max(1, [int][Math]::Round($LongEdgePixels * $height / $width))
       } else {
-        $renderHeight = $RenderLongEdgePixels
-        $renderWidth = [Math]::Max(1, [int][Math]::Round($RenderLongEdgePixels * $width / $height))
+        $renderHeight = $LongEdgePixels
+        $renderWidth = [Math]::Max(1, [int][Math]::Round($LongEdgePixels * $width / $height))
       }
       $options.DestinationWidth = [uint32]$renderWidth
       $options.DestinationHeight = [uint32]$renderHeight
@@ -749,10 +845,6 @@ function Render-PdfSelection {
   return [pscustomobject]@{ paths = $paths; selectedPages = $pageNumbers.Count }
 }
 
-function Get-QueueConfiguration {
-  param([string] $QueueName)
-  return Get-PrintConfiguration -PrinterName $QueueName -ErrorAction SilentlyContinue
-}
 
 <#
 .SYNOPSIS
@@ -763,6 +855,30 @@ function Get-QueueConfiguration {
   assembly costs milliseconds, compiling one costs seconds, and this is asked on
   every heartbeat. It reads the same driver capability the printing path does.
 #>
+<#
+.SYNOPSIS
+  Whether a device failure was a queue that cannot do the work. Pure.
+.DESCRIPTION
+  The printing type raises these three before it creates a device context, so
+  they prove nothing was submitted. PowerShell wraps a constructor failure in a
+  MethodInvocationException, hence the walk down the chain rather than reading
+  one message. Anything else is left alone: guessing that an unrecognised
+  failure was definite is how an ambiguous submission becomes a duplicate print.
+#>
+function Get-CapabilityRefusal {
+  param($ErrorRecord)
+
+  $exception = $null
+  if ($null -ne $ErrorRecord) { $exception = $ErrorRecord.Exception }
+  for ($depth = 0; $depth -lt 5 -and $null -ne $exception; $depth++) {
+    if ([string]$exception.Message -match '^(A4_UNAVAILABLE|DUPLEX_UNAVAILABLE|PRINTER_SETTINGS_INVALID)') {
+      return [string]$Matches[1]
+    }
+    $exception = $exception.InnerException
+  }
+  return $null
+}
+
 function Test-QueueDuplex {
   param([string] $QueueName)
   Add-Type -AssemblyName System.Drawing
@@ -771,11 +887,39 @@ function Test-QueueDuplex {
   return ([bool]$settings.IsValid -and [bool]$settings.CanDuplex)
 }
 
-function Test-A4MonochromeConfiguration {
-  param($Configuration)
-  return $null -ne $Configuration -and
-    [string]$Configuration.PaperSize -eq 'A4' -and
-    $Configuration.Color -eq $false
+<#
+.SYNOPSIS
+  Whether the driver can print A4 at all.
+
+.DESCRIPTION
+  A capability, deliberately, not a saved default.
+
+  This used to read `Get-PrintConfiguration` and require the queue's stored
+  defaults to be A4 and monochrome. Those defaults decide nothing: the print
+  path builds its own DEVMODE — A4, monochrome, portrait, explicit duplex — and
+  hands it to `CreateDC`, so whatever an operator last chose in the Windows
+  print dialog is overridden on every job.
+
+  Checking them was wrong in both directions. It could not assure anything,
+  because a stored default of A4 does not mean the driver offers A4; and it took
+  a perfectly good printer OFFLINE whenever somebody opened printer preferences
+  or a driver update reset them, which is a kiosk that stops earning for a
+  setting that was never used.
+
+  What matters is whether the driver offers the medium the customer paid for.
+  The printing path asserts the same thing again before the spooler is touched
+  (`A4_UNAVAILABLE`); this is the cheap version, asked on every heartbeat.
+#>
+function Test-QueueA4 {
+  param([string] $QueueName)
+  Add-Type -AssemblyName System.Drawing
+  $settings = New-Object System.Drawing.Printing.PrinterSettings
+  $settings.PrinterName = $QueueName
+  if (-not [bool]$settings.IsValid) { return $false }
+  foreach ($size in $settings.PaperSizes) {
+    if ($size.Kind -eq [System.Drawing.Printing.PaperKind]::A4) { return $true }
+  }
+  return $false
 }
 
 function Invoke-ListQueues {
@@ -847,8 +991,7 @@ function Invoke-Describe {
 function Invoke-Capabilities {
   param([string] $QueueName)
   $printer = Get-QueueOrFail -QueueName $QueueName
-  $configuration = Get-QueueConfiguration -QueueName $printer.Name
-  $a4Ready = Test-A4MonochromeConfiguration -Configuration $configuration
+  $a4Ready = Test-QueueA4 -QueueName $printer.Name
   $duplex = Test-QueueDuplex -QueueName $printer.Name
   Write-Result -Result @{
     mediaSizes      = @(if ($a4Ready) { 'A4' })
@@ -863,17 +1006,16 @@ function Invoke-Health {
   param([string] $QueueName)
   $printer = Get-QueueOrFail -QueueName $QueueName
   $state = ConvertTo-QueueState -Printer $printer
-  $configuration = Get-QueueConfiguration -QueueName $printer.Name
-  $configurationReady = Test-A4MonochromeConfiguration -Configuration $configuration
-  if ($state -ne 'READY' -or -not $configurationReady) {
+  $a4Ready = Test-QueueA4 -QueueName $printer.Name
+  if ($state -ne 'READY' -or -not $a4Ready) {
     # `OFFLINE` is the only health value the protocol has for "do not sell a job
-    # on this", so an unplugged printer and a queue whose defaults were changed
-    # arrive at the same answer. Record which one it was: they need different
-    # fixes and the protocol cannot tell them apart.
+    # on this", so an unplugged printer and a driver that cannot do A4 arrive at
+    # the same answer. Record which one it was: they need different fixes and
+    # the protocol cannot tell them apart.
     Write-LocalEvent -EventName 'health.unavailable' -Level 'warn' -Fields @{
       queueState = $state
       printerStatus = [string]$printer.PrinterStatus
-      configurationReady = [bool]$configurationReady
+      a4Supported = [bool]$a4Ready
     }
     Write-Result -Result @{ state = 'OFFLINE'; warningCode = $null }
     return
@@ -933,18 +1075,16 @@ function Invoke-Submit {
     Write-Failure -Code 'PRINTER_OFFLINE' -Ambiguous $false
   }
   $script:DiagnosticStage = 'submit.configuration'
-  $configuration = Get-QueueConfiguration $printer.Name
-  if (-not (Test-A4MonochromeConfiguration -Configuration $configuration)) {
-    # The protocol has one code for this and it says nothing about which of the
-    # two causes it was. Somebody changed the queue's defaults, or the queue
-    # could not be read at all, and those need opposite fixes.
+  if (-not (Test-QueueA4 -QueueName $printer.Name)) {
+    # A driver that cannot do A4 is not broken, it is unfit for what this
+    # deployment sells — so it is refused the way an uncertified queue is,
+    # definitely and by name, rather than as a generic device error.
     Write-LocalEvent -EventName 'submit.configuration-rejected' -Level 'warn' -Fields @{
       queue = $printer.Name
-      configurationReadable = [bool]($null -ne $configuration)
-      paperSize = if ($null -ne $configuration) { [string]$configuration.PaperSize } else { $null }
-      color = if ($null -ne $configuration) { [bool]$configuration.Color } else { $null }
+      driverName = [string]$printer.DriverName
+      a4Supported = $false
     }
-    Write-Failure -Code 'DEVICE_ERROR' -Ambiguous $false
+    Write-Failure -Code 'QUEUE_NOT_APPROVED' -Ambiguous $false
   }
   $script:DiagnosticStage = 'submit.manifest'
   if ([string]$Request.media -ne 'iso_a4_210x297mm' -or [string]$Request.colorMode -ne 'monochrome') {
@@ -959,6 +1099,12 @@ function Invoke-Submit {
   # here keeps a rejected submission as cheap as a health check.
   $script:DiagnosticStage = 'submit.runtime'
   Initialize-PrintingRuntime
+
+  # Asked once for the operation, not once per page: it is the same printer for
+  # every document, and it costs a device context to find out.
+  $script:DiagnosticStage = 'submit.surface'
+  $renderLongEdge = Get-RenderLongEdge -QueueName $printer.Name
+  Add-PhaseMark -Name 'surfaceMeasured'
 
   $script:DiagnosticStage = 'submit.render-directory'
   $renderPath = Get-RenderPath -OperationId $Request.operationId
@@ -983,7 +1129,7 @@ function Invoke-Submit {
 
       $script:DiagnosticStage = "submit.document.$position.render"
       $rendered = Render-PdfSelection -Path $document.path -PageRanges $document.pageRanges `
-        -TargetDirectory $renderPath -Position $position
+        -TargetDirectory $renderPath -Position $position -LongEdgePixels $renderLongEdge
       $isDuplex = $sides -eq 'two-sided-long-edge'
       $blankSeparators = if ($isDuplex -and $rendered.selectedPages % 2 -eq 1) { $copies - 1 } else { 0 }
       $expectedPages = ($rendered.selectedPages * $copies) + $blankSeparators
@@ -1019,11 +1165,27 @@ function Invoke-Submit {
       $position = [int]$item.document.position
       try {
         $script:DiagnosticStage = "submit.document.$position.start-doc"
-        $job = [DriverRenderedPrintJob]::new(
-          $printer.Name,
-          [string]$item.document.jobName,
-          [bool]$item.duplex
-        )
+        try {
+          $job = [DriverRenderedPrintJob]::new(
+            $printer.Name,
+            [string]$item.document.jobName,
+            [bool]$item.duplex
+          )
+        } catch {
+          # A queue that cannot do what was asked is refused by name. These
+          # checks all run before a device context exists, so nothing reached
+          # the spooler and the refusal is definite — an operator needs to know
+          # the printer is unfit, not that "a device error" happened.
+          $refusal = Get-CapabilityRefusal -ErrorRecord $_
+          if ($null -eq $refusal) { throw }
+          Write-LocalEvent -EventName 'submit.queue-unfit' -Level 'warn' -Fields @{
+            queue = $printer.Name
+            position = $position
+            reason = $refusal
+            duplexRequested = [bool]$item.duplex
+          }
+          Write-Failure -Code 'QUEUE_NOT_APPROVED' -Ambiguous $false
+        }
         $script:SubmissionTouched = $true
         $submitted++
         Add-PhaseMark -Name "document.$position.startDoc"
@@ -1211,9 +1373,38 @@ function Invoke-Cancel {
     -QueueName $printer.Name -WaitForCompletion $false)
 }
 
+<#
+.SYNOPSIS
+  The retention cutoff, read the same way on every machine. Pure and testable.
+.DESCRIPTION
+  The caller always sends ISO 8601 UTC. `[datetime]::Parse` without a culture
+  reads it through whatever locale the kiosk was installed with, and the ones
+  that order a date day-first do not fail on `2026-08-19T22:00:00Z` — they
+  succeed, at a different moment. A cutoff that moved is a retention sweep that
+  deletes a live operation's state, and losing that record is what turns a paid
+  job into one nobody can settle.
+
+  So: invariant culture, round-trip kind, and a refusal rather than a guess.
+#>
+function ConvertTo-RetentionCutoff {
+  param([string] $Value)
+
+  [datetime] $parsed = [datetime]::MinValue
+  $styles = [System.Globalization.DateTimeStyles]::RoundtripKind -bor
+    [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor
+    [System.Globalization.DateTimeStyles]::AssumeUniversal
+  $ok = [datetime]::TryParse(
+    $Value, [cultureinfo]::InvariantCulture, $styles, [ref]$parsed)
+  if (-not $ok) { return $null }
+  return $parsed.ToUniversalTime()
+}
+
 function Invoke-Discard {
   param($Request)
-  $cutoff = [datetime]::Parse($Request.before).ToUniversalTime()
+  $cutoff = ConvertTo-RetentionCutoff -Value ([string](Get-Field -Source $Request -Name 'before' -Default ''))
+  # Sweeping on a cutoff nobody can read would delete by accident. Refusing
+  # keeps the records; the next sweep with a readable cutoff still collects them.
+  if ($null -eq $cutoff) { Write-Failure -Code 'MANIFEST_INVALID' -Ambiguous $false }
   $discarded = 0
   if (Test-Path $StateDirectory) {
     foreach ($file in Get-ChildItem -Path $StateDirectory -Filter '*.json' -File) {

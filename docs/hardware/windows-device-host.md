@@ -295,16 +295,48 @@ hardware and made the warning codes unreachable.
 ## The reference host
 
 `infrastructure/windows/print-host.ps1` implements this protocol with
-`Get-Printer`, `Get-PrintConfiguration`, `Get-PrintJob`, `Windows.Data.Pdf` and
-a GDI printer device context. The selected PDF pages are rendered locally, then
-drawn through the installed Canon UFR II driver. `StartDoc` supplies the
-operating-system job identifier before the first rendered page is drawn.
+`Get-Printer`, `Get-PrintJob`, `Windows.Data.Pdf` and a GDI printer device
+context. The selected PDF pages are rendered locally, then drawn through the
+installed Canon UFR II driver. `StartDoc` supplies the operating-system job
+identifier before the first rendered page is drawn.
 
 The reference profile refuses anything except a local, non-shared `USBnnn`
-queue using `Canon Generic Plus UFR II`. It also refuses a queue whose current
-defaults are not A4 and monochrome. The queue name is deployment data, so
+queue using `Canon Generic Plus UFR II`. The queue name is deployment data, so
 another certified installation of the same printer may use `USB002` or a
 different operator-chosen queue name.
+
+### One source of truth for media and colour
+
+The print path builds its own DEVMODE — A4, monochrome, portrait, explicit
+duplex — and hands it to `CreateDC`, so it decides what comes out regardless of
+what the queue's stored defaults say.
+
+The host used to *also* read those defaults through `Get-PrintConfiguration` and
+report `OFFLINE` unless they were A4 and monochrome. That check was wrong in
+both directions: a stored default of A4 does not mean the driver offers A4, and
+a perfectly good printer went offline whenever somebody opened printer
+preferences or a driver update reset them — a kiosk that stops earning over a
+setting that was never used.
+
+What is checked now is **capability**: does the driver offer A4 at all
+(`Test-QueueA4`), and does it have a duplex unit (`Test-QueueDuplex`). The
+printing type asserts the same two again before any device context exists
+(`A4_UNAVAILABLE`, `DUPLEX_UNAVAILABLE`), and those are reported as
+`QUEUE_NOT_APPROVED` — definitely, since nothing reached the spooler — rather
+than as a generic `DEVICE_ERROR`.
+
+### Render resolution
+
+Pages are rasterised to the printable area the driver reports for itself
+(`GetDeviceCaps` `HORZRES`/`VERTRES`), which maps one rendered pixel to one
+device pixel and leaves GDI nothing to rescale. It was previously fixed at A4
+300 DPI, which upscaled on a 600 DPI device and wasted work on a coarser one.
+
+It is clamped to 2480…4960 pixels on the long edge (roughly 212…424 DPI on A4)
+because the cost is quadratic in that number: doubling it quadruples both the
+rasterise and the draw, measured at ~1.4 s and ~2.4 s respectively at 3508 px on
+the reference printer. A driver that will not describe its surface falls back to
+3508. The measured values are recorded locally as `submit.surface`.
 
 The driver name and the port pattern are **deployment configuration**, sent on
 every request as `profiles`. Approving a second printer model is an operator

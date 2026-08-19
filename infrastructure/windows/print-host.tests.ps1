@@ -460,3 +460,71 @@ Describe 'Select-OperationJobs' {
     @(Select-OperationJobs -OperationId '' -Jobs $jobs).Count | Should -Be 0
   }
 }
+
+Describe 'ConvertTo-RetentionCutoff' {
+  It 'reads the ISO 8601 UTC the caller always sends' {
+    $cutoff = ConvertTo-RetentionCutoff -Value '2026-08-19T22:00:00Z'
+    $cutoff.Kind | Should -Be ([System.DateTimeKind]::Utc)
+    $cutoff.ToString('yyyy-MM-ddTHH:mm:ss') | Should -Be '2026-08-19T22:00:00'
+  }
+
+  # The bug this exists for: a day-first locale does not fail on an ISO date,
+  # it succeeds at a different moment. A cutoff that moved sweeps away the state
+  # of a live operation, and losing that record is a paid job nobody can settle.
+  It 'reads the same instant whatever locale the kiosk was installed with' {
+    $original = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+      foreach ($name in @('en-US', 'de-DE', 'en-GB', 'ar-AE')) {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::new($name)
+        $cutoff = ConvertTo-RetentionCutoff -Value '2026-08-19T22:00:00Z'
+        $cutoff.ToString('yyyy-MM-ddTHH:mm:ss') | Should -Be '2026-08-19T22:00:00'
+      }
+    } finally {
+      [System.Threading.Thread]::CurrentThread.CurrentCulture = $original
+    }
+  }
+
+  It 'refuses a cutoff nobody can read rather than sweeping on a guess' {
+    ConvertTo-RetentionCutoff -Value 'whenever' | Should -BeNullOrEmpty
+    ConvertTo-RetentionCutoff -Value '' | Should -BeNullOrEmpty
+  }
+}
+
+Describe 'Resolve-RenderLongEdge' {
+  It 'renders to the surface the driver actually reports' {
+    # 1:1 with the device leaves GDI nothing to rescale.
+    Resolve-RenderLongEdge -HorizontalPixels 2480 -VerticalPixels 3508 | Should -Be 3508
+  }
+
+  It 'holds the ceiling so a high-resolution driver cannot stall the kiosk' {
+    # Cost is quadratic: an unbounded 1200 DPI device turns 11 seconds into a
+    # minute with a customer standing there.
+    Resolve-RenderLongEdge -HorizontalPixels 9920 -VerticalPixels 14043 | Should -Be 4960
+  }
+
+  It 'holds the floor so a coarse driver cannot print a blurred page' {
+    Resolve-RenderLongEdge -HorizontalPixels 600 -VerticalPixels 800 | Should -Be 2480
+  }
+
+  It 'falls back when the driver will not describe itself' {
+    Resolve-RenderLongEdge -HorizontalPixels 0 -VerticalPixels 0 | Should -Be 3508
+  }
+}
+
+Describe 'Get-CapabilityRefusal' {
+  It 'recognises a queue that cannot do the work, through PowerShell wrapping' {
+    $inner = [System.InvalidOperationException]::new('DUPLEX_UNAVAILABLE')
+    $outer = [System.InvalidOperationException]::new('Exception calling ".ctor"', $inner)
+    $record = [System.Management.Automation.ErrorRecord]::new($outer, 'x', 'NotSpecified', $null)
+    Get-CapabilityRefusal -ErrorRecord $record | Should -Be 'DUPLEX_UNAVAILABLE'
+  }
+
+  # Treating an unrecognised failure as definite is how an ambiguous submission
+  # becomes a duplicate print.
+  It 'leaves anything it does not recognise alone' {
+    $error = [System.InvalidOperationException]::new('START_PAGE_FAILED:5')
+    $record = [System.Management.Automation.ErrorRecord]::new($error, 'x', 'NotSpecified', $null)
+    Get-CapabilityRefusal -ErrorRecord $record | Should -BeNullOrEmpty
+    Get-CapabilityRefusal -ErrorRecord $null | Should -BeNullOrEmpty
+  }
+}
