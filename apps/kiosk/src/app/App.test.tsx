@@ -232,6 +232,8 @@ let printReadErrorStatus: number | null;
 let printReadRequests: number;
 let printJobSnapshot: PrintJobSnapshot;
 let settledPrintJob: PrintJobSnapshot;
+/** Polls answered with an unfinished job before the settled one is returned. */
+let printReadsWhilePrinting: number;
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -252,6 +254,7 @@ beforeEach(() => {
   printReadFailuresRemaining = 0;
   printReadErrorStatus = null;
   printReadRequests = 0;
+  printReadsWhilePrinting = 0;
   printJobSnapshot = { ...printJobFixture };
   settledPrintJob = {
     ...printJobFixture,
@@ -446,7 +449,12 @@ beforeEach(() => {
             )
           );
         }
-        printJobSnapshot = settledPrintJob;
+        if (printReadsWhilePrinting > 0) {
+          printReadsWhilePrinting -= 1;
+          printJobSnapshot = { ...printJobFixture, status: "PRINTING" };
+        } else {
+          printJobSnapshot = settledPrintJob;
+        }
         return Promise.resolve(
           new Response(JSON.stringify({ printJob: printJobSnapshot }), {
             status: 200,
@@ -937,6 +945,137 @@ describe("kiosk prototype journey", () => {
     // somebody who did not choose English.
     expect(
       screen.getByRole("heading", { name: "Տպեք հեռախոսից՝ ընդամենը մի քանի քայլով։" })
+    ).toBeVisible();
+  });
+
+  /**
+   * The waiting experience, driven by a job that stays in PRINTING the way a
+   * real device does for about ten seconds.
+   *
+   * What is being pinned is the order and the pacing: each stage names
+   * something the device host really does, in the order it does it, and none of
+   * them appears for less time than a person needs to read it.
+   */
+  it("walks the customer through the printing stages in order", async () => {
+    vi.useFakeTimers();
+    printReadsWhilePrinting = 40;
+    renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // The control plane has only said QUEUED, so the screen may say no more
+    // than that the files are being prepared.
+    expect(screen.getByText("Preparing your files")).toBeVisible();
+
+    // First poll: the job reports PRINTING, which unlocks the device stages.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(screen.getByText("Checking the printer")).toBeVisible();
+
+    // Still inside its minimum hold: a stage must not be replaced part-read.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_300);
+    });
+    expect(screen.getByText("Checking the printer")).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(screen.getByText("Preparing pages")).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.getByText("Sending pages to the printer")).toBeVisible();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_600);
+    });
+    expect(screen.getByText("Printing your documents")).toBeVisible();
+
+    // The safety property: no amount of waiting turns into a claim of success.
+    // Only the control plane can end this screen.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(screen.getByText("Printing your documents")).toBeVisible();
+    expect(screen.queryByText("Finishing your print")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Your documents are ready" })
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * A device outcome that is not a confirmed success must reach the customer at
+   * once. The confirmation beat is only ever spent on a print that worked.
+   */
+  it("does not hold a failed print behind the finishing stage", async () => {
+    vi.useFakeTimers();
+    settledPrintJob = {
+      ...printJobFixture,
+      status: "RECOVERY_REQUIRED",
+      resultConfidence: "UNCONFIRMED",
+      failureCode: "OUT_OF_PAPER",
+      sheetsProduced: null
+    };
+    renderKiosk({
+      initialEntries: ["/printing"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        pricing: {
+          status: "READY",
+          settings: settingsFixture,
+          quote: quoteFixture,
+          errorCode: null
+        },
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(screen.queryByText("Finishing your print")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "The printer could not confirm your job" })
     ).toBeVisible();
   });
 

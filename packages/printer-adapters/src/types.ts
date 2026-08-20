@@ -160,6 +160,12 @@ export interface PrintDeviceDiagnostics {
   /** Elapsed milliseconds at each device-side phase. */
   phaseMs?: Record<string, number>;
   jobs?: PrintDeviceJobEvidence[];
+  /** How long the device was watched after its queue emptied. */
+  settleMs?: number | null;
+  /** The distinct printer-level status words seen during that watch. */
+  printerStatuses?: string[];
+  /** The fault that watch attributed to this operation, if any. */
+  deviceFaultCode?: string | null;
 }
 
 export interface PrintDeviceJobEvidence {

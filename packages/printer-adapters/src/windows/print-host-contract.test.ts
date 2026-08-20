@@ -112,6 +112,25 @@ describe("Windows print host prohibitions", () => {
     expect(hostSource).not.toContain("DUPLEX_SHORT_EDGE");
   });
 
+  /**
+   * The printer-status veto exists to remove success claims, never to grant
+   * them. Both halves of that are structural: only a COMPLETED outcome is
+   * rewritten, and the states that mean "asleep" or "paused" are absent from
+   * the pattern that triggers it. A printer that powers down after finishing is
+   * the ordinary end of a healthy print.
+   */
+  it("keeps the printer-status veto one-directional and narrow", () => {
+    expect(hostSource).toContain("if ([string]$Outcome.state -ne 'COMPLETED') { return $Outcome }");
+    const pattern = hostSource.match(/\$OperationFaultPattern\s*=\s*\n?\s*'([^']+)'/);
+    expect(pattern).not.toBeNull();
+    for (const benign of ["Offline", "PowerSave", "Paused", "TonerLow", "PaperLow", "OutputBinFull"]) {
+      expect(pattern?.[1]).not.toContain(benign);
+    }
+    for (const fault of ["PaperOut", "PaperJam", "DoorOpen"]) {
+      expect(pattern?.[1]).toContain(fault);
+    }
+  });
+
   it("never writes request payloads or document paths to the diagnostic log", () => {
     expect(hostSource).toContain("diagnostics.jsonl");
     expect(hostSource).not.toContain("request = $Request");

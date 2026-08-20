@@ -1529,27 +1529,146 @@ p {
   }
 }
 
-.printer-animation {
+/* The illustration beside each printing stage.
+ *
+ * One fixed box for every stage, so the layout below it never moves as the
+ * sequence advances. Everything is a transform or an opacity — no layout is
+ * animated — which keeps this off the main thread on kiosk hardware that is
+ * simultaneously rasterising a PDF.
+ */
+.stage-art {
   position: relative;
   width: 120px;
   height: 114px;
   margin: 0 auto 1.5rem;
+  animation: stage-art-in 320ms ease-out both;
 }
 
-.printer-animation__body {
+@keyframes stage-art-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Files being read: a small stack, each sheet lifting in turn. */
+.stage-art--files .stage-art__sheet {
   position: absolute;
+  bottom: 18px;
+  left: 50%;
+  width: 56px;
+  height: 72px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgb(23 34 53 / 8%);
+  animation: stage-sheet-lift 2.4s ease-in-out infinite;
+}
+
+.stage-art--files .stage-art__sheet:nth-child(1) {
+  margin-left: -40px;
+  animation-delay: 0ms;
+}
+
+.stage-art--files .stage-art__sheet:nth-child(2) {
+  margin-left: -28px;
+  animation-delay: 260ms;
+}
+
+.stage-art--files .stage-art__sheet:nth-child(3) {
+  margin-left: -16px;
+  animation-delay: 520ms;
+}
+
+@keyframes stage-sheet-lift {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-10px);
+  }
+}
+
+/* Pages being rendered: lines appearing down a page. */
+.stage-art--pages .stage-art__page {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  display: flex;
+  width: 68px;
+  height: 86px;
+  margin-left: -34px;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 10px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgb(23 34 53 / 8%);
+}
+
+.stage-art--pages .stage-art__page span {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--blue-light);
+  transform-origin: left center;
+  animation: stage-line-draw 1.8s ease-in-out infinite;
+}
+
+.stage-art--pages .stage-art__page span:nth-child(2) {
+  animation-delay: 200ms;
+}
+
+.stage-art--pages .stage-art__page span:nth-child(3) {
+  animation-delay: 400ms;
+}
+
+.stage-art--pages .stage-art__page span:nth-child(4) {
+  animation-delay: 600ms;
+}
+
+@keyframes stage-line-draw {
+  0%,
+  100% {
+    transform: scaleX(0.15);
+    background: var(--blue-light);
+  }
+  50% {
+    transform: scaleX(1);
+    background: var(--blue);
+  }
+}
+
+/* The device itself, shown across checking, sending and printing. */
+.stage-art--printer .stage-art__body {
+  position: absolute;
+  z-index: 2;
   bottom: 0;
-  display: grid;
   width: 120px;
   height: 74px;
-  place-items: center;
   border-radius: 1rem;
-  color: white;
   background: var(--navy);
-  font-size: 2.2rem;
 }
 
-.printer-animation__paper {
+.stage-art--printer .stage-art__body::after {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--blue);
+  content: "";
+}
+
+.stage-art--printer .stage-art__paper {
   position: absolute;
   z-index: 1;
   bottom: 45px;
@@ -1557,17 +1676,110 @@ p {
   width: 62px;
   height: 66px;
   border: 1px solid var(--line);
-  background: white;
-  animation: print-paper 1.3s ease-in-out infinite;
+  border-radius: 3px 3px 0 0;
+  background: var(--surface);
 }
 
-@keyframes print-paper {
-  0% {
-    transform: translateY(-15px);
-  }
-  70%,
+/* Checking: the device is awake and being asked, nothing is moving yet. */
+.stage-art--checking_printer .stage-art__paper {
+  opacity: 0;
+}
+
+.stage-art--checking_printer .stage-art__body::after {
+  animation: stage-poll 1.4s ease-in-out infinite;
+}
+
+@keyframes stage-poll {
+  0%,
   100% {
-    transform: translateY(20px);
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Sending: pages travel down into the device. */
+.stage-art--sending_pages .stage-art__paper {
+  animation: stage-paper-feed 1.6s ease-in infinite;
+}
+
+@keyframes stage-paper-feed {
+  0% {
+    opacity: 0;
+    transform: translateY(-26px);
+  }
+  25%,
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+}
+
+/* Printing: sheets emerging from the front. */
+.stage-art--printing .stage-art__paper {
+  z-index: 3;
+  bottom: 6px;
+  height: 52px;
+  animation: stage-paper-out 1.5s ease-out infinite;
+}
+
+@keyframes stage-paper-out {
+  0% {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  30%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+}
+
+/* Only ever reached once the control plane confirmed the completion. */
+.stage-art--done .stage-art__check {
+  display: grid;
+  width: 92px;
+  height: 92px;
+  margin: 11px auto 0;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--green);
+  background: var(--green-light);
+  font-size: 3rem;
+  animation: stage-confirm 420ms cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+}
+
+@keyframes stage-confirm {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* The stage sentence is keyed per stage, so this plays on each change. */
+.progress-detail--stage {
+  animation: stage-text-in 300ms ease-out both;
+}
+
+@keyframes stage-text-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

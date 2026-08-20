@@ -189,6 +189,19 @@ export interface MessageCatalog {
     printingTitle: string;
     printingDescription: string;
     printingDetail: string;
+    /**
+     * What the machine is doing right now, in the customer's words. The screen
+     * shows exactly one of these at a time and never runs ahead of what the
+     * control plane has actually reported.
+     */
+    printingStages: {
+      PREPARING_FILES: string;
+      CHECKING_PRINTER: string;
+      PREPARING_PAGES: string;
+      SENDING_PAGES: string;
+      PRINTING: string;
+      FINISHING: string;
+    };
     actionNeeded: string;
     paymentStatusUnavailableTitle: string;
     paymentStatusUnavailableDescription: string;
@@ -462,6 +475,14 @@ const english: MessageCatalog = {
     printingTitle: "Printing your document",
     printingDescription: "Your payment was approved. Please wait for every sheet.",
     printingDetail: "Preparing · Sending · Printing",
+    printingStages: {
+      PREPARING_FILES: "Preparing your files",
+      CHECKING_PRINTER: "Checking the printer",
+      PREPARING_PAGES: "Preparing pages",
+      SENDING_PAGES: "Sending pages to the printer",
+      PRINTING: "Printing your documents",
+      FINISHING: "Finishing your print"
+    },
     actionNeeded: "Action needed",
     paymentStatusUnavailableTitle: "Payment status is temporarily unavailable",
     paymentStatusUnavailableDescription:
@@ -734,6 +755,14 @@ const russian: MessageCatalog = {
     printingTitle: "Печатаем документ",
     printingDescription: "Оплата подтверждена. Дождитесь выхода всех листов.",
     printingDetail: "Подготовка · Отправка · Печать",
+    printingStages: {
+      PREPARING_FILES: "Готовим ваши файлы",
+      CHECKING_PRINTER: "Проверяем принтер",
+      PREPARING_PAGES: "Готовим страницы",
+      SENDING_PAGES: "Отправляем страницы на принтер",
+      PRINTING: "Печатаем ваши документы",
+      FINISHING: "Завершаем печать"
+    },
     actionNeeded: "Требуется действие",
     paymentStatusUnavailableTitle: "Статус платежа временно недоступен",
     paymentStatusUnavailableDescription:
@@ -1001,6 +1030,14 @@ const armenian: MessageCatalog = {
     printingTitle: "Փաստաթուղթը տպվում է",
     printingDescription: "Վճարումը հաստատվել է։ Սպասեք, մինչև բոլոր թերթերը դուրս գան։",
     printingDetail: "Նախապատրաստում · Ուղարկում · Տպում",
+    printingStages: {
+      PREPARING_FILES: "Պատրաստում ենք ձեր ֆայլերը",
+      CHECKING_PRINTER: "Ստուգում ենք տպիչը",
+      PREPARING_PAGES: "Պատրաստում ենք էջերը",
+      SENDING_PAGES: "Ուղարկում ենք էջերը տպիչին",
+      PRINTING: "Տպում ենք ձեր փաստաթղթերը",
+      FINISHING: "Ավարտում ենք տպումը"
+    },
     actionNeeded: "Ձեր միջամտությունն է պետք",
     paymentStatusUnavailableTitle: "Վճարման կարգավիճակը ժամանակավորապես հասանելի չէ",
     paymentStatusUnavailableDescription:

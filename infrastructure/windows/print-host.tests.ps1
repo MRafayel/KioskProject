@@ -528,3 +528,146 @@ Describe 'Get-CapabilityRefusal' {
     Get-CapabilityRefusal -ErrorRecord $null | Should -BeNullOrEmpty
   }
 }
+
+Describe 'Get-PrinterFaultCode' {
+  # These are the conditions that mean paper stopped coming out. Each maps to
+  # the code an operator needs to read, not to a generic device error.
+  It 'names the fault behind a stopped printer' {
+    Get-PrinterFaultCode -Status 'PaperOut' | Should -Be 'OUT_OF_PAPER'
+    Get-PrinterFaultCode -Status 'PaperJam' | Should -Be 'PAPER_JAM'
+    Get-PrinterFaultCode -Status 'DoorOpen' | Should -Be 'COVER_OPEN'
+    Get-PrinterFaultCode -Status 'NoToner' | Should -Be 'DEVICE_ERROR'
+    Get-PrinterFaultCode -Status 'UserInterventionRequired' | Should -Be 'DEVICE_ERROR'
+  }
+
+  # The whole point of the narrow pattern. A printer that sleeps or is paused
+  # after finishing is the ordinary end of a healthy print; treating either as
+  # evidence would route every idle kiosk into operator recovery.
+  It 'is silent about a printer that is merely idle, asleep or paused' {
+    foreach ($status in @('Normal', 'Idle', 'Printing', 'Busy', 'IOActive', 'WarmingUp',
+                          'Offline', 'PowerSave', 'Paused', 'PendingDeletion', 'NotAvailable')) {
+      Get-PrinterFaultCode -Status $status | Should -BeNullOrEmpty -Because "'$status' is not a fault"
+    }
+  }
+
+  # Consumable warnings already travel as warningCode. Vetoing on them would put
+  # a refund conversation in front of a customer whose pages did come out.
+  It 'is silent about consumable warnings' {
+    Get-PrinterFaultCode -Status 'TonerLow' | Should -BeNullOrEmpty
+    Get-PrinterFaultCode -Status 'PaperLow' | Should -BeNullOrEmpty
+    Get-PrinterFaultCode -Status 'OutputBinFull' | Should -BeNullOrEmpty
+  }
+
+  It 'treats an absent or unreadable status as no evidence at all' {
+    Get-PrinterFaultCode -Status '' | Should -BeNullOrEmpty
+    Get-PrinterFaultCode -Status '   ' | Should -BeNullOrEmpty
+    Get-PrinterFaultCode -Status 'SomeStatusNobodyHasSeen' | Should -BeNullOrEmpty
+  }
+
+  # A real status word carries several flags at once. The most specific cause
+  # wins, because 'DEVICE_ERROR' tells an operator nothing they can act on.
+  It 'reports the most specific cause when several flags are set' {
+    Get-PrinterFaultCode -Status 'TonerLow, PaperOut' | Should -Be 'OUT_OF_PAPER'
+    Get-PrinterFaultCode -Status 'Error, PaperJam' | Should -Be 'PAPER_JAM'
+  }
+}
+
+Describe 'Merge-DeviceFault' {
+  BeforeAll {
+    function New-Outcome {
+      param(
+        [string] $State = 'COMPLETED',
+        [string] $Confidence = 'CONFIRMED',
+        $FailureCode = $null,
+        $SheetsProduced = 2,
+        [int] $Open = 0
+      )
+      @{
+        state = $State; confidence = $Confidence; failureCode = $FailureCode
+        warningCode = $null; sheetsProduced = $SheetsProduced; open = $Open
+      }
+    }
+  }
+
+  # The regression this whole mechanism exists for: two sheets were asked for,
+  # both spooler jobs retired, and the printer had run out of paper.
+  It 'takes a confirmed completion away when the printer faulted' {
+    $merged = Merge-DeviceFault -Outcome (New-Outcome) -FaultCode 'OUT_OF_PAPER'
+    $merged.state | Should -Be 'FAILED'
+    $merged.confidence | Should -Be 'UNCONFIRMED'
+    $merged.failureCode | Should -Be 'OUT_OF_PAPER'
+    # The count was only ever what this host intended to produce. A fault is the
+    # proof it was not what came out, so it must not travel as a fact.
+    $merged.sheetsProduced | Should -BeNullOrEmpty
+  }
+
+  It 'leaves a healthy operation exactly as the queue described it' {
+    $outcome = New-Outcome
+    $merged = Merge-DeviceFault -Outcome $outcome -FaultCode ''
+    $merged.state | Should -Be 'COMPLETED'
+    $merged.confidence | Should -Be 'CONFIRMED'
+    $merged.sheetsProduced | Should -Be 2
+    (Merge-DeviceFault -Outcome $outcome -FaultCode $null).confidence | Should -Be 'CONFIRMED'
+  }
+
+  # A proved-zero failure is definite and refundable. Turning it into an
+  # ambiguous one would take a refund away from a customer who is owed it.
+  It 'never rewrites a failure that already proved nothing came out' {
+    $outcome = New-Outcome -State 'FAILED' -Confidence 'CONFIRMED' `
+      -FailureCode 'PRINTER_OFFLINE' -SheetsProduced 0
+    $merged = Merge-DeviceFault -Outcome $outcome -FaultCode 'OUT_OF_PAPER'
+    $merged.state | Should -Be 'FAILED'
+    $merged.confidence | Should -Be 'CONFIRMED'
+    $merged.failureCode | Should -Be 'PRINTER_OFFLINE'
+    $merged.sheetsProduced | Should -Be 0
+  }
+
+  It 'never rewrites a cancellation' {
+    $outcome = New-Outcome -State 'CANCELED' -Confidence 'CONFIRMED' `
+      -FailureCode 'CANCELED_AT_DEVICE' -SheetsProduced 0
+    $merged = Merge-DeviceFault -Outcome $outcome -FaultCode 'PAPER_JAM'
+    $merged.state | Should -Be 'CANCELED'
+    $merged.failureCode | Should -Be 'CANCELED_AT_DEVICE'
+  }
+
+  # An operation with work still in the queue has not claimed anything yet, so
+  # there is nothing for a fault to take away and the wait must continue.
+  It 'leaves an operation that is still printing open' {
+    $outcome = New-Outcome -State 'PRINTING' -Confidence 'UNCONFIRMED' `
+      -SheetsProduced $null -Open 1
+    $merged = Merge-DeviceFault -Outcome $outcome -FaultCode 'OUT_OF_PAPER'
+    $merged.state | Should -Be 'PRINTING'
+    $merged.open | Should -Be 1
+  }
+
+  # Confidence only ever travels one way. There is no input that turns an
+  # unconfirmed answer into a confirmed one.
+  It 'can only ever downgrade' {
+    foreach ($state in @('COMPLETED', 'FAILED', 'CANCELED', 'PRINTING', 'NOT_SUBMITTED')) {
+      $outcome = New-Outcome -State $state -Confidence 'UNCONFIRMED' -SheetsProduced $null
+      $merged = Merge-DeviceFault -Outcome $outcome -FaultCode 'OUT_OF_PAPER'
+      $merged.confidence | Should -Be 'UNCONFIRMED' -Because "$state must not gain confidence"
+    }
+  }
+}
+
+Describe 'Get-RequestedSettleMilliseconds' {
+  It 'defaults when the caller does not ask' {
+    Get-RequestedSettleMilliseconds -Request ([pscustomobject]@{ op = 'submit' }) | Should -Be 3000
+  }
+
+  It 'clamps what a caller may ask for' {
+    Get-RequestedSettleMilliseconds -Request ([pscustomobject]@{ settleMs = -1 }) | Should -Be 0
+    Get-RequestedSettleMilliseconds -Request ([pscustomobject]@{ settleMs = 999999 }) |
+      Should -Be 15000
+    Get-RequestedSettleMilliseconds -Request ([pscustomobject]@{ settleMs = 1500 }) | Should -Be 1500
+  }
+}
+
+Describe 'Watch-PrinterSettle' {
+  It 'does not touch the spooler when it is given no window' {
+    $result = Watch-PrinterSettle -QueueName 'anything' -Milliseconds 0
+    $result.faultCode | Should -BeNullOrEmpty
+    @($result.statuses).Count | Should -Be 0
+  }
+}

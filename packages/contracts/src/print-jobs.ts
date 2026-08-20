@@ -304,7 +304,17 @@ export const deviceDiagnosticsSchema = z
     processStartMs: z.number().int().min(0).max(3_600_000).nullable().optional(),
     pollCount: z.number().int().min(0).max(100_000).nullable().optional(),
     phaseMs: z.record(z.string().max(64), z.number().int().min(0).max(3_600_000)).optional(),
-    jobs: z.array(deviceJobEvidenceSchema).max(16).optional()
+    jobs: z.array(deviceJobEvidenceSchema).max(16).optional(),
+    /** How long the device was watched after its queue emptied. */
+    settleMs: z.number().int().min(0).max(3_600_000).nullable().optional(),
+    /**
+     * The distinct printer-level status words seen during that watch. Recorded
+     * even when none of them was a fault: which statuses a given driver will and
+     * will not raise is otherwise unknowable without standing at the machine.
+     */
+    printerStatuses: z.array(z.string().max(120)).max(8).optional(),
+    /** The fault the watch attributed to this operation, if any. */
+    deviceFaultCode: z.string().max(48).nullable().optional()
   })
   .strict();
 

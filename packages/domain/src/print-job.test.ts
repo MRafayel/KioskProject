@@ -26,6 +26,39 @@ describe("settlePrintDeviceResult", () => {
     });
   });
 
+  /**
+   * The shape the device host now sends when the spooler retired every job but
+   * the printer itself was faulted the moment afterwards. The regression it
+   * guards: two sheets were paid for, both jobs left the queue, and only one
+   * sheet existed to print on.
+   *
+   * It must not be a success, and it must not be a refund either — some sheets
+   * almost certainly did print, so what the customer holds is a question for a
+   * person.
+   */
+  it("routes a printer that faulted after its queue emptied to a person", () => {
+    const settlement = settlePrintDeviceResult(
+      result({
+        state: "FAILED",
+        confidence: "UNCONFIRMED",
+        failureCode: "OUT_OF_PAPER",
+        sheetsProduced: null
+      })
+    );
+
+    expect(settlement.status).toBe("RECOVERY_REQUIRED");
+    expect(settlement.resultConfidence).toBe("UNCONFIRMED");
+    // The operator is told what the device said, not a generic device error.
+    expect(settlement.failureCode).toBe("OUT_OF_PAPER");
+    expect(settlement.refundObligation).toBe(false);
+    // The count the host intended to produce must not survive as a fact.
+    expect(settlement.sheetsProduced).toBeNull();
+  });
+
+  /**
+   * A consumable warning is not a fault. The host's veto pattern excludes them
+   * on purpose, and this pins the consequence: low toner still completes.
+   */
   it("keeps a warning on an otherwise successful job", () => {
     const settlement = settlePrintDeviceResult(result({ warningCode: "TONER_LOW" }));
 

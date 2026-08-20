@@ -22,6 +22,11 @@ import {
   requestSimulatedOutcome
 } from "../features/session/paymentService.js";
 import {
+  FINISHING_HOLD_MS,
+  usePrintStage,
+  type PrintStage
+} from "../features/session/printProgress.js";
+import {
   isPrintJobSettled,
   isPrintJobSuccessful,
   isPrintRecoveryRequired,
@@ -167,6 +172,9 @@ export function PrintingScreen() {
   const observedPrintJobSuccessful = observedPrintJob
     ? isPrintJobSuccessful(observedPrintJob)
     : false;
+  // Presentation only. It reads the job this screen already polls and cannot
+  // reach the device, so it can neither delay a print nor change its outcome.
+  const stage = usePrintStage(observedPrintJob);
 
   useEffect(() => {
     if (!sessionId || !paymentId) return;
@@ -184,7 +192,16 @@ export function PrintingScreen() {
       if (!active) return true;
       dispatch({ type: "PRINT_OBSERVED", printJob });
       if (!isPrintJobSettled(printJob)) return false;
-      leave(isPrintJobSuccessful(printJob) ? "/complete" : "/failure/printer");
+      if (isPrintJobSuccessful(printJob)) {
+        // The receipt waits for the confirmation beat to be readable. Nothing
+        // is being decided in this pause — the outcome is already settled and
+        // the device has long since finished — so it can only ever delay a
+        // screen, never a print. A failure is never held back like this: it
+        // needs to reach the customer at once.
+        timer = window.setTimeout(() => leave("/complete"), FINISHING_HOLD_MS);
+        return true;
+      }
+      leave("/failure/printer");
       return true;
     };
 
@@ -271,8 +288,8 @@ export function PrintingScreen() {
       eyebrow={messages.status.printingEyebrow}
       title={messages.status.printingTitle}
       description={messages.status.printingDescription}
-      detail={messages.status.printingDetail}
-      printAnimation
+      detail={messages.status.printingStages[stage]}
+      stage={stage}
     />
   );
 }
@@ -505,33 +522,78 @@ export function CompleteScreen() {
   );
 }
 
+/**
+ * The illustration for a stage.
+ *
+ * Every one of these is CSS on a handful of elements: no images, no timers of
+ * its own and nothing to load, so the animation cannot become the next source
+ * of latency on a machine that is already busy rasterising a PDF. All of it is
+ * `aria-hidden`, because the stage is announced as text by the live region
+ * around it, and the whole set stops moving under `prefers-reduced-motion`.
+ */
+function StageArt({ stage }: { stage: PrintStage }) {
+  if (stage === "FINISHING") {
+    return (
+      <div className="stage-art stage-art--done" aria-hidden="true">
+        <div className="stage-art__check">✓</div>
+      </div>
+    );
+  }
+  if (stage === "PREPARING_FILES") {
+    return (
+      <div className="stage-art stage-art--files" aria-hidden="true">
+        <span className="stage-art__sheet" />
+        <span className="stage-art__sheet" />
+        <span className="stage-art__sheet" />
+      </div>
+    );
+  }
+  if (stage === "PREPARING_PAGES") {
+    return (
+      <div className="stage-art stage-art--pages" aria-hidden="true">
+        <div className="stage-art__page">
+          <span />
+          <span />
+          <span />
+          <span />
+        </div>
+      </div>
+    );
+  }
+  // Checking, sending and printing all show the device, so the object on screen
+  // stays put across three stages instead of being swapped twice.
+  return (
+    <div className={`stage-art stage-art--printer stage-art--${stage.toLowerCase()}`} aria-hidden="true">
+      <span className="stage-art__paper" />
+      <span className="stage-art__body" />
+    </div>
+  );
+}
+
 function TerminalProgress({
   eyebrow,
   title,
   description,
   detail,
-  printAnimation = false
+  stage
 }: {
   eyebrow: string;
   title: string;
   description: string;
   detail: string;
-  printAnimation?: boolean;
+  stage?: PrintStage;
 }) {
   return (
     <div className="terminal-state" aria-live="polite">
-      {printAnimation ? (
-        <div className="printer-animation" aria-hidden="true">
-          <div className="printer-animation__paper" />
-          <div className="printer-animation__body">▤</div>
-        </div>
-      ) : (
-        <div className="spinner" aria-hidden="true" />
-      )}
+      {stage ? <StageArt stage={stage} /> : <div className="spinner" aria-hidden="true" />}
       <p className="eyebrow">{eyebrow}</p>
       <h1>{title}</h1>
       <p>{description}</p>
-      <span className="progress-detail">{detail}</span>
+      {/* Keyed so each stage's text fades in as its own element rather than
+          the previous sentence mutating in place. */}
+      <span className="progress-detail progress-detail--stage" key={stage ?? "static"}>
+        {detail}
+      </span>
       <div className="progress-bar" aria-hidden="true">
         <span />
       </div>

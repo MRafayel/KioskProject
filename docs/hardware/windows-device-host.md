@@ -264,7 +264,8 @@ Anything else stays unconfirmed and reaches an operator:
 
 | Situation | Result |
 | --- | --- |
-| Watched, then retired with no fault | `COMPLETED` / `CONFIRMED`, sheets counted |
+| Watched, then retired with no fault, printer healthy after | `COMPLETED` / `CONFIRMED`, sheets counted |
+| Watched, then retired, but the printer faulted right after | `FAILED` / `UNCONFIRMED`, no sheet count |
 | Still `Printed` in the queue | `COMPLETED` / `CONFIRMED`, sheets counted |
 | Absent, never seen alive | `COMPLETED` / `UNCONFIRMED`, no sheet count |
 | Absent after a `cancel` was requested | `COMPLETED` / `UNCONFIRMED`, no sheet count |
@@ -276,6 +277,49 @@ The spooler's own `PagesPrinted` counter is **not** part of the rule. Drivers
 report it inconsistently and some never move it off zero; gating on it made every
 successful print unconfirmable. It is kept as positive evidence only — a job that
 moved pages can never be called a proven-zero failure.
+
+### The settle watch
+
+A queue emptying proves the **data** reached the device, not that **paper** did.
+A USB laser accepts a small job into its own memory in well under a second and
+the spooler retires it immediately; the device then prints from that buffer, and
+can run out of paper afterwards with nothing left in the queue to say so.
+
+That is a real observed failure: a two-sheet operation whose spooler jobs both
+retired cleanly, on a printer holding one sheet, reported `COMPLETED` /
+`CONFIRMED` with `sheetsProduced: 2`.
+
+So before a confirmed completion is returned, and only then, the host reads the
+printer's own status for a short window (`$DefaultSettleWatchMilliseconds`,
+3000ms, overridable per request as `settleMs`). A fault seen in that window is
+latched into the operation's state file and the outcome becomes `FAILED` /
+`UNCONFIRMED` carrying the device's reason, which the settlement reducer turns
+into `RECOVERY_REQUIRED` with **no refund obligation** — some sheets almost
+certainly did print, so what the customer holds is a question for a person.
+
+Four things keep this from condemning the wrong operation:
+
+- **It can only ever downgrade.** Only a `COMPLETED` outcome is rewritten. A
+  failure that already proved nothing came out stays a definite, refundable
+  failure; a cancellation and an open operation are untouched.
+- **A stale fault cannot reach it.** `submit` already refuses to start on a
+  queue that is not `READY`, so a printer that was already faulted never gets as
+  far as producing an outcome to veto.
+- **The latch is per-operation.** It lives in that operation's own state file,
+  so it can never be read against another customer's print, and a repeated call
+  returns the same answer without watching again.
+- **The pattern is narrow.** `$OperationFaultPattern` excludes `Offline`,
+  `PowerSave` and `Paused` — a printer that sleeps after finishing is a healthy
+  print — and excludes `TonerLow`, `PaperLow` and `OutputBinFull`, which are
+  consumable warnings that already travel as `warningCode`.
+
+`status` and `cancel` pass `settleMs: 0`. A status call can arrive long after the
+pages did, and a fault seen then may belong to the next customer's job.
+
+Every window records `settleMs`, `printerStatuses` and `deviceFaultCode` in the
+diagnostics, whether or not it found anything. Which statuses a given driver
+actually raises is otherwise unknowable without standing at the machine, and it
+is what the window length should be tuned from.
 
 ### Queue state
 
