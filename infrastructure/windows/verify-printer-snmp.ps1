@@ -33,7 +33,9 @@ param(
   [string] $PrinterAddress,
   [string] $Community = 'public',
   [int] $TimeoutMilliseconds = 2000,
-  [switch] $SelfTest
+  [switch] $SelfTest,
+  [switch] $Watch,
+  [int] $Seconds = 60
 )
 
 $ErrorActionPreference = 'Continue'
@@ -290,6 +292,142 @@ function Invoke-SnmpWalk {
 
 # ---------- the walk ----------
 
+# ---------- interpretation ----------
+
+# RFC 2790 numbers these bits from the MOST significant bit of the first octet,
+# so bit 0 is 0x80 of byte 0, not 0x01.
+$ErrorStateNames = @(
+  'lowPaper', 'noPaper', 'lowToner', 'noToner', 'doorOpen', 'jammed', 'offline',
+  'serviceRequested', 'inputTrayMissing', 'outputTrayMissing', 'markerSupplyMissing',
+  'outputNearFull', 'outputFull', 'inputTrayEmpty', 'overduePreventMaint'
+)
+
+function ConvertFrom-ErrorState {
+  param([string] $HexText)
+  if ([string]::IsNullOrWhiteSpace($HexText)) { return '(unreadable)' }
+  $parts = @($HexText -split '\s+' | Where-Object { $_.Length -gt 0 })
+  $bytes = @()
+  foreach ($part in $parts) {
+    $bytes += [Convert]::ToInt32($part, 16)
+  }
+  $set = @()
+  for ($i = 0; $i -lt $ErrorStateNames.Count; $i++) {
+    $byteIndex = [int][System.Math]::Floor($i / 8)
+    $bitIndex = $i % 8
+    if ($byteIndex -ge $bytes.Count) { continue }
+    $mask = 1 -shl (7 - $bitIndex)
+    if (($bytes[$byteIndex] -band $mask) -ne 0) { $set += $ErrorStateNames[$i] }
+  }
+  if ($set.Count -eq 0) { return '(none)' }
+  return ($set -join ', ')
+}
+
+function Get-PrinterStatusName {
+  param([string] $Value)
+  if ($Value -eq '1') { return 'other(1)' }
+  if ($Value -eq '2') { return 'unknown(2)' }
+  if ($Value -eq '3') { return 'idle(3)' }
+  if ($Value -eq '4') { return 'PRINTING(4)' }
+  if ($Value -eq '5') { return 'warmup(5)' }
+  return "unmapped($Value)"
+}
+
+function Get-SnmpFirst {
+  param([string] $Root)
+  $rows = Invoke-SnmpWalk -Root $Root -MaxRows 1
+  if ($rows.Count -eq 0) { return $null }
+  return $rows[0]
+}
+
+<#
+.SYNOPSIS
+  Watch the engine while it prints. Answers the two questions the static walk
+  cannot.
+
+.DESCRIPTION
+  Start this, then send a print job. It answers:
+
+    1. Does prtMarkerLifeCount actually increment, and by exactly the number of
+       sides printed? A counter that exists but never moves is no better than
+       none, and it is the only signal that can prove physical output.
+    2. Does hrPrinterStatus report printing(4) while paper is moving? That is
+       what would let the kiosk hold "completed" until the engine really stops,
+       instead of announcing it when the spooler queue empties.
+#>
+function Invoke-Watch {
+  param([int] $Seconds)
+
+  Write-Section "Watching the engine for $Seconds seconds -- send a print job now"
+  Write-Host '  time     hrPrinterStatus  markerLifeCount  trayLevel  errorState' -ForegroundColor Gray
+
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  $firstCount = $null
+  $lastCount = $null
+  $seenStatus = @{}
+  $seenError = @{}
+
+  while ((Get-Date) -lt $deadline) {
+    $stamp = (Get-Date).ToString('HH:mm:ss')
+
+    $statusRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.25.3.5.1.1'
+    $countRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.43.10.2.1.4'
+    $errorRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.25.3.5.1.2'
+    $trayRows = Invoke-SnmpWalk -Root '.1.3.6.1.2.1.43.8.2.1.10' -MaxRows 4
+
+    $statusText = '?'
+    if ($null -ne $statusRow) {
+      $statusText = Get-PrinterStatusName -Value $statusRow.valueText
+      $seenStatus[$statusText] = $true
+    }
+
+    $countText = '?'
+    if ($null -ne $countRow) {
+      $countText = $countRow.valueText
+      if ($null -eq $firstCount) { $firstCount = $countText }
+      $lastCount = $countText
+    }
+
+    $errorText = '?'
+    if ($null -ne $errorRow) {
+      $errorText = ConvertFrom-ErrorState -HexText $errorRow.valueText
+      $seenError[$errorText] = $true
+    }
+
+    $trays = @()
+    foreach ($row in $trayRows) { $trays += $row.valueText }
+    $trayText = ($trays -join '/')
+
+    $line = '  {0}  {1,-15}  {2,-15}  {3,-9}  {4}' -f `
+      $stamp, $statusText, $countText, $trayText, $errorText
+    Write-Host $line
+    Start-Sleep -Milliseconds 1000
+  }
+
+  Write-Section 'What the watch showed'
+  Write-Finding "hrPrinterStatus values seen: $($seenStatus.Keys -join ', ')"
+  Write-Finding "error states seen: $($seenError.Keys -join ' | ')"
+
+  if ($null -ne $firstCount -and $null -ne $lastCount) {
+    $delta = [int]$lastCount - [int]$firstCount
+    Write-Finding "prtMarkerLifeCount: $firstCount -> $lastCount (delta $delta)"
+    if ($delta -gt 0) {
+      Write-Finding 'THE COUNTER MOVES. Check the delta equals the sides you printed.' 'good'
+      Write-Finding 'If it does, physical output is measurable and the build can proceed.' 'good'
+    } else {
+      Write-Finding 'Counter did not move. If pages really came out, it is useless to us' 'bad'
+      Write-Finding 'and cannot be the basis for confirming a print.' 'bad'
+    }
+  }
+
+  if ($seenStatus.ContainsKey('PRINTING(4)')) {
+    Write-Finding 'hrPrinterStatus reached printing(4): the engine reports when it is busy,' 'good'
+    Write-Finding 'so "completed" can wait for the engine rather than for the queue.' 'good'
+  } else {
+    Write-Finding 'Never saw printing(4). Either the poll missed it or this model does not' 'warn'
+    Write-Finding 'report it; the marker counter would then be the only completion signal.' 'warn'
+  }
+}
+
 <#
 .SYNOPSIS
   Prove the encoder and decoder agree, without a printer.
@@ -392,8 +530,13 @@ if ([string]::IsNullOrWhiteSpace($PrinterAddress)) {
 }
 
 Write-Host ''
-Write-Host "Phase 0c SNMP MIB walk -- READ ONLY (GET-NEXT only)." -ForegroundColor White
+Write-Host "Phase 0c SNMP -- READ ONLY (GET-NEXT only)." -ForegroundColor White
 Write-Host "target: $PrinterAddress udp/161" -ForegroundColor Gray
+
+if ($Watch) {
+  Invoke-Watch -Seconds $Seconds
+  return
+}
 
 Write-Section 'Reachability'
 $probe = Invoke-SnmpGetNext -Address $PrinterAddress -CommunityName $Community -Oid '.1.3.6.1.2.1.1.1'
