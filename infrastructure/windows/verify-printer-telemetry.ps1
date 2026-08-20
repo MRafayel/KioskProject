@@ -196,16 +196,31 @@ function Test-BidirectionalSupport {
     }
   }
 
-  # PRINTER_ATTRIBUTE_ENABLE_BIDI = 0x00000004
+  # PRINTER_ATTRIBUTE_ENABLE_BIDI is 0x00000800 in winspool.h. An earlier
+  # revision of this script tested 0x4, which is PRINTER_ATTRIBUTE_DEFAULT, and
+  # so reported "bidi disabled" on a printer that had it enabled.
   $key = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\$QueueName"
   if (Test-Path $key) {
     $attributes = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).Attributes
     if ($null -ne $attributes) {
-      $hex = [Convert]::ToString([int]$attributes, 16)
-      $enabled = (([int]$attributes) -band 0x4) -ne 0
+      $value = [int]$attributes
+      $hex = [Convert]::ToString($value, 16)
+      $enabled = ($value -band 0x800) -ne 0
       $level = 'bad'
       if ($enabled) { $level = 'good' }
-      Write-Finding "spooler Attributes=0x$hex -> bidi enabled: $enabled" $level
+      Write-Finding "spooler Attributes=0x$hex -> ENABLE_BIDI (0x800): $enabled" $level
+
+      $names = [ordered]@{
+        0x0001 = 'QUEUED'; 0x0002 = 'DIRECT'; 0x0004 = 'DEFAULT'; 0x0008 = 'SHARED'
+        0x0010 = 'NETWORK'; 0x0020 = 'HIDDEN'; 0x0040 = 'LOCAL'; 0x0080 = 'ENABLE_DEVQ'
+        0x0100 = 'KEEPPRINTEDJOBS'; 0x0200 = 'DO_COMPLETE_FIRST'; 0x0400 = 'WORK_OFFLINE'
+        0x0800 = 'ENABLE_BIDI'; 0x1000 = 'RAW_ONLY'; 0x2000 = 'PUBLISHED'
+      }
+      $set = @()
+      foreach ($bit in $names.Keys) {
+        if (($value -band $bit) -ne 0) { $set += $names[$bit] }
+      }
+      Write-Finding "flags: $($set -join ', ')"
     }
   } else {
     Write-Finding "No spooler registry key for '$QueueName'." 'warn'
@@ -232,6 +247,7 @@ function Test-DeviceStatus {
   }
   $seenStatus = @{}
   $seenError = @{}
+  $sawAnyJob = $false
 
   for ($i = 1; $i -le $Samples; $i++) {
     $line = "  [$i/$Samples] "
@@ -258,6 +274,7 @@ function Test-DeviceStatus {
     }
 
     $jobs = @(Get-PrintJob -PrinterName $QueueName -ErrorAction SilentlyContinue)
+    if ($jobs.Count -gt 0) { $sawAnyJob = $true }
     $line += " | jobs=$($jobs.Count)"
     foreach ($job in $jobs) {
       $jobStatus = [string](Get-Safe -Source $job -Name 'JobStatus')
@@ -285,10 +302,26 @@ function Test-DeviceStatus {
     Write-Finding 'WMI DetectedErrorState DID report the fault.' 'good'
     Write-Finding 'STOP: the fault is available, just not in the field the host reads.' 'good'
     Write-Finding 'A small change to the existing settle window fixes this. No Ethernet needed.' 'good'
-  } elseif ($onlyNormal) {
+    return
+  }
+
+  # A tray pulled from an idle printer is a weaker test than a device stalled
+  # part-way through a job: some engines only raise the condition when they
+  # actually try to pick a sheet. Say so rather than letting a quiet idle
+  # printer be read as proof of a blind driver.
+  if (-not $sawAnyJob) {
+    Write-Finding 'NOTE: no print job was in the queue during any sample.' 'warn'
+    Write-Finding 'Either the printer was idle with the tray out, or the job had already' 'warn'
+    Write-Finding 'retired while the device was still working -- which is the bug itself.' 'warn'
+    Write-Finding 'For the strongest evidence, start this script and submit a job that will' 'warn'
+    Write-Finding 'run out of paper, so the samples cover the stall itself.' 'warn'
+    Write-Host ''
+  }
+
+  if ($onlyNormal) {
     Write-Finding 'Only "Normal", in every sample, across every API.' 'bad'
-    Write-Finding 'If the device really was stalled, this is direct proof the USB path' 'bad'
-    Write-Finding 'carries no physical status. Proceed to verify-printer-snmp.ps1.' 'bad'
+    Write-Finding 'If the device really was in a fault state, the USB path carries no' 'bad'
+    Write-Finding 'physical status and verify-printer-snmp.ps1 is the next step.' 'bad'
   }
 }
 
