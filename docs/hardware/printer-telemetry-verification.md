@@ -38,11 +38,22 @@ Nothing needs to be plugged in or reconfigured.
 
 ```powershell
 cd C:\path\to\PrintingKiosk\infrastructure\windows
-.\verify-printer-telemetry.ps1 -Usb -Samples 10
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\verify-printer-telemetry.ps1 -Samples 10
 ```
 
 Run it as the account the agent service uses, or as an administrator —
 `diagnostics.jsonl` lives under an ACL'd path.
+
+If anything looks wrong, check that the file parses before blaming the printer.
+This reports syntax errors without executing a line:
+
+```powershell
+$e = $null
+[void][System.Management.Automation.PSParser]::Tokenize(
+  (Get-Content -Raw .\verify-printer-telemetry.ps1), [ref]$e)
+$e   # empty output means the file is fine
+```
 
 ### What the output decides
 
@@ -67,10 +78,12 @@ Only if 0a and 0b came back empty. Needs a temporary direct cable.
 3. Direct cable, no switch.
 
 ```powershell
-.\verify-printer-telemetry.ps1 -Snmp -PrinterAddress 192.168.253.2 -Community <throwaway>
+.\verify-printer-snmp.ps1 -PrinterAddress 192.168.253.2 -Community <throwaway>
 ```
 
-The script carries its own minimal SNMP client, so Net-SNMP does not need to be
+This is a **separate script** on purpose: the SNMP walk is the part that cannot
+be tested away from the hardware, and it must not be able to stop 0a/0b from
+running. It carries its own minimal SNMP client, so Net-SNMP does not need to be
 installed. It sends GET-NEXT only and has no code path that can write a value.
 
 ### Go / no-go
