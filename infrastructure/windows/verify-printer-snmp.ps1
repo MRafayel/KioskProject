@@ -202,6 +202,11 @@ function ConvertFrom-BerValue {
   $value = [uint64] 0
   for ($i = 0; $i -lt $Length; $i++) { $value = ($value -shl 8) -bor $Buffer[$Offset + $i] }
   $label = 'tag0x' + $Tag.ToString('X2')
+  if ($tagValue -eq 64) { $label = 'IpAddress' }
+  if ($tagValue -eq 65) { $label = 'Counter32' }
+  if ($tagValue -eq 66) { $label = 'Gauge32' }
+  if ($tagValue -eq 67) { $label = 'TimeTicks' }
+  if ($tagValue -eq 70) { $label = 'Counter64' }
   return @{ type = $label; value = $value }
 }
 
@@ -322,6 +327,18 @@ function ConvertFrom-ErrorState {
   return ($set -join ', ')
 }
 
+# RFC 3805 PrtMarkerCounterUnitTC. Only the units a page printer plausibly
+# reports are named; anything else is shown raw rather than guessed at.
+function Get-CounterUnitName {
+  param([string] $Value)
+  if ($Value -eq '7') { return 'impressions(7) -- a duplex sheet counts as 2' }
+  if ($Value -eq '8') { return 'sheets(8) -- a duplex sheet counts as 1' }
+  if ($Value -eq '5') { return 'characters(5)' }
+  if ($Value -eq '6') { return 'lines(6)' }
+  if ($Value -eq '11') { return 'hours(11)' }
+  return "unit code $Value -- look up PrtMarkerCounterUnitTC in RFC 3805"
+}
+
 function Get-PrinterStatusName {
   param([string] $Value)
   if ($Value -eq '1') { return 'other(1)' }
@@ -332,9 +349,13 @@ function Get-PrinterStatusName {
   return "unmapped($Value)"
 }
 
+# The @() is load-bearing. PowerShell unwraps a single-element array on return,
+# so a walk that finds exactly one row hands back a bare hashtable; .Count then
+# reports its key count rather than 0, and [0] indexes a key that does not
+# exist. Every caller of Invoke-SnmpWalk wraps for this reason.
 function Get-SnmpFirst {
   param([string] $Root)
-  $rows = Invoke-SnmpWalk -Root $Root -MaxRows 1
+  $rows = @(Invoke-SnmpWalk -Root $Root -MaxRows 1)
   if ($rows.Count -eq 0) { return $null }
   return $rows[0]
 }
@@ -372,7 +393,7 @@ function Invoke-Watch {
     $statusRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.25.3.5.1.1'
     $countRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.43.10.2.1.4'
     $errorRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.25.3.5.1.2'
-    $trayRows = Invoke-SnmpWalk -Root '.1.3.6.1.2.1.43.8.2.1.10' -MaxRows 4
+    $trayRows = @(Invoke-SnmpWalk -Root '.1.3.6.1.2.1.43.8.2.1.10' -MaxRows 4)
 
     $statusText = '?'
     if ($null -ne $statusRow) {
@@ -557,6 +578,10 @@ $targets = [ordered]@{
   'hrPrinterStatus            ' = '.1.3.6.1.2.1.25.3.5.1.1'
   'hrPrinterDetectedErrorState' = '.1.3.6.1.2.1.25.3.5.1.2'
   'prtGeneralSerialNumber     ' = '.1.3.6.1.2.1.43.5.1.1.17'
+  # What prtMarkerLifeCount is actually counting. Device-defined, and the
+  # difference between impressions (a duplex sheet counts 2) and sheets (it
+  # counts 1) decides how the delta must be compared against a job.
+  'prtMarkerCounterUnit       ' = '.1.3.6.1.2.1.43.10.2.1.3'
   'prtMarkerLifeCount         ' = '.1.3.6.1.2.1.43.10.2.1.4'
   'prtInputCurrentLevel       ' = '.1.3.6.1.2.1.43.8.2.1.10'
   'prtInputMaxCapacity        ' = '.1.3.6.1.2.1.43.8.2.1.9'
@@ -567,7 +592,7 @@ $targets = [ordered]@{
 Write-Section 'Objects'
 $present = @{}
 foreach ($label in $targets.Keys) {
-  $rows = Invoke-SnmpWalk -Root $targets[$label]
+  $rows = @(Invoke-SnmpWalk -Root $targets[$label])
   if ($rows.Count -eq 0) {
     Write-Host "  $label  -- NOT IMPLEMENTED" -ForegroundColor Red
     continue
@@ -584,8 +609,15 @@ $errorState = $present.ContainsKey('hrPrinterDetectedErrorState')
 
 if ($marker) {
   Write-Finding 'prtMarkerLifeCount IS implemented.' 'good'
-  Write-Finding 'Now run a known job and re-run this. The value must rise by the number' 'warn'
-  Write-Finding 'of sides printed. If it does not move, it is useless to us.' 'warn'
+  $unitRow = Get-SnmpFirst -Root '.1.3.6.1.2.1.43.10.2.1.3'
+  if ($null -ne $unitRow) {
+    Write-Finding "counting unit: $(Get-CounterUnitName -Value $unitRow.valueText)" 'good'
+  } else {
+    Write-Finding 'prtMarkerCounterUnit not readable -- unit unknown, so a delta cannot' 'warn'
+    Write-Finding 'yet be compared against a job with confidence.' 'warn'
+  }
+  Write-Finding 'Now run a known job with -Watch. The value must rise by the number of' 'warn'
+  Write-Finding 'units above. If it does not move at all, it is useless to us.' 'warn'
 } else {
   Write-Finding 'prtMarkerLifeCount NOT implemented -- no way to prove physical output.' 'bad'
 }
