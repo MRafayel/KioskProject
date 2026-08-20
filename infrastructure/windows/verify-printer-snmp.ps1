@@ -30,9 +30,10 @@
 #>
 
 param(
-  [Parameter(Mandatory = $true)][string] $PrinterAddress,
+  [string] $PrinterAddress,
   [string] $Community = 'public',
-  [int] $TimeoutMilliseconds = 2000
+  [int] $TimeoutMilliseconds = 2000,
+  [switch] $SelfTest
 )
 
 $ErrorActionPreference = 'Continue'
@@ -122,20 +123,35 @@ function Read-BerHeader {
   return @{ tag = $tag; length = $length; valueOffset = $Offset + 2 + $count }
 }
 
+# The element is pulled into its own variable before being cast. Written as
+# `[int]$Buffer[$Offset]`, Windows PowerShell binds the cast to $Buffer rather
+# than to the indexed element and hands back an array, which then fails with
+# "[System.Object[]] does not contain a method named 'op_Modulus'". Indexing
+# first removes the ambiguity entirely.
 function ConvertFrom-BerOid {
   param([byte[]] $Buffer, [int] $Offset, [int] $Length)
-  $first = [int]$Buffer[$Offset]
-  $arcs = @([int][Math]::Floor($first / 40), $first % 40)
+
+  $firstByte = $Buffer[$Offset]
+  $first = [int] $firstByte
+
+  # The first octet packs the first two arcs: 40 * arc1 + arc2.
+  $arcs = New-Object 'System.Collections.Generic.List[int]'
+  $arcs.Add([int][System.Math]::Floor($first / 40))
+  $arcs.Add([int]($first % 40))
+
+  # Every later arc is base-128, most significant group first, with the high
+  # bit set on all but the final octet.
   $value = 0
   for ($i = 1; $i -lt $Length; $i++) {
-    $byte = $Buffer[$Offset + $i]
+    $current = $Buffer[$Offset + $i]
+    $byte = [int] $current
     $value = ($value -shl 7) -bor ($byte -band 0x7F)
     if (($byte -band 0x80) -eq 0) {
-      $arcs += $value
+      $arcs.Add([int] $value)
       $value = 0
     }
   }
-  return '.' + ($arcs -join '.')
+  return '.' + ($arcs.ToArray() -join '.')
 }
 
 # if/elseif rather than a switch: Windows PowerShell 5.1 rejected hex numeric
@@ -236,7 +252,10 @@ function Invoke-SnmpGetNext {
   for ($skip = 1; $skip -le 3; $skip++) {
     $field = Read-BerHeader -Buffer $response -Offset $offset
     if ($skip -eq 2 -and $field.length -gt 0 -and $response[$field.valueOffset] -ne 0) {
-      return @{ snmpError = [int]$response[$field.valueOffset] }
+      # Indexed into its own variable first, for the same reason as in
+      # ConvertFrom-BerOid above.
+      $statusByte = $response[$field.valueOffset]
+      return @{ snmpError = [int] $statusByte }
     }
     $offset = $field.valueOffset + $field.length
   }
@@ -270,6 +289,107 @@ function Invoke-SnmpWalk {
 }
 
 # ---------- the walk ----------
+
+<#
+.SYNOPSIS
+  Prove the encoder and decoder agree, without a printer.
+
+.DESCRIPTION
+  Builds a GetResponse carrying a known OID and a known Counter32, decodes it
+  with the same functions used against the real device, and checks both come
+  back exactly. Every parse bug found in this script so far would have been
+  caught here in one second rather than one round trip to the hardware.
+#>
+function Invoke-SelfTest {
+  Write-Section 'Self-test: encoder and decoder round trip'
+  $failures = 0
+
+  # A request packet, checked byte for byte against a hand-computed SNMPv1
+  # GET-NEXT for sysDescr with community "public".
+  $nullTlv = New-BerTlv -Tag 0x05 -Content @()
+  $binding = New-BerTlv -Tag 0x30 -Content ((New-BerOid -Oid '.1.3.6.1.2.1.1.1') + $nullTlv)
+  $bindings = New-BerTlv -Tag 0x30 -Content $binding
+  $pduBody = (New-BerInteger -Value 0x01020304) + (New-BerInteger -Value 0) +
+             (New-BerInteger -Value 0) + $bindings
+  $pdu = New-BerTlv -Tag 0xA1 -Content $pduBody
+  $communityBytes = [System.Text.Encoding]::ASCII.GetBytes('public')
+  $body = (New-BerInteger -Value 0) + (New-BerTlv -Tag 0x04 -Content $communityBytes) + $pdu
+  $message = New-BerTlv -Tag 0x30 -Content $body
+  $actual = (@($message) | ForEach-Object { ([byte]$_).ToString('X2') }) -join ''
+  $expected = '302802010004067075626C6963A11B0204010203040201000201003' +
+              '00D300B06072B0601020101010500'
+  if ($actual -eq $expected) {
+    Write-Finding 'request encoding matches the reference packet' 'good'
+  } else {
+    Write-Finding 'request encoding MISMATCH' 'bad'
+    Write-Finding "  got      $actual"
+    Write-Finding "  expected $expected"
+    $failures++
+  }
+
+  # A response carrying prtMarkerLifeCount.1.1 = 12345 as a Counter32.
+  $oid = '.1.3.6.1.2.1.43.10.2.1.4.1.1'
+  $counter = New-BerTlv -Tag 0x41 -Content @([byte]0x30, [byte]0x39)
+  $vb = New-BerTlv -Tag 0x30 -Content ((New-BerOid -Oid $oid) + $counter)
+  $responsePdu = New-BerTlv -Tag 0xA2 -Content (
+    (New-BerInteger -Value 1) + (New-BerInteger -Value 0) + (New-BerInteger -Value 0) +
+    (New-BerTlv -Tag 0x30 -Content $vb))
+  $responseBody = (New-BerInteger -Value 0) +
+                  (New-BerTlv -Tag 0x04 -Content $communityBytes) + $responsePdu
+  $response = [byte[]] (New-BerTlv -Tag 0x30 -Content $responseBody)
+
+  $outer = Read-BerHeader -Buffer $response -Offset 0
+  $offset = $outer.valueOffset
+  $version = Read-BerHeader -Buffer $response -Offset $offset
+  $offset = $version.valueOffset + $version.length
+  $community = Read-BerHeader -Buffer $response -Offset $offset
+  $offset = $community.valueOffset + $community.length
+  $pduHeader = Read-BerHeader -Buffer $response -Offset $offset
+  $offset = $pduHeader.valueOffset
+  for ($skip = 1; $skip -le 3; $skip++) {
+    $field = Read-BerHeader -Buffer $response -Offset $offset
+    $offset = $field.valueOffset + $field.length
+  }
+  $list = Read-BerHeader -Buffer $response -Offset $offset
+  $entry = Read-BerHeader -Buffer $response -Offset $list.valueOffset
+  $nameHeader = Read-BerHeader -Buffer $response -Offset $entry.valueOffset
+  $name = ConvertFrom-BerOid -Buffer $response -Offset $nameHeader.valueOffset `
+    -Length $nameHeader.length
+  $valueHeader = Read-BerHeader -Buffer $response -Offset ($nameHeader.valueOffset + $nameHeader.length)
+  $decoded = ConvertFrom-BerValue -Buffer $response -Offset $valueHeader.valueOffset `
+    -Length $valueHeader.length -Tag $valueHeader.tag
+
+  if ($name -eq $oid) {
+    Write-Finding "OID decoded correctly: $name" 'good'
+  } else {
+    Write-Finding "OID MISMATCH: got '$name', expected '$oid'" 'bad'
+    $failures++
+  }
+  if ([string]$decoded.value -eq '12345') {
+    Write-Finding "Counter32 decoded correctly: $($decoded.value)" 'good'
+  } else {
+    Write-Finding "value MISMATCH: got '$($decoded.value)', expected 12345" 'bad'
+    $failures++
+  }
+
+  Write-Host ''
+  if ($failures -eq 0) {
+    Write-Finding 'Self-test passed. Any failure against the printer is the printer,' 'good'
+    Write-Finding 'the address, the community name or a firewall -- not this decoder.' 'good'
+  } else {
+    Write-Finding "$failures self-test failure(s). Do not trust a walk until this passes." 'bad'
+  }
+}
+
+if ($SelfTest) {
+  Invoke-SelfTest
+  return
+}
+
+if ([string]::IsNullOrWhiteSpace($PrinterAddress)) {
+  Write-Host 'Specify -PrinterAddress <ip>, or -SelfTest to check the decoder.' -ForegroundColor Red
+  return
+}
 
 Write-Host ''
 Write-Host "Phase 0c SNMP MIB walk -- READ ONLY (GET-NEXT only)." -ForegroundColor White

@@ -27,7 +27,37 @@ pages, which proves retirement measures the data handoff and not paper.
 **But we have not proven Windows is blind — only that it was silent in a
 three-second window.** That is what this phase settles.
 
-## 0a + 0b — the USB checks (do these first)
+## RESULT: 0a and 0b failed — the USB path is blind (20 Aug 2026)
+
+Recorded here because it is the evidence the whole Ethernet decision rests on.
+
+**Canon's own driver settles it.** Printer Properties → Device Settings →
+retrieve device information returns:
+
+> Could not retrieve the device information.
+> **This device does not support information retrieval via USB connection.**
+
+That is Canon's driver, on Canon's own channel, saying the hardware cannot do
+it. Supporting evidence from `verify-printer-telemetry.ps1`:
+
+| Check | Result |
+| --- | --- |
+| Bidirectional support | **On** — `EnableBIDI = True`, `Attributes = 0xa00` contains `ENABLE_BIDI` (0x800) |
+| Port monitor | `Dynamic Print Monitor` on `USB001` |
+| `diagnostics.jsonl` (30 KB) | **No** fault or `health.unavailable` events of any kind |
+| `PrinterStatus` | `Normal` in every sample |
+| `DetectedErrorState` | **`0 = Unknown`**, not `2 = No Error` |
+| `ExtendedPrinterStatus` | `2 = Unknown` |
+| `ExtendedDetectedErrorState` | `0` |
+
+The distinction that matters: the driver does not report "the printer is fine",
+it reports *nothing at all*. Every status field is Unknown.
+
+So the three cheap outcomes that would have cancelled this project are all
+closed: it is not a settle window that looked too early, not a disabled bidi
+checkbox, and not a Windows API we failed to ask. **Proceed to 0c.**
+
+## 0a + 0b — the USB checks (kept for reference and re-testing)
 
 Nothing needs to be plugged in or reconfigured.
 
@@ -69,13 +99,42 @@ is not justified.
 
 ## 0c — the MIB walk
 
-Only if 0a and 0b came back empty. Needs a temporary direct cable.
+Only if 0a and 0b came back empty. A plain straight-through Ethernet cable is
+fine: any gigabit port auto-negotiates the crossover, so no special cable is
+needed for a direct PC-to-printer link.
 
-1. Second NIC on the kiosk: static `192.168.253.1`, mask `255.255.255.252`, **no
-   gateway, no DNS**.
-2. Printer: static `192.168.253.2/30`, no gateway. Temporarily enable **SNMPv1**
-   read-only with a throwaway community name.
-3. Direct cable, no switch.
+**Keep USB connected throughout.** Printing continues over USB and does not
+change. Ethernet carries telemetry only.
+
+1. Cable straight from the PC's Ethernet port to the printer's. No switch, no
+   router, nothing else on the segment.
+2. **Printer** (control panel → Menu → Preferences → Network → TCP/IP Settings
+   → IPv4 Settings): turn *Auto Acquire / DHCP* **off**, then set
+   `192.168.253.2`, mask `255.255.255.0`, gateway blank. A `/24` is used for
+   the test because some firmware rejects a `/30`; production tightens this.
+3. **PC** adapter: static `192.168.253.1`, mask `255.255.255.0`, **gateway and
+   DNS blank**. Set the network profile to **Public** and turn **Network
+   Discovery off** — see the hazard below.
+4. Confirm the link: `ping 192.168.253.2`
+5. Printer SNMP: `Use SNMPv1` is **on by default** on this Canon family, so it
+   most likely already works. Note the community name (default `public`).
+
+### Hazard: a second printer queue
+
+Once the printer is reachable over the network, Windows may auto-install a
+*second* queue for the same physical device via WSD or mDNS. That queue would
+fail `Test-QueueApproved` and could never print — but two queues matching the
+allowlist make `selectApprovedQueue` return `AMBIGUOUS`, which withdraws
+approval and **stops the kiosk printing at all**. Failure-safe, but an outage.
+
+Turn Network Discovery off on that adapter before connecting, and check
+afterwards:
+
+```powershell
+Get-Printer | Select-Object Name, Type, PortName, DriverName
+```
+
+Only the original `USB001` queue should be present. Remove any new one.
 
 ```powershell
 .\verify-printer-snmp.ps1 -PrinterAddress 192.168.253.2 -Community <throwaway>
