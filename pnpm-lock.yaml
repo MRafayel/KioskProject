@@ -369,6 +369,9 @@ importers:
       '@printing-kiosk/printer-adapters':
         specifier: workspace:*
         version: link:../../packages/printer-adapters
+      '@printing-kiosk/printer-telemetry':
+        specifier: workspace:*
+        version: link:../../packages/printer-telemetry
       fastify:
         specifier: 5.10.0
         version: 5.10.0

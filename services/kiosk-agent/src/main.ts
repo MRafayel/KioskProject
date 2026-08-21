@@ -7,6 +7,7 @@ import { buildPrinterAdapter } from "./device/adapter.js";
 import { WindowsEventLog } from "./device/event-log.js";
 import { loadAgentIdentity } from "./device/identity.js";
 import { DeviceRegistryReporter } from "./device/reporter.js";
+import { createPrinterTelemetrySource } from "./device/telemetry.js";
 import { CloudRealtimeConnection, SessionEventRelay } from "./events.js";
 import { PrintCommandRunner } from "./print/runner.js";
 
@@ -38,9 +39,16 @@ printRunner.start();
 // The device plane. It tells the control plane which machine and which printer
 // this is, and republishes what the printer can do the moment that changes, so
 // a customer is never offered settings the attached hardware cannot produce.
+// The printer's own telemetry, over its dedicated link. It polls on its own
+// schedule and the reporter reads a cache, so a printer that stops answering
+// can never delay the heartbeat that proves this machine is alive.
+const printerTelemetry = createPrinterTelemetrySource({ environment, logger });
+printerTelemetry.start();
+
 const deviceReporter = new DeviceRegistryReporter({
   environment,
   adapter: printerAdapter,
+  telemetry: printerTelemetry,
   logger,
   agentId: await loadAgentIdentity(environment.PRINTER_DEVICE_JOURNAL_DIR),
   agentVersion: AGENT_VERSION,
@@ -60,6 +68,7 @@ const shutdown = async (signal: string) => {
   app.log.info({ signal }, "stopping kiosk agent");
   await eventLog.write("stopping", `Kiosk agent stopping on ${signal}.`);
   deviceReporter.close();
+  printerTelemetry.close();
   printRunner.close();
   realtime.close();
   await app.close();

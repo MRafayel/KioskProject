@@ -10,6 +10,7 @@ import {
 } from "@printing-kiosk/printer-adapters";
 
 import { DeviceRegistryReporter } from "./reporter.js";
+import type { PrinterTelemetrySource, TelemetryVerdict } from "./telemetry.js";
 
 const agentId = "01900000-0000-7000-8000-000000000a01";
 
@@ -387,3 +388,141 @@ describe("DeviceRegistryReporter", () => {
     expect(adapter.describeCalls).toBe(1);
   });
 });
+
+/**
+ * What the printer says about itself, reaching the control plane at last.
+ *
+ * Until now the only physical state in a report came from `PrinterStatus`, which
+ * this Canon leaves at `Normal` whatever is happening — so `warningCode` has
+ * been null in every report ever sent. These tests are about the channel being
+ * alive, and about the two things it must never do: overrule a driver that said
+ * the queue was gone, and turn silence into a fault.
+ */
+describe("printer telemetry in the report", () => {
+  it("carries a standing condition through as a warning, still selling", async () => {
+    const adapter = new StubAdapter();
+    const controlPlane = new ControlPlane();
+
+    await buildReporter(adapter, controlPlane, {
+      telemetry: telemetrySource(faults(["LOW_PAPER"]))
+    }).runOnce();
+
+    // The badge an operator restocks the machine from. It has never lit up.
+    expect(controlPlane.lastBody("/v1/agent/printers")).toMatchObject({
+      approval: "APPROVED",
+      health: "WARNING",
+      warningCode: "PAPER_LOW"
+    });
+  });
+
+  it("withdraws the printer while a blocking fault is asserted", async () => {
+    const adapter = new StubAdapter();
+    const controlPlane = new ControlPlane();
+
+    await buildReporter(adapter, controlPlane, {
+      telemetry: telemetrySource(faults(["LOW_PAPER", "NO_PAPER"]))
+    }).runOnce();
+
+    expect(controlPlane.lastBody("/v1/agent/printers")).toMatchObject({
+      health: "OFFLINE",
+      warningCode: "PAPER_LOW"
+    });
+  });
+
+  it("reports exactly what the driver said when no telemetry is configured", async () => {
+    const adapter = new StubAdapter();
+    const controlPlane = new ControlPlane();
+
+    await buildReporter(adapter, controlPlane).runOnce();
+
+    expect(controlPlane.lastBody("/v1/agent/printers")).toMatchObject({
+      health: "READY",
+      warningCode: null
+    });
+  });
+
+  it("keeps beating when the printer stops answering its telemetry link", async () => {
+    const adapter = new StubAdapter();
+    const controlPlane = new ControlPlane();
+
+    await buildReporter(adapter, controlPlane, {
+      telemetry: telemetrySource({ kind: "UNAVAILABLE", reason: "TIMEOUT", consecutiveFailures: 9 })
+    }).runOnce();
+
+    // The heartbeat is how the control plane knows this machine is alive. A
+    // silent printer must never be able to stop it — the kiosk still reports,
+    // it just stops claiming the printer is well.
+    expect(controlPlane.pathsCalled()).toContain("/v1/agent/heartbeat");
+    expect(controlPlane.lastBody("/v1/agent/printers")).toMatchObject({ health: "OFFLINE" });
+  });
+
+  it("ignores a dropped reading rather than reacting to it", async () => {
+    const adapter = new StubAdapter();
+    const controlPlane = new ControlPlane();
+
+    await buildReporter(adapter, controlPlane, {
+      telemetry: telemetrySource({ kind: "UNAVAILABLE", reason: "TIMEOUT", consecutiveFailures: 1 })
+    }).runOnce();
+
+    expect(controlPlane.lastBody("/v1/agent/printers")).toMatchObject({
+      health: "READY",
+      warningCode: null
+    });
+  });
+
+  it("cannot revive a queue the machine no longer offers", async () => {
+    const adapter = new StubAdapter();
+    adapter.queues = [];
+    const controlPlane = new ControlPlane();
+
+    await buildReporter(adapter, controlPlane, {
+      telemetry: telemetrySource(faults([]))
+    }).runOnce();
+
+    // A telemetry link answering happily says nothing about a USB queue that
+    // has gone. Approval stays withdrawn.
+    expect(controlPlane.lastBody("/v1/agent/printers")).toMatchObject({
+      approval: "NOT_APPROVED",
+      health: "OFFLINE"
+    });
+  });
+
+  it("reads the cached verdict once per beat and never waits on the wire", async () => {
+    const adapter = new StubAdapter();
+    const controlPlane = new ControlPlane();
+    let reads = 0;
+    const source: PrinterTelemetrySource = {
+      current: () => {
+        reads += 1;
+        return faults(["LOW_PAPER"]);
+      },
+      start: () => undefined,
+      close: () => undefined
+    };
+
+    const reporter = buildReporter(adapter, controlPlane, { telemetry: source });
+    await reporter.runOnce();
+    await reporter.runOnce();
+
+    expect(reads).toBe(2);
+  });
+});
+
+function telemetrySource(verdict: TelemetryVerdict): PrinterTelemetrySource {
+  return { current: () => verdict, start: () => undefined, close: () => undefined };
+}
+
+function faults(list: ("LOW_PAPER" | "NO_PAPER")[]): TelemetryVerdict {
+  return {
+    kind: "SNAPSHOT",
+    snapshot: {
+      readAt: new Date("2026-08-21T20:30:11.000Z"),
+      serialNumber: "PKQA002495",
+      engine: "IDLE",
+      faults: list,
+      marker: { lifeCount: 113, unit: "IMPRESSIONS" },
+      inputs: null,
+      supplies: null
+    }
+  };
+}

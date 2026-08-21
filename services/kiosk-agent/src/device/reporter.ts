@@ -17,6 +17,8 @@ import {
   type PrinterQueueDescriptor
 } from "@printing-kiosk/printer-adapters";
 
+import { applyPrinterTelemetry, type PrinterTelemetrySource } from "./telemetry.js";
+
 type UpstreamFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -41,6 +43,11 @@ export interface DeviceRegistryReporterOptions {
   activeOperations?: () => number;
   fetch?: UpstreamFetch;
   intervalMilliseconds?: number;
+  /**
+   * The printer's own telemetry, when a deployment has configured it. Absent
+   * leaves every reading exactly as the driver reported it.
+   */
+  telemetry?: PrinterTelemetrySource;
 }
 
 interface DeviceReading {
@@ -82,6 +89,7 @@ export class DeviceRegistryReporter {
   private running = false;
   private registered = false;
   private reportedHash: string | null = null;
+  private reportedTelemetryReason: string | null = null;
 
   public constructor(private readonly options: DeviceRegistryReporterOptions) {
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -173,12 +181,34 @@ export class DeviceRegistryReporter {
       };
     }
 
+    // What the printer says about itself over its own telemetry link, folded
+    // into what the driver said. Read from a cache rather than the wire: the
+    // heartbeat is how the control plane knows this machine is alive, and a
+    // printer that has stopped answering must not be able to delay it.
+    //
+    // This is the only place physical device state enters the report, and it
+    // only ever makes the report worse. It is also strictly forward-looking —
+    // it changes what the *next* customer is told about this kiosk and what an
+    // operator sees. Nothing here reaches a job that has already been submitted.
+    const telemetry = applyPrinterTelemetry(
+      { health: health.state, warningCode: health.warningCode },
+      this.options.telemetry?.current() ?? { kind: "DISABLED" },
+      { required: this.options.environment.PRINTER_TELEMETRY_REQUIRED }
+    );
+    if (telemetry.reason !== null && telemetry.reason !== this.reportedTelemetryReason) {
+      this.options.logger.warn(
+        { queueName: selection.queue.queueName, telemetry: telemetry.reason },
+        "printer telemetry changed the reported health"
+      );
+    }
+    this.reportedTelemetryReason = telemetry.reason;
+
     return {
       queues: discovered,
       approval: "APPROVED",
       queueName: selection.queue.queueName,
-      health: health.state,
-      warningCode: health.warningCode,
+      health: telemetry.health,
+      warningCode: telemetry.warningCode,
       capabilities,
       capabilityHash: capabilitySnapshotHash(capabilities)
     };

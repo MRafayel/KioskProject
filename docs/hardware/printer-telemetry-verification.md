@@ -326,9 +326,44 @@ skip a second roughly every eighth row. That is a dropped request being retried
 inside the budget and succeeding — the ~1-in-8 loss measured over v1 is still
 there, and it is no longer visible to a caller.
 
+## Is `hrPrinterStatus = other(1)` a fault? — tested, and no
+
+Worth recording because the correlation is real and the conclusion is still no.
+
+The hypothesis came from a genuine observation: with no paper, the printer beeped,
+blinked its Error lamp, went `IDLE` → `OTHER`, and returned to `IDLE` the moment
+the job was cancelled. In that run `OTHER` tracked the fault exactly.
+
+Checked against every recorded run, it is neither necessary nor sufficient:
+
+| Run | Engine | Faults | Outcome |
+| --- | --- | --- | --- |
+| 19:47:47–19:48:37 | `OTHER` for 50s | none | job **succeeded** |
+| 11:58:52–11:59:06 | `OTHER` for 14s | none | before any job |
+| 19:49:41–19:50:07 | `OTHER` for 26s | none | before any job |
+| 12:04:43–12:05:42 | `OTHER` for 60s | `lowPaper` | job **succeeded** |
+| 20:28:08–23 | **`IDLE`** | `LOW_PAPER` | fault present, engine idle |
+| 20:30:13–37 | **`IDLE`** for 24s | `LOW_PAPER` | after a successful job |
+| 20:28:24–45 | `OTHER` | `LOW_PAPER, NO_PAPER` | job blocked |
+
+`OTHER` appears with no fault at all, faults appear while the engine reads
+`IDLE`, and `OTHER` appears with a fault on jobs that printed perfectly. In the
+one run where it did coincide with a blocked job, it was **co-timed to the same
+sample** as `noPaper` asserting *and* clearing — so it carried nothing that bit
+had not already said.
+
+Treating `OTHER` as a fault would have marked at least two successful prints as
+faulted. It is RFC 2790's "none of the above", covering at least sleep and
+blocked-job on this device, and it is not consulted for any decision.
+
 ## Still open
 
 - **The kiosk is still on SNMPv1 with community `public` as well.** Turn v1 off
   now that v3 is proven. The printer-side lockdown in the plan is not yet applied.
-- **Nothing consumes the telemetry client yet.** It is built, tested and
-  runnable, but no part of the print path reads it. That is Phase 2.
+- **Nothing in the product gates on printer health.** `health` is stored, shown
+  in the admin Kiosks panel, and sets `queueState`/`lastHealthyAt` — but no
+  session, quote, payment or print path reads it. Phase 2 makes physical state
+  *visible* and *reportable*; the refusal-before-payment described in the plan
+  needs a gate that does not exist yet and is a change to the customer path.
+- **The progress UI still runs on a timer.** Feeding it real marker counts needs
+  the counter to reach the browser, which is a new API surface.
