@@ -581,6 +581,114 @@ describe("loadEnvironment", () => {
   });
 
   /**
+   * Printer telemetry is off unless a deployment asks for it, and asking for it
+   * means providing all of it. Half a configuration is the dangerous state: with
+   * PRINTER_TELEMETRY_REQUIRED on, every reading would fail and the kiosk would
+   * stop selling, for a reason nobody would trace back to an unset key.
+   */
+  describe("printer telemetry", () => {
+    const telemetry = {
+      NODE_ENV: "test",
+      PRINTER_TELEMETRY_ENABLED: "true",
+      PRINTER_TELEMETRY_HOST: "192.168.253.2",
+      PRINTER_TELEMETRY_SERIAL: "PKQA002495",
+      PRINTER_TELEMETRY_SNMP_USER: "kiosk-telemetry",
+      PRINTER_TELEMETRY_SNMP_AUTH_KEY: "authentication-passphrase",
+      PRINTER_TELEMETRY_SNMP_PRIV_KEY: "privacy-passphrase"
+    };
+
+    it("stays off, and demands nothing, until a deployment turns it on", () => {
+      const environment = loadEnvironment({ NODE_ENV: "test" });
+      expect(environment.PRINTER_TELEMETRY_ENABLED).toBe(false);
+      // On by default once telemetry exists: nobody should pay for a job the
+      // kiosk could not honestly confirm.
+      expect(environment.PRINTER_TELEMETRY_REQUIRED).toBe(true);
+    });
+
+    it("accepts a complete configuration", () => {
+      expect(loadEnvironment(telemetry)).toMatchObject({
+        PRINTER_TELEMETRY_ENABLED: true,
+        PRINTER_TELEMETRY_HOST: "192.168.253.2",
+        PRINTER_TELEMETRY_PORT: 161,
+        PRINTER_TELEMETRY_SNMP_AUTH_PROTOCOL: "sha256",
+        PRINTER_TELEMETRY_SNMP_PRIV_PROTOCOL: "aes"
+      });
+    });
+
+    it.each([
+      "PRINTER_TELEMETRY_HOST",
+      "PRINTER_TELEMETRY_SERIAL",
+      "PRINTER_TELEMETRY_SNMP_USER",
+      "PRINTER_TELEMETRY_SNMP_AUTH_KEY",
+      "PRINTER_TELEMETRY_SNMP_PRIV_KEY"
+    ])("refuses to start when %s is missing", (key) => {
+      expect(() => loadEnvironment({ ...telemetry, [key]: "" })).toThrow(key);
+    });
+
+    it("refuses a hostname, so nothing resolves a name on that cable", () => {
+      expect(() =>
+        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: "printer.local" })
+      ).toThrow("PRINTER_TELEMETRY_HOST");
+    });
+
+    it("refuses an address that could route off the premises", () => {
+      // A typo that turns a point-to-point link into authenticated SNMP sent to
+      // a stranger is exactly the mistake worth catching at startup.
+      expect(() =>
+        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: "8.8.8.8" })
+      ).toThrow("PRINTER_TELEMETRY_HOST");
+      expect(() =>
+        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: "192.168.253.999" })
+      ).toThrow("PRINTER_TELEMETRY_HOST");
+    });
+
+    it.each(["10.1.2.3", "172.20.0.5", "192.168.253.2", "169.254.7.7"])(
+      "accepts the private address %s",
+      (host) => {
+        expect(loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: host })).toMatchObject({
+          PRINTER_TELEMETRY_HOST: host
+        });
+      }
+    );
+
+    it("refuses one passphrase used for both authentication and privacy", () => {
+      // A single disclosure would otherwise cost both properties at once.
+      expect(() =>
+        loadEnvironment({
+          ...telemetry,
+          PRINTER_TELEMETRY_SNMP_AUTH_KEY: "shared-passphrase",
+          PRINTER_TELEMETRY_SNMP_PRIV_KEY: "shared-passphrase"
+        })
+      ).toThrow("PRINTER_TELEMETRY_SNMP_PRIV_KEY");
+    });
+
+    it("refuses a passphrase shorter than USM allows", () => {
+      expect(() =>
+        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_SNMP_AUTH_KEY: "short" })
+      ).toThrow("PRINTER_TELEMETRY_SNMP_AUTH_KEY");
+    });
+
+    it("refuses a MAC pin that is not a MAC", () => {
+      expect(() =>
+        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_MAC: "00-1e-8f-aa-bb-cc" })
+      ).toThrow("PRINTER_TELEMETRY_MAC");
+      expect(
+        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_MAC: "00:1e:8f:aa:bb:cc" })
+      ).toMatchObject({ PRINTER_TELEMETRY_MAC: "00:1e:8f:aa:bb:cc" });
+    });
+
+    it("refuses a budget that cannot fit a single request", () => {
+      expect(() =>
+        loadEnvironment({
+          ...telemetry,
+          PRINTER_TELEMETRY_TIMEOUT_MS: "2000",
+          PRINTER_TELEMETRY_BUDGET_MS: "2000"
+        })
+      ).toThrow("PRINTER_TELEMETRY_BUDGET_MS");
+    });
+  });
+
+  /**
    * The device host has to start a process, compile its inline type, load the
    * PDF renderer and draw the paid pages before it can observe anything. The
    * agent kills it at this timeout, and a submission killed mid-print is

@@ -1,0 +1,15 @@
+{
+  // Operator tooling, checked but never built — the same arrangement as
+  // `services/api/scripts`. The package tsconfig emits `dist/` from `src/` and
+  // must keep `rootDir` there, so a script importing from `../src` cannot live
+  // in it. Named `tsconfig.json` so typescript-eslint's project service finds
+  // it as the nearest config for these files.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["**/*.ts"]
+}

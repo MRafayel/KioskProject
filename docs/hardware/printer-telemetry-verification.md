@@ -244,12 +244,59 @@ confidence — only remove a success claim or refuse a job before payment — so
 worst case from a faulty or spoofed telemetry source is denial of service, never
 a false success or a duplicate print.
 
-Two things are still open and both belong to Phase 1:
+## 0e — prove SNMPv3 authPriv (the last gate)
 
-- **SNMPv3 authPriv is unproven on this firmware.** Only a real v3 client can
-  settle it, so it is proven by the Phase 1 client rather than by another
-  verification script. If v3 turns out not to work here, stop and re-decide the
-  security posture before any of this touches the print path.
+`verify-printer-snmp.ps1` speaks SNMPv1 only, deliberately: a hand-rolled USM
+implementation in PowerShell would have been a great deal of untested
+cryptography. So the authenticated, encrypted mode we intend to ship is proven
+by the client that will ship it — `packages/printer-telemetry`.
+
+**Printer first** (Remote UI → Settings → Network → SNMP Settings):
+
+1. `Use SNMPv3` **on**. Add one user, `Enable User` on.
+2. `MIB Access Permission` → **Read Only**. This is the one that matters: a
+   stolen credential can then change nothing.
+3. `Security Settings` → **Authentication On / Encryption On**. Set two
+   *different* passphrases, each at least 8 characters.
+4. Note which algorithms the firmware actually offers. Canon of this generation
+   often lists less than the manual implies.
+5. Leave SNMPv1 on **for now** — turn it off only once v3 is proven working, or
+   you will have no way back in over the network.
+
+**Then, from the repository:**
+
+```powershell
+$env:PRINTER_TELEMETRY_SNMP_AUTH_KEY = "<auth passphrase>"
+$env:PRINTER_TELEMETRY_SNMP_PRIV_KEY = "<privacy passphrase>"
+pnpm --filter @printing-kiosk/printer-telemetry probe -- `
+  --host 192.168.253.2 --user <snmpv3 user> --serial PKQA002495
+```
+
+Keys come from the environment, never from arguments — a command line is visible
+to every process on the machine and lands in shell history. Nothing the probe
+prints contains a key.
+
+If it reports a timeout, the message lists what to check and in what order. The
+most likely cause is an algorithm mismatch, so try the pairs the printer offers
+before concluding the firmware cannot do it:
+
+```powershell
+# ... --auth sha --priv des        # the common Canon fallback
+# ... --auth sha256 --priv aes     # the default, and what to prefer
+```
+
+Add `--watch 90` once a single read works, then send a job of known length: the
+same measurement as before, now over the channel that will ship.
+
+**Go:** a snapshot with a serial and a marker count. **No-go:** no algorithm pair
+authenticates — stop and re-decide the security posture before building further,
+because the fallback is SNMPv1 in clear text and that is a different decision.
+
+## Still open
+
+- **SNMPv3 authPriv is unproven on this firmware** — 0e above settles it.
 - **The kiosk is presently on SNMPv1 with community `public`.** Acceptable on a
   point-to-point cable with no gateway for bench work; not shippable. The
   printer-side lockdown in the plan is not yet applied.
+- **Nothing consumes the telemetry client yet.** It is built, tested and
+  runnable, but no part of the print path reads it. That is Phase 2.

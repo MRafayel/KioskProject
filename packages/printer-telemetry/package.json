@@ -1,0 +1,29 @@
+{
+  "name": "@printing-kiosk/printer-telemetry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "net-snmp": "3.26.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src scripts",
+    "probe": "tsx scripts/probe.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p scripts/tsconfig.json",
+    "test": "vitest run src"
+  },
+  "devDependencies": {
+    "@types/net-snmp": "3.23.0",
+    "tsx": "4.23.0"
+  }
+}

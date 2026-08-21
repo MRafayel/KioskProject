@@ -263,6 +263,57 @@ const environmentSchema = z
     // what separates "never submitted" from "submitted and forgotten", so it
     // has to survive a restart on the same machine as the agent.
     PRINTER_DEVICE_JOURNAL_DIR: z.string().min(1).default(".tmp/kiosk-agent-device"),
+    // Physical printer telemetry over a dedicated Ethernet link.
+    //
+    // Printing stays on USB and does not change: this is a read-only SNMP path
+    // to the printer's own engine, because the USB driver reports no physical
+    // state at all — Canon's own tool answers "this device does not support
+    // information retrieval via USB connection". Everything below configures one
+    // explicitly named printer. There is no discovery, no fallback, and no
+    // configuration in which a network queue becomes printable.
+    PRINTER_TELEMETRY_ENABLED: stringBooleanSchema.default(false),
+    // An IPv4 literal on the point-to-point segment, never a hostname: name
+    // resolution on that cable is an attack surface with nothing to gain.
+    PRINTER_TELEMETRY_HOST: z.string().max(45).default(""),
+    PRINTER_TELEMETRY_PORT: z.coerce.number().int().min(1).max(65_535).default(161),
+    // Pinned identity, checked on every reading. A reply from anything else is
+    // discarded rather than believed.
+    PRINTER_TELEMETRY_SERIAL: z.string().max(64).default(""),
+    // Optional second pin. Empty disables the check; it is reported by the
+    // device about itself, so it catches a cable moved to the wrong printer
+    // rather than an attacker willing to echo whatever we pinned.
+    PRINTER_TELEMETRY_MAC: z.string().max(17).default(""),
+    // SNMPv3 only, and authPriv only. There is no setting here that sends an
+    // unauthenticated request or an unencrypted one.
+    PRINTER_TELEMETRY_SNMP_USER: z.string().max(32).default(""),
+    // `md5` and `des` are the weakest the enumerations allow and are here
+    // because the firmware, not the deployment, decides what is on offer:
+    // refusing them outright would mean no telemetry at all on a printer that
+    // supports nothing better, which is a worse outcome on a cable that has two
+    // devices and no route off it. Prefer sha256/aes wherever the printer will.
+    PRINTER_TELEMETRY_SNMP_AUTH_PROTOCOL: z
+      .enum(["md5", "sha", "sha224", "sha256", "sha384", "sha512"])
+      .default("sha256"),
+    PRINTER_TELEMETRY_SNMP_AUTH_KEY: z.string().max(128).default(""),
+    PRINTER_TELEMETRY_SNMP_PRIV_PROTOCOL: z
+      .enum(["des", "aes", "aes256b", "aes256r"])
+      .default("aes"),
+    PRINTER_TELEMETRY_SNMP_PRIV_KEY: z.string().max(128).default(""),
+    // Which local interface telemetry leaves by. Pinning it keeps SNMP on the
+    // printer's dedicated adapter even if the routing table changes. Empty lets
+    // the operating system choose.
+    PRINTER_TELEMETRY_SOURCE_ADDRESS: z.string().max(45).default(""),
+    // Whether a kiosk that cannot read its printer may keep selling. The safe
+    // answer is no — nobody should pay for a job we could not honestly confirm —
+    // so this defaults on and is a deliberate, documented opt-out.
+    PRINTER_TELEMETRY_REQUIRED: stringBooleanSchema.default(true),
+    PRINTER_TELEMETRY_POLL_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
+    // One request's patience, and the ceiling on a whole reading across every
+    // column and retry. The printer drops roughly one request in eight, so
+    // retries are expected; the budget is what stops them accumulating.
+    PRINTER_TELEMETRY_TIMEOUT_MS: z.coerce.number().int().min(200).max(5_000).default(1_000),
+    PRINTER_TELEMETRY_BUDGET_MS: z.coerce.number().int().min(500).max(30_000).default(5_000),
+    PRINTER_TELEMETRY_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
     // How often the agent reports that it is alive, and how often it re-reads
     // what the printer can do. A swapped printer is noticed within one beat.
     AGENT_HEARTBEAT_SECONDS: z.coerce.number().int().min(5).max(600).default(30),
@@ -547,6 +598,99 @@ const environmentSchema = z
           "PRINTER_DEVICE_PROFILES must be a JSON array of " +
           "{ driverName, portPattern } with a valid regular expression"
       });
+    }
+
+    // Telemetry that is half-configured is worse than none: it would be enabled,
+    // fail every reading, and — with PRINTER_TELEMETRY_REQUIRED on — stop the
+    // kiosk selling, for a reason nobody would connect to a missing key. So the
+    // whole set is demanded up front, at startup, where it is one clear error.
+    if (environment.PRINTER_TELEMETRY_ENABLED) {
+      const required = [
+        ["PRINTER_TELEMETRY_HOST", environment.PRINTER_TELEMETRY_HOST],
+        ["PRINTER_TELEMETRY_SERIAL", environment.PRINTER_TELEMETRY_SERIAL],
+        ["PRINTER_TELEMETRY_SNMP_USER", environment.PRINTER_TELEMETRY_SNMP_USER],
+        ["PRINTER_TELEMETRY_SNMP_AUTH_KEY", environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY],
+        ["PRINTER_TELEMETRY_SNMP_PRIV_KEY", environment.PRINTER_TELEMETRY_SNMP_PRIV_KEY]
+      ] as const;
+      for (const [name, value] of required) {
+        if (value.trim().length === 0) {
+          context.addIssue({
+            code: "custom",
+            path: [name],
+            message: `${name} is required when PRINTER_TELEMETRY_ENABLED=true`
+          });
+        }
+      }
+
+      // A hostname would mean a DNS lookup on a cable that has no DNS, and an
+      // address off the point-to-point segment would mean this kiosk is talking
+      // to a printer somewhere on a real network — which is the arrangement the
+      // whole design exists to avoid.
+      if (!isPrivateIpv4(environment.PRINTER_TELEMETRY_HOST)) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_TELEMETRY_HOST"],
+          message: "PRINTER_TELEMETRY_HOST must be a private IPv4 address, not a hostname"
+        });
+      }
+      if (
+        environment.PRINTER_TELEMETRY_SOURCE_ADDRESS.trim().length > 0 &&
+        !isPrivateIpv4(environment.PRINTER_TELEMETRY_SOURCE_ADDRESS)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_TELEMETRY_SOURCE_ADDRESS"],
+          message: "PRINTER_TELEMETRY_SOURCE_ADDRESS must be a private IPv4 address"
+        });
+      }
+      if (
+        environment.PRINTER_TELEMETRY_MAC.trim().length > 0 &&
+        !/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(environment.PRINTER_TELEMETRY_MAC.trim())
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_TELEMETRY_MAC"],
+          message: "PRINTER_TELEMETRY_MAC must be six colon-separated hex octets"
+        });
+      }
+
+      // RFC 3414 sets eight characters as the floor for a USM passphrase, and
+      // reusing one passphrase for both authentication and privacy means a
+      // single disclosure costs both properties at once.
+      for (const [name, value] of [
+        ["PRINTER_TELEMETRY_SNMP_AUTH_KEY", environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY],
+        ["PRINTER_TELEMETRY_SNMP_PRIV_KEY", environment.PRINTER_TELEMETRY_SNMP_PRIV_KEY]
+      ] as const) {
+        if (value.length > 0 && value.length < 8) {
+          context.addIssue({
+            code: "custom",
+            path: [name],
+            message: `${name} must be at least 8 characters`
+          });
+        }
+      }
+      if (
+        environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY.length > 0 &&
+        environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY ===
+          environment.PRINTER_TELEMETRY_SNMP_PRIV_KEY
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_TELEMETRY_SNMP_PRIV_KEY"],
+          message:
+            "PRINTER_TELEMETRY_SNMP_PRIV_KEY must differ from PRINTER_TELEMETRY_SNMP_AUTH_KEY"
+        });
+      }
+
+      // A reading that cannot fit one request cannot fit any, so it would fail
+      // every time and never say why.
+      if (environment.PRINTER_TELEMETRY_BUDGET_MS <= environment.PRINTER_TELEMETRY_TIMEOUT_MS) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_TELEMETRY_BUDGET_MS"],
+          message: "PRINTER_TELEMETRY_BUDGET_MS must exceed PRINTER_TELEMETRY_TIMEOUT_MS"
+        });
+      }
     }
 
     // An installed service is a deployment, so the switches that let a build
@@ -1177,6 +1321,34 @@ export function parsePrinterProfiles(value: string): PrinterDeviceProfile[] | nu
     }
   }
   return profiles.data;
+}
+
+/**
+ * An IPv4 literal in a range that cannot be routed off the premises.
+ *
+ * The printer link is a cable between two machines with no gateway, so the only
+ * legitimate addresses on it are private ones. Refusing anything else is what
+ * turns a typo — a public address, or a hostname that resolves to one — into a
+ * startup error rather than a kiosk quietly sending authenticated SNMP requests
+ * to a stranger. Link-local is allowed because a direct cable without DHCP
+ * legitimately lands there.
+ */
+function isPrivateIpv4(value: string): boolean {
+  const octets = value.trim().split(".");
+  if (octets.length !== 4) return false;
+  const parsed: number[] = [];
+  for (const octet of octets) {
+    if (!/^\d{1,3}$/.test(octet)) return false;
+    const number = Number.parseInt(octet, 10);
+    if (number > 255) return false;
+    parsed.push(number);
+  }
+  const [first, second] = parsed as [number, number, number, number];
+  if (first === 10) return true;
+  if (first === 172 && second >= 16 && second <= 31) return true;
+  if (first === 192 && second === 168) return true;
+  if (first === 169 && second === 254) return true;
+  return false;
 }
 
 function isPostgresUrl(value: string): boolean {
