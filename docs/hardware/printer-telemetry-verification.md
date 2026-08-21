@@ -166,20 +166,90 @@ interface on an unattended public machine.
    plaintext.
 5. Turn SNMPv1 back off when finished.
 
-## 0d — measure the completion gap
+## RESULT: 0c passed — the engine counter is real (20 Aug 2026)
 
-Send a ten-page job and time it with a stopwatch: when paper starts, when it
-stops. Compare against `document.0.endDoc` in the job's `device_detail`.
+Two `-Watch` runs at 1s, SNMPv1, direct cable to `192.168.253.2`.
 
-This settles whether the printer streams pages as they arrive or buffers the job
-and prints afterwards — the difference between a ~2s and a ~50-75s gap on a
-50-page job, and therefore how urgent the confirmation change is.
+**Run A — one page, printed successfully.**
+
+| Time | `hrPrinterStatus` | `prtMarkerLifeCount` |
+| --- | --- | --- |
+| 19:47:37–39 | `other(1)` | 95 |
+| 19:47:40 | `idle(3)` | 95 |
+| 19:47:41–46 | **`printing(4)`** | 95 |
+| 19:47:47 onward | `other(1)` | **96** |
+
+**Run B — paper pulled, job sent, error, job cancelled.**
+
+| Time | `prtInputCurrentLevel` | `hrPrinterDetectedErrorState` | `prtMarkerLifeCount` |
+| --- | --- | --- | --- |
+| 19:49:38–19:50:07 | `0 / -3` | (none) | 96 |
+| 19:50:08 | `0 / 0` | (none) | 96 |
+| 19:50:10–19:50:26 | `0 / 0` | **`lowPaper, noPaper`** | 96 |
+| 19:50:27 onward | `0 / 0` | `lowPaper` | **96** |
+
+| OID | Verdict | Evidence |
+| --- | --- | --- |
+| `prtMarkerLifeCount` | **PASS — decisive** | +1 on a 1-page job, at the same sample the engine left `printing(4)`. Unmoved across a whole failed job. The negative control is what makes it trustworthy. |
+| `hrPrinterDetectedErrorState` | **PASS** | `noPaper` set 2s after the tray emptied, cleared on cancel. |
+| `prtInputCurrentLevel` | **Presence only** | `-3` loaded, `0` empty. Never a sheet count. Gates "can we print at all", never "are there enough sheets". |
+| `prtGeneralSerialNumber` | **PASS** | `PKQA002495`, stable. |
+| SNMPv3 authPriv | **NOT YET TESTED** | Needs a real v3 client; the verification script is v1-only by design. Gates Phase 1. |
+
+Three findings that shape the build:
+
+**`other(1)` is this printer's resting state, not `idle(3)`.** Idle appears only
+transiently around activity. A sleeping printer and a finished printer read
+identically, so *leaving* `printing(4)` can never by itself mean "done" — it
+would also fire if the engine paused mid-job. Only the counter reaching the
+expected value may end the wait. Engine status is a hint for when to stop
+waiting, never proof of delivery.
+
+**The counter's unit is device-defined and still unpinned.** A 1-page simplex job
+is +1 whether `prtMarkerCounterUnit` says impressions(7) or sheets(8). This
+matters because duplex is a priced, first-class option here
+([settings.ts:4](packages/contracts/src/settings.ts#L4)) — on a 10-page duplex
+job the two readings differ by a factor of two, and expecting impressions from a
+sheet-counting engine would downgrade a job that printed perfectly. No new
+contract field is needed: `printDocumentSchema` already carries both
+`printedSides` and `physicalSheets`, cross-validated
+([print-jobs.ts:135-153](packages/contracts/src/print-jobs.ts#L135-L153)).
+Read the unit, pick the matching total, and if the unit is unreadable skip the
+delta check rather than guessing.
+
+**The agent drops roughly one request in eight** — 7 of ~96 samples returned no
+answer, in Run B on a near-regular ~7.5s cadence, each costing one timeout. So a
+single silent poll must never read as a fault, and one retry after a short
+backoff covers it. Poll in one batched GET rather than four round trips; the
+observed loss may partly be self-inflicted by this script's 4 requests/second.
+
+## 0d — measure the completion gap (no longer a gate)
+
+Originally a stopwatch test to decide how urgent the confirmation change was.
+0c makes it cheap instead: the counter timestamps every page as the engine marks
+it, so the gap between `EndDoc` and the last increment is now *measured per job*
+rather than estimated once. Collect it from telemetry during Phase 2 alongside
+everything else.
+
+The 50-page projection stands until then: retirement is flat at ~1.3s regardless
+of page count, and Run A shows a 1-page job still marking paper ~6s after the
+engine woke.
 
 ## What happens next
 
-Passing 0c unlocks the staged build: a telemetry client, then advisory use
-(tray warnings, pre-payment refusal, real progress), then downgrade-only
+0c passed, so the staged build is unlocked: a telemetry client, then advisory
+use (tray warnings, pre-payment refusal, real progress), then downgrade-only
 confirmation from the engine page counter. Telemetry may never *raise*
 confidence — only remove a success claim or refuse a job before payment — so the
 worst case from a faulty or spoofed telemetry source is denial of service, never
 a false success or a duplicate print.
+
+Two things are still open and both belong to Phase 1:
+
+- **SNMPv3 authPriv is unproven on this firmware.** Only a real v3 client can
+  settle it, so it is proven by the Phase 1 client rather than by another
+  verification script. If v3 turns out not to work here, stop and re-decide the
+  security posture before any of this touches the print path.
+- **The kiosk is presently on SNMPv1 with community `public`.** Acceptable on a
+  point-to-point cable with no gateway for bench work; not shippable. The
+  printer-side lockdown in the plan is not yet applied.
