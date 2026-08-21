@@ -20,6 +20,6 @@
     "test": "vitest run src"
   },
   "devDependencies": {
-    "tsx": "4.23.0"
+    "tsx": "4.23.12"
   }
 }
