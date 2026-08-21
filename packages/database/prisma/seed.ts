@@ -53,11 +53,6 @@ await database.systemMetadata.upsert({
 // simulated pilot device: A4 monochrome with long-edge duplex. From Phase 10 a
 // registered agent overwrites these values with what its printer actually
 // reported, so this is a starting position rather than a fixed truth.
-//
-// `approvedQueues` is the operator's certification, and it is deliberately
-// stored here beside the capabilities it governs: a kiosk may publish
-// capabilities only for a queue on this list, so an agent reporting a printer
-// nobody certified changes nothing. An empty list approves nothing.
 const developmentCapabilities = {
   service: "PRINT_ONLY",
   outputMode: "MONOCHROME",
@@ -68,10 +63,15 @@ const developmentCapabilities = {
   orientations: ["AUTO", "PORTRAIT", "LANDSCAPE"],
   scalingModes: ["FIT", "ACTUAL_SIZE"],
   maxCopies: 20,
-  approvedQueues: ["Mock Kiosk Printer"],
   scanningEnabled: false,
   photocopyEnabled: false
 };
+
+// The operator's certification: a kiosk may publish capabilities only for a
+// queue on this list, so an agent reporting a printer nobody certified changes
+// nothing. An empty list approves nothing. It is a column of its own precisely
+// because the capability snapshot above is replaced wholesale by the device.
+const developmentApprovedQueues = ["Mock Kiosk Printer"];
 
 await database.kiosk.upsert({
   where: { id: developmentKioskId },
@@ -82,11 +82,13 @@ await database.kiosk.upsert({
     status: "ACTIVE",
     timezone: "Asia/Yerevan",
     capabilities: developmentCapabilities,
+    approvedQueues: developmentApprovedQueues,
     capabilitiesVersion: 2
   },
   update: {
     status: "ACTIVE",
     capabilities: developmentCapabilities,
+    approvedQueues: developmentApprovedQueues,
     capabilitiesVersion: 2
   }
 });

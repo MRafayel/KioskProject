@@ -7,6 +7,7 @@ import {
   type DiscoveredPrinterQueue,
   type RegisterAgentBody,
   type RegisterAgentResponse,
+  printerQueueNameSchema,
   type ReportPrinterStateBody,
   type ReportPrinterStateResponse
 } from "@printing-kiosk/contracts";
@@ -229,6 +230,11 @@ export class DeviceRegistryService {
               ? kiosk.capabilitiesVersion + 1
               : kiosk.capabilitiesVersion;
 
+            // This replaces `capabilities` wholesale, which is correct: the
+            // device is the only authority on what it can do, and a merge would
+            // keep offering a paper size the printer no longer has. It is safe
+            // only because nothing an operator owns lives in that column — put
+            // operator configuration in its own column, never in here.
             if (capabilitiesUpdated) {
               await transaction.kiosk.update({
                 where: { id: input.kioskId },
@@ -419,34 +425,32 @@ export class DeviceRegistryService {
   ): Promise<{ approvedQueues: string[]; capabilitiesVersion: number }> {
     const kiosk = await this.options.database.kiosk.findUnique({
       where: { id: kioskId },
-      select: { capabilities: true, capabilitiesVersion: true, status: true }
+      select: { approvedQueues: true, capabilitiesVersion: true, status: true }
     });
     if (!kiosk || kiosk.status !== "ACTIVE") {
       throw new ApiError(404, "KIOSK_NOT_FOUND", "Kiosk not found.");
     }
     return {
-      approvedQueues: readApprovedQueues(kiosk.capabilities),
+      approvedQueues: readApprovedQueues(kiosk.approvedQueues),
       capabilitiesVersion: kiosk.capabilitiesVersion
     };
   }
 }
 
 /**
- * The operator's allowlist, kept on the kiosk row beside the capabilities it
- * governs. An absent list approves nothing: a kiosk nobody has certified a
- * printer for must not print to whatever queue a driver installer left behind.
+ * The operator's allowlist, read from the column that only an operator writes.
+ * An absent list approves nothing: a kiosk nobody has certified a printer for
+ * must not print to whatever queue a driver installer left behind.
+ *
+ * Entries are re-validated on the way out rather than trusted. Certification is
+ * an operator action performed against the database, so a name that is not a
+ * queue name is a typo to be ignored — and dropping it here is what stops one
+ * bad row failing the registration response for the whole kiosk.
  */
-export function readApprovedQueues(capabilities: unknown): string[] {
-  const snapshot =
-    capabilities && typeof capabilities === "object" && !Array.isArray(capabilities)
-      ? (capabilities as Record<string, unknown>)
-      : {};
-  const list = snapshot.approvedQueues;
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((entry): entry is string => typeof entry === "string")
+export function readApprovedQueues(approvedQueues: readonly string[]): string[] {
+  return approvedQueues
     .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0 && entry.length <= 220)
+    .filter((entry) => printerQueueNameSchema.safeParse(entry).success)
     .slice(0, 16);
 }
 

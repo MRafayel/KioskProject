@@ -24,7 +24,15 @@ model Kiosk {
   name                String            @db.VarChar(160)
   status              String            @default("ACTIVE") @db.VarChar(32)
   timezone            String            @default("Asia/Yerevan") @db.VarChar(64)
+  /// What the attached device says it can do. A capability report replaces this
+  /// wholesale, because the device is the only authority on it.
   capabilities        Json
+  /// The operator's queue certification, and the one thing on this row a device
+  /// may not write. It lived inside `capabilities` until a capability report was
+  /// found to overwrite that column entire, silently deleting the allowlist and
+  /// leaving the kiosk unable to approve any printer again. Its own column is
+  /// what makes that class of accident impossible rather than merely avoided.
+  approvedQueues      String[]          @default([]) @map("approved_queues")
   capabilitiesVersion Int               @default(1) @map("capabilities_version")
   configVersion       Int               @default(1) @map("config_version")
   lastSeenAt          DateTime?         @map("last_seen_at")
