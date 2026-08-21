@@ -292,11 +292,43 @@ same measurement as before, now over the channel that will ship.
 authenticates — stop and re-decide the security posture before building further,
 because the fallback is SNMPv1 in clear text and that is a different decision.
 
+### RESULT: 0e passed — SNMPv3 authPriv works (21 Aug 2026)
+
+`SHA2-256` / `AES-128`, MIB access Read Only. Phase 0 is complete.
+
+| Signal | Over SNMPv3 |
+| --- | --- |
+| Identity | `PKQA002495`, matched the pin |
+| `marker` | 112, unit **IMPRESSIONS** — confirming the duplex finding |
+| Faults | `LOW_PAPER`/`NO_PAPER` set and cleared exactly as over v1 |
+| Supplies | three consumables at 99/100/100% |
+
+Two 90-second watches repeated the Phase 0 experiments over the shipping
+channel and reproduced them exactly:
+
+- **No paper**: `LOW_PAPER` throughout, `NO_PAPER` asserting for the 21 seconds
+  the job was blocked, and the counter **unmoved at 112** across the whole failed
+  job. The negative control holds over v3.
+- **One sheet, one page**: 112 → 113 at 20:30:11, *while the engine was still
+  `PRINTING`* and two seconds before it returned to `IDLE`. The counter leads the
+  engine state, so it is the better completion signal of the two.
+
+Two new observations:
+
+**`IDLE` and `OTHER` are awake and asleep.** Over v1 the resting state read
+`other(1)`; under a 1-second poll it reads `idle(3)`, and the single read taken
+before the watch began read `OTHER`. The polling is keeping the printer awake.
+Neither state means "finished" — only the counter does — but at the Phase 2 poll
+interval the printer will sleep between reads and `OTHER` will be normal again.
+
+**Retries are absorbing the drop rate.** No reading failed, but the timestamps
+skip a second roughly every eighth row. That is a dropped request being retried
+inside the budget and succeeding — the ~1-in-8 loss measured over v1 is still
+there, and it is no longer visible to a caller.
+
 ## Still open
 
-- **SNMPv3 authPriv is unproven on this firmware** — 0e above settles it.
-- **The kiosk is presently on SNMPv1 with community `public`.** Acceptable on a
-  point-to-point cable with no gateway for bench work; not shippable. The
-  printer-side lockdown in the plan is not yet applied.
+- **The kiosk is still on SNMPv1 with community `public` as well.** Turn v1 off
+  now that v3 is proven. The printer-side lockdown in the plan is not yet applied.
 - **Nothing consumes the telemetry client yet.** It is built, tested and
   runnable, but no part of the print path reads it. That is Phase 2.

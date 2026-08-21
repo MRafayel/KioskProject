@@ -292,7 +292,7 @@ function rowsFor(columnOid: string): readonly SnmpVarbind[] {
     case TELEMETRY_COLUMNS.markerCounterUnit:
       return [number(columnOid, 1, 7)];
     case TELEMETRY_COLUMNS.inputCurrentLevel:
-      return [number(columnOid, 1, 0), number(columnOid, 2, -3)];
+      return [number(columnOid, "1.1", 0), number(columnOid, "1.2", -3)];
     case TELEMETRY_COLUMNS.suppliesLevel:
       return [number(columnOid, "1.1", 40)];
     case TELEMETRY_COLUMNS.suppliesMaxCapacity:

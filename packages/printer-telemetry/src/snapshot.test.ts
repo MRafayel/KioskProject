@@ -157,8 +157,12 @@ describe("marker counter", () => {
 
 describe("input trays", () => {
   it("reads presence without inventing a sheet count", () => {
+    // `prtInputTable` is indexed by { hrDeviceIndex, prtInputIndex }, so a row
+    // is two arcs. This is the shape the printer really sends, and parsing it
+    // as one number answers with the device index — reporting "tray 1" twice
+    // for a printer that has two.
     const snapshot = ok(
-      readings({ serialNumber: [text(1, SERIAL)], inputCurrentLevel: [int(1, 0), int(2, -3)] })
+      readings({ serialNumber: [text(1, SERIAL)], inputCurrentLevel: [int("1.1", 0), int("1.2", -3)] })
     );
     expect(snapshot.inputs).toEqual([
       { index: 1, presence: "EMPTY", sheets: 0 },
@@ -166,6 +170,16 @@ describe("input trays", () => {
       // whether fifty sheets are available, only that paper is present.
       { index: 2, presence: "PRESENT", sheets: null }
     ]);
+  });
+
+  it("keeps trays distinct on a device with more than one marking engine", () => {
+    const snapshot = ok(
+      readings({
+        serialNumber: [text(1, SERIAL)],
+        inputCurrentLevel: [int("1.1", -3), int("1.2", 0), int("2.1", -3)]
+      })
+    );
+    expect(snapshot.inputs?.map((tray) => tray.index)).toEqual([1, 2, 1]);
   });
 
   it("passes through a real sheet count from a printer that gives one", () => {

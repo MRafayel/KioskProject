@@ -168,8 +168,8 @@ function readInputs(readings: ColumnReadings): PrinterInput[] | null {
   for (const row of [...levels.keys()].sort(compareRowIndex)) {
     const raw = levels.get(row);
     if (raw === undefined || !Number.isSafeInteger(raw)) continue;
-    const index = Number.parseInt(row, 10);
-    if (!Number.isSafeInteger(index)) continue;
+    const index = componentIndexOf(row);
+    if (index === null) continue;
     const level = decodeLevel(raw);
     inputs.push({
       index,
@@ -188,10 +188,8 @@ function readSupplies(readings: ColumnReadings): PrinterSupply[] | null {
   for (const row of [...levels.keys()].sort(compareRowIndex)) {
     const raw = levels.get(row);
     if (raw === undefined || !Number.isSafeInteger(raw)) continue;
-    // prtMarkerSuppliesLevel is indexed by (device, supply). The trailing arc is
-    // the one an operator recognises as "which cartridge".
-    const index = Number.parseInt(row.split(".").at(-1) ?? "", 10);
-    if (!Number.isSafeInteger(index)) continue;
+    const index = componentIndexOf(row);
+    if (index === null) continue;
     supplies.push({ index, percentRemaining: percentOf(raw, capacities.get(row)) });
   }
   return supplies.length > 0 ? supplies : null;
@@ -230,6 +228,23 @@ function indexed(readings: ColumnReadings, column: TelemetryColumn): Map<string,
     if (!rows.has(row)) rows.set(row, binding.integer);
   }
   return rows;
+}
+
+/**
+ * Which tray, or which cartridge — the part of a row index an operator would
+ * recognise.
+ *
+ * Both `prtInputTable` and `prtMarkerSuppliesTable` are indexed by
+ * `{ hrDeviceIndex, prtXxxIndex }`, so a row arrives as two arcs and the second
+ * is the component. `Number.parseInt` on the whole thing silently stops at the
+ * dot and answers with the *device* index instead, which is the same for every
+ * row — that is how a printer with two trays came back reporting tray 1 twice.
+ * Both callers go through here so they cannot drift apart again.
+ */
+function componentIndexOf(row: string): number | null {
+  const arcs = row.split(".");
+  const parsed = Number.parseInt(arcs[arcs.length - 1] ?? "", 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 /** Numeric arc order, so row 10 sorts after row 9 rather than after row 1. */
