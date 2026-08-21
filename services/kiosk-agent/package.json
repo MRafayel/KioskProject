@@ -9,7 +9,7 @@
     "@printing-kiosk/contracts": "workspace:*",
     "@printing-kiosk/printer-adapters": "workspace:*",
     "@printing-kiosk/printer-telemetry": "workspace:*",
-    "fastify": "5.10.0",
+    "fastify": "5.12.1",
     "socket.io-client": "4.8.3"
   },
   "scripts": {
