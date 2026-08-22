@@ -10,8 +10,10 @@ import { SessionTimer } from "../components/SessionTimer.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
+  canLeaveUpload,
   fileExtension,
   formatFileSize,
+  isFileValidating,
   isReadyFile,
   type PrototypeFile
 } from "../features/session/model.js";
@@ -45,9 +47,10 @@ export function UploadScreen() {
 
   const visibleFiles = state.files.filter((file) => file.status !== "DELETED");
   const readyCount = state.files.filter(isReadyFile).length;
-  // Any validated document is enough to continue. The rest may still be
-  // uploading, and the customer can come back and add more.
-  const canContinue = readyCount > 0;
+  // Every document that is still going to print has to have finished being
+  // checked. One ready file used to be enough, which meant adding a second one
+  // left the button live over a job whose contents were not settled yet.
+  const canContinue = canLeaveUpload(state.files);
   // What the status pill reports: the first thing that still needs attention,
   // otherwise the set as a whole.
   const pending = visibleFiles.find((file) => file.status !== "READY");
@@ -58,7 +61,7 @@ export function UploadScreen() {
   // backend milestones. Authoritative errors and rejections always replace
   // this presentational activity treatment.
   const showProcessingActivity =
-    !filesQuery.isError && !firstRejected && visibleFiles.some((file) => isFileBeingPrepared(file));
+    !filesQuery.isError && !firstRejected && visibleFiles.some((file) => isFileValidating(file));
   const statusMessage =
     visibleFiles.length === 0
       ? messages.upload.waitingForPhone
@@ -164,7 +167,14 @@ export function UploadScreen() {
           className="button button--primary button--wide"
           type="button"
           disabled={!canContinue}
-          onClick={() => void navigate("/configure")}
+          // Guarded here as well as on the attribute. A document can finish
+          // arriving between the render that drew this button and the press
+          // that reaches it, and a disabled attribute is not a decision — it is
+          // a description of one made a moment ago.
+          onClick={() => {
+            if (!canLeaveUpload(state.files)) return;
+            void navigate("/configure");
+          }}
         >
           {canContinue && readyCount > 1
             ? messages.upload.continueWithCount(readyCount)
@@ -235,12 +245,6 @@ function UploadStatusPill({
         {currentMessage}
       </span>
     </span>
-  );
-}
-
-function isFileBeingPrepared(file: PrototypeFile): boolean {
-  return (
-    file.status === "UPLOADING" || file.status === "QUARANTINED" || file.status === "VALIDATING"
   );
 }
 

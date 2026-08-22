@@ -9,6 +9,7 @@ import {
   pageExclusionRefusal,
   pagePrintState,
   prototypeReducer,
+  canLeaveUpload,
   readyFiles,
   selectedPageRanges,
   type FileSelection,
@@ -435,5 +436,77 @@ describe("several documents in one print job", () => {
       file.id,
       secondFile.id
     ]);
+  });
+});
+
+/**
+ * When the customer may leave the upload screen.
+ *
+ * The rule used to be "at least one document is validated", which read
+ * correctly on a single upload and wrongly on every subsequent one: adding a
+ * second file left the button live over a job whose contents were not settled,
+ * so a rejection arriving a moment later had to reach back into a screen the
+ * customer had already left.
+ */
+describe("leaving the upload screen", () => {
+  const checking = (status: PrototypeFile["status"]): PrototypeFile => ({
+    ...secondFile,
+    id: `file-${status}`,
+    status,
+    pageCount: null,
+    sizeBytes: null
+  });
+
+  it("waits for anything at all to arrive", () => {
+    expect(canLeaveUpload([])).toBe(false);
+  });
+
+  it("lets a customer through once their document is validated", () => {
+    expect(canLeaveUpload([file])).toBe(true);
+  });
+
+  it.each<PrototypeFile["status"]>(["UPLOADING", "QUARANTINED", "VALIDATING"])(
+    "closes again while a second document is %s",
+    (status) => {
+      // The bug this rule exists for: the first file is ready, the second is
+      // still being checked, and the button used to stay live.
+      expect(canLeaveUpload([file, checking(status)])).toBe(false);
+    }
+  );
+
+  it("opens again once the second document finishes successfully", () => {
+    expect(canLeaveUpload([file, secondFile])).toBe(true);
+  });
+
+  it("stays closed while any document was rejected", () => {
+    const rejected: PrototypeFile = {
+      ...checking("REJECTED"),
+      rejectionCode: "DOCUMENT_MALFORMED"
+    };
+    // Pricing a job around a document the machine refused would quietly print
+    // something other than what the customer handed over.
+    expect(canLeaveUpload([file, rejected])).toBe(false);
+  });
+
+  it.each<PrototypeFile["status"]>(["DELETING", "DELETE_PENDING", "DELETED"])(
+    "ignores a document that is %s",
+    (status) => {
+      // Removing a file from the phone is the only way a customer clears a
+      // rejection. A deletion in flight holding the kiosk shut would make the
+      // one action available to them the action that strands them.
+      expect(canLeaveUpload([file, checking(status)])).toBe(true);
+    }
+  );
+
+  it("does not open on a departing document alone", () => {
+    expect(canLeaveUpload([checking("DELETED")])).toBe(false);
+  });
+
+  it("reads the same statuses the screen already shows", () => {
+    // No parallel readiness flag: every answer above comes from the status the
+    // upload flow maintains, which is the drift this rule exists to avoid
+    // rather than to re-create.
+    const partial: PrototypeFile = { ...file, pageCount: null };
+    expect(canLeaveUpload([partial])).toBe(false);
   });
 });

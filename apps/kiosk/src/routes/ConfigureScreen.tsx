@@ -15,6 +15,7 @@ import {
   pageExclusionRefusal,
   pagePrintState,
   pageRangeBounds,
+  canLeaveUpload,
   readyFiles,
   type FileSelection,
   type PagePrintState,
@@ -124,7 +125,11 @@ export function ConfigureScreen() {
     dispatch
   });
 
-  if (documents.length === 0 || !sessionId) return <KioskRedirect to="/upload" />;
+  // The second half of the upload gate. The button that leads here is disabled
+  // and guarded, but this screen prices a job, and a job whose contents are
+  // still being checked has no settled price — so anything that reached here
+  // with a document still validating, or one that was rejected, goes back.
+  if (!sessionId || !canLeaveUpload(state.files)) return <KioskRedirect to="/upload" />;
 
   const capabilities = state.capabilities;
   const duplexAvailable =

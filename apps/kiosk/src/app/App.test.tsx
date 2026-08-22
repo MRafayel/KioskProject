@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -215,6 +215,12 @@ function formatAmd(amountMinor: number): string {
 
 let listedFileStatus: string;
 let listedFileCount: number;
+/**
+ * Per-document statuses, when a test needs the documents to disagree — one
+ * validated while the next is still being checked, which is the case the
+ * continue rule turns on. Null keeps every document on `listedFileStatus`.
+ */
+let listedFileStatuses: string[] | null;
 let cancelFailuresRemaining: number;
 let cancelIdempotencyKeys: string[];
 let fileDeleteFailuresRemaining: number;
@@ -240,6 +246,7 @@ beforeEach(() => {
   window.sessionStorage.clear();
   listedFileStatus = "QUARANTINED";
   listedFileCount = 1;
+  listedFileStatuses = null;
   cancelFailuresRemaining = 0;
   cancelIdempotencyKeys = [];
   fileDeleteFailuresRemaining = 0;
@@ -511,17 +518,23 @@ beforeEach(() => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              items: Array.from({ length: listedFileCount }, (_, index) => ({
-                id: "01900000-0000-7000-8000-" + String(index + 11).padStart(12, "0"),
-                ordinal: index,
-                status: listedFileStatus,
-                kind: "PDF",
-                pageCount: listedFileStatus === "READY" ? 8 : null,
-                processingRevision: 1,
-                rejectionCode: listedFileStatus === "REJECTED" ? "DOCUMENT_MALFORMED" : null,
-                sizeBytes: 2_400_000,
-                createdAt: "2030-01-01T00:00:00.000Z"
-              }))
+              items: Array.from(
+                { length: listedFileStatuses?.length ?? listedFileCount },
+                (_, index) => {
+                  const status = listedFileStatuses?.[index] ?? listedFileStatus;
+                  return {
+                    id: "01900000-0000-7000-8000-" + String(index + 11).padStart(12, "0"),
+                    ordinal: index,
+                    status,
+                    kind: "PDF",
+                    pageCount: status === "READY" ? 8 : null,
+                    processingRevision: 1,
+                    rejectionCode: status === "REJECTED" ? "DOCUMENT_MALFORMED" : null,
+                    sizeBytes: 2_400_000,
+                    createdAt: "2030-01-01T00:00:00.000Z"
+                  };
+                }
+              )
             }),
             { status: 200, headers: { "content-type": "application/json" } }
           )
@@ -633,6 +646,96 @@ describe("kiosk prototype journey", () => {
       "src",
       expect.stringContaining(`/pages/1/preview?revision=1`)
     );
+  });
+
+  /**
+   * Continue means "everything I have handed over is ready", not "something is".
+   *
+   * The old rule was the second one, which read correctly on a single upload and
+   * wrongly on every one after it: the customer adds a document, the button is
+   * already live over a job whose contents are not settled, and a rejection
+   * arriving a moment later has to reach back into a screen they have left.
+   */
+  describe("continuing from the upload screen", () => {
+    async function openUpload() {
+      const user = userEvent.setup();
+      renderKiosk();
+      await user.click(screen.getByRole("button", { name: "English" }));
+      await user.click(screen.getByRole("button", { name: "Start printing" }));
+      await screen.findByText("Document 1.pdf");
+      return user;
+    }
+
+    // The label gains a document count once more than one is ready, so this
+    // matches the verb rather than the whole sentence.
+    const continueButton = () => screen.getByRole("button", { name: /^Continue/i });
+
+    it("enables continue for a single validated document", async () => {
+      listedFileStatuses = ["READY"];
+      await openUpload();
+
+      expect(continueButton()).toBeEnabled();
+    });
+
+    it("disables continue again while a second document is still being checked", async () => {
+      listedFileStatuses = ["READY", "VALIDATING"];
+      await openUpload();
+
+      await waitFor(() => expect(screen.getByText("Document 2.pdf")).toBeVisible(), {
+        timeout: 5_000
+      });
+      expect(continueButton()).toBeDisabled();
+    });
+
+    it("enables continue once the second document finishes successfully", async () => {
+      listedFileStatuses = ["READY", "VALIDATING"];
+      await openUpload();
+      await waitFor(() => expect(continueButton()).toBeDisabled(), { timeout: 5_000 });
+
+      // The phone finishes checking the second document. The screen picks that
+      // up on its own reconciliation, which is slower than waitFor's default.
+      listedFileStatuses = ["READY", "READY"];
+
+      await waitFor(() => expect(continueButton()).toBeEnabled(), { timeout: 5_000 });
+    }, 10_000);
+
+    it("keeps a document that is still being checked out of print settings", async () => {
+      listedFileStatuses = ["READY", "VALIDATING"];
+      const user = await openUpload();
+      await waitFor(() => expect(continueButton()).toBeDisabled(), { timeout: 5_000 });
+
+      // Not only the appearance: a press that gets through — a stray touch, or
+      // a document arriving between the render and the tap — must not price a
+      // job whose contents are unsettled.
+      await user.click(continueButton());
+      expect(screen.queryByRole("heading", { name: "Choose print settings" })).toBeNull();
+      expect(screen.getByRole("heading", { name: "Upload your document" })).toBeVisible();
+    });
+
+    it("keeps a rejected document out of print settings", async () => {
+      listedFileStatuses = ["READY", "REJECTED"];
+      const user = await openUpload();
+
+      await waitFor(() => expect(continueButton()).toBeDisabled(), { timeout: 5_000 });
+      await user.click(continueButton());
+      expect(screen.queryByRole("heading", { name: "Choose print settings" })).toBeNull();
+    }, 10_000);
+
+    it("turns anything that reaches print settings early back to uploading", async () => {
+      // The screen behind the button guards itself as well, because it prices a
+      // job and a job that is still being checked has no settled price.
+      listedFileStatuses = ["READY", "VALIDATING"];
+      const user = userEvent.setup();
+      // A session exists — this is somebody already mid-flow — but no document
+      // has been confirmed ready, which is the state a stray navigation lands in.
+      renderKiosk({
+        initialEntries: ["/configure"],
+        initialState: { ...initialPrototypeState, session: testSession }
+      });
+      await user.click(screen.getByRole("button", { name: "English" }));
+
+      expect(await screen.findByRole("heading", { name: "Upload your document" })).toBeVisible();
+    });
   });
 
   it("pays only the total the control plane calculated for the saved settings", async () => {

@@ -501,6 +501,51 @@ export function readyFiles(files: readonly PrototypeFile[]): ReadyPrototypeFile[
 }
 
 /**
+ * A document that has not finished being checked yet.
+ *
+ * Uploading, waiting on the scanner and being validated are one thing from the
+ * customer's side — the machine is still deciding whether it can print this —
+ * and nothing downstream distinguishes them either.
+ */
+export function isFileValidating(file: PrototypeFile): boolean {
+  return (
+    file.status === "UPLOADING" || file.status === "QUARANTINED" || file.status === "VALIDATING"
+  );
+}
+
+/**
+ * A document on its way out. It is not part of the job and must not gate it.
+ *
+ * Removal is how a customer clears a rejected file from their phone, so a
+ * deletion in flight cannot be allowed to hold the kiosk shut — that would make
+ * the one action available to them the action that strands them.
+ */
+export function isFileDeparting(file: PrototypeFile): boolean {
+  return (
+    file.status === "DELETING" || file.status === "DELETE_PENDING" || file.status === "DELETED"
+  );
+}
+
+/**
+ * Whether the customer may move on from uploading.
+ *
+ * Every document that is still going to print must have finished being checked,
+ * and finished successfully. Deliberately stricter than "at least one is ready":
+ * a customer who has just added a second file and sees the button live is being
+ * invited to price a job whose contents are not settled, and a rejection that
+ * arrives a moment later would have to reach back into a screen they have
+ * already left.
+ *
+ * Derived entirely from the statuses the upload flow already maintains. There is
+ * no separate readiness flag to keep in step with them, which is the failure
+ * this rule exists to avoid rather than to re-create.
+ */
+export function canLeaveUpload(files: readonly PrototypeFile[]): boolean {
+  const printable = files.filter((file) => !isFileDeparting(file));
+  return printable.length > 0 && printable.every(isReadyFile);
+}
+
+/**
  * Forget the payment on screen and move to the next attempt number, so the
  * request that follows asks for a new payment instead of replaying the old one.
  */
