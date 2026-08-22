@@ -679,6 +679,14 @@ p {
   border-radius: 0.5rem;
 }
 
+.qr-card__timer {
+  display: flex;
+  width: 100%;
+  margin: 0.65rem 0 0.75rem;
+  align-items: center;
+  justify-content: center;
+}
+
 .upload-placeholder {
   display: flex;
   min-height: 74px;
@@ -793,15 +801,6 @@ p {
   margin-top: 0.2rem;
   color: var(--muted);
   font-size: 0.78rem;
-}
-
-.upload-session-timer {
-  display: flex;
-  min-height: 50px;
-  margin: -0.45rem 0 0.45rem;
-  padding-inline: 0.8rem;
-  align-items: center;
-  justify-content: flex-end;
 }
 
 .file-card__check {
@@ -1525,15 +1524,11 @@ p {
   justify-self: center;
 }
 
-.payment-card__topline {
+.payment-card__timer-row {
   display: flex;
-  margin-bottom: 1rem;
+  min-height: 50px;
+  margin-bottom: 0.8rem;
   align-items: center;
-  gap: 1rem;
-}
-
-.payment-card__topline h2 {
-  margin: 0;
 }
 
 .price-total--large {

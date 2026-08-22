@@ -575,7 +575,7 @@ describe("kiosk prototype journey", () => {
     const uploadedFile = screen.getByRole("article", { name: "Uploaded document" });
     expect(within(uploadedFile).queryByText("Preparing your document")).not.toBeInTheDocument();
     expect(within(uploadedFile).queryByRole("timer")).not.toBeInTheDocument();
-    expect(screen.getByRole("timer").closest(".upload-session-timer")).not.toBeNull();
+    expect(screen.getByRole("timer").closest(".qr-card__timer")).not.toBeNull();
     expect(document.querySelector(".topbar [role='timer']")).not.toBeInTheDocument();
     expect(screen.queryByText("4829 1357")).not.toBeInTheDocument();
     expect(screen.queryByText(/8 pages/i)).not.toBeInTheDocument();
@@ -585,7 +585,7 @@ describe("kiosk prototype journey", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("places one session timer after the complete uploaded-file list", async () => {
+  it("keeps one session timer in the QR card when multiple files are listed", async () => {
     listedFileCount = 2;
     const user = userEvent.setup();
     renderKiosk();
@@ -599,7 +599,7 @@ describe("kiosk prototype journey", () => {
       expect(within(uploadedFile).queryByRole("timer")).not.toBeInTheDocument();
     }
     expect(screen.getAllByRole("timer")).toHaveLength(1);
-    expect(screen.getByRole("timer").closest(".upload-session-timer")).not.toBeNull();
+    expect(screen.getByRole("timer").closest(".qr-card__timer")).not.toBeNull();
   });
 
   it("shows a rejected upload without treating it as printable", async () => {
@@ -701,8 +701,10 @@ describe("kiosk prototype journey", () => {
     expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
     const paymentSummary = screen.getByRole("complementary", { name: "Payment summary" });
     const checkoutTimer = within(paymentSummary).getByRole("timer");
+    const paymentHeading = within(paymentSummary).getByRole("heading", { name: "Payment summary" });
     expect(checkoutTimer).toBeVisible();
-    expect(checkoutTimer.closest(".payment-card__topline")).not.toBeNull();
+    expect(checkoutTimer.closest(".payment-card__timer-row")).not.toBeNull();
+    expect(paymentHeading.closest(".payment-card__timer-row")).toBeNull();
     expect(within(paymentSummary).queryByText("Time remaining")).not.toBeInTheDocument();
     expect(paymentSummary.querySelector(".lock-mark")).not.toBeInTheDocument();
     expect(

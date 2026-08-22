@@ -103,6 +103,9 @@ export function UploadScreen() {
             marginSize={2}
             title={messages.upload.qrTitle}
           />
+          <div className="qr-card__timer">
+            <SessionTimer compact />
+          </div>
           <UploadStatusPill
             danger={Boolean(pending && statusTone(pending) === "danger")}
             message={statusMessage}
@@ -148,10 +151,6 @@ export function UploadScreen() {
             <span>{messages.upload.placeholder}</span>
           </div>
         )}
-
-        <div className="upload-session-timer">
-          <SessionTimer compact />
-        </div>
 
         {/* The phone can keep sending while this screen is open, so the hint
             stays up as long as there is room for another document. */}
