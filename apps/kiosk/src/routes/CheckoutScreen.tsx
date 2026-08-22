@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
+import { SessionTimer } from "../components/SessionTimer.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
@@ -195,8 +196,11 @@ export function CheckoutScreen() {
       </section>
 
       <aside className="payment-card" aria-labelledby="payment-summary-title">
-        <div className="lock-mark" aria-hidden="true">
-          ⌁
+        <div className="payment-card__topline">
+          <div className="lock-mark" aria-hidden="true">
+            ⌁
+          </div>
+          <SessionTimer />
         </div>
         <h2 id="payment-summary-title">{messages.checkout.paymentSummary}</h2>
         <dl className="summary-list">

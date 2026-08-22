@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { PaymentSnapshot, PrintJobSnapshot } from "@printing-kiosk/contracts";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
+import { SessionTimer } from "../components/SessionTimer.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { clearFulfillmentState } from "../features/session/fulfillmentPersistence.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
@@ -391,6 +392,7 @@ export function FailureScreen({ failureType }: { failureType: "payment" | "print
                 : messages.status.printerRefundNotice}
         </span>
       </div>
+      <SessionTimer />
       {printOperatorRequired ? null : (
         <div className="button-row button-row--center">
           {paymentFailure && !pendingPayment ? (

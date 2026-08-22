@@ -571,7 +571,11 @@ describe("kiosk prototype journey", () => {
     expect(await screen.findByRole("heading", { name: "Upload your document" })).toBeVisible();
 
     expect(await screen.findByText("Document 1.pdf")).toBeVisible();
-    expect(screen.getAllByText("Received — waiting for a secure check").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Preparing your document")).toHaveLength(1);
+    const uploadedFile = screen.getByRole("article", { name: "Uploaded document" });
+    expect(within(uploadedFile).queryByText("Preparing your document")).not.toBeInTheDocument();
+    expect(within(uploadedFile).getByRole("timer")).toBeVisible();
+    expect(document.querySelector(".topbar [role='timer']")).not.toBeInTheDocument();
     expect(screen.queryByText("4829 1357")).not.toBeInTheDocument();
     expect(screen.queryByText(/8 pages/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
@@ -628,6 +632,9 @@ describe("kiosk prototype journey", () => {
     expect(screen.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
     expect(screen.queryByText("Paper size", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("Orientation", { exact: true })).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("complementary", { name: "Print summary" })).getByRole("timer")
+    ).toBeVisible();
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "From page" }), {
       target: { value: "3" }
@@ -674,6 +681,9 @@ describe("kiosk prototype journey", () => {
 
     await user.click(screen.getByRole("button", { name: /Review and pay/i }));
     expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
+    expect(
+      within(screen.getByRole("complementary", { name: "Payment summary" })).getByRole("timer")
+    ).toBeVisible();
     expect(
       screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) })
     ).toBeEnabled();
@@ -1848,7 +1858,7 @@ describe("kiosk prototype journey", () => {
     });
 
     expect(await screen.findByText(/Ֆայլը վնասված է.*Հեռացրեք այս ֆայլը հեռախոսում/)).toBeVisible();
-    expect(container.querySelector(".processing-activity")).not.toBeInTheDocument();
+    expect(container.querySelector(".status-pill__spinner")).not.toBeInTheDocument();
     expect(screen.queryByText(/վնասակար բովանդակության/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Անցնել տպման կարգավորումներին/i })).toBeDisabled();
   });

@@ -1,19 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  createContext,
-  type CSSProperties,
-  type ReactNode,
-  useContext,
-  useEffect,
-  useRef,
-  useState
-} from "react";
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
 import { KioskRedirect, useKioskLocation, useKioskNavigate } from "../app/router.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
-import { useSessionTimer } from "../features/session/SessionTimerProvider.js";
 import { subscribeToSessionEvents } from "../features/session/sessionEvents.js";
 import {
   clearStoredSessionKeys,
@@ -44,7 +35,6 @@ const steps = [
 
 export function KioskLayout({ children }: { children: ReactNode }) {
   const { messages, resetLocale } = useLanguage();
-  const { durationSeconds, isRunning: sessionTimerRunning, remainingSeconds } = useSessionTimer();
   const { state, dispatch } = usePrototypeSession();
   const location = useKioskLocation();
   const navigate = useKioskNavigate();
@@ -140,13 +130,6 @@ export function KioskLayout({ children }: { children: ReactNode }) {
   const canCancel =
     ["/upload", "/configure", "/checkout"].includes(location.pathname) &&
     !paymentMakesCancellationUnsafe;
-  const showSessionTimer =
-    sessionTimerRunning && location.pathname !== "/printing" && location.pathname !== "/complete";
-  const timerProgress = `${Math.max(
-    0,
-    Math.min(360, (remainingSeconds / durationSeconds) * 360)
-  )}deg`;
-
   const cancelSession = async () => {
     const session = state.session;
     if (!session || cancelStatus === "closing") return;
@@ -206,23 +189,6 @@ export function KioskLayout({ children }: { children: ReactNode }) {
         </ol>
 
         <div className="topbar__actions">
-          {showSessionTimer ? (
-            <div
-              className={
-                remainingSeconds <= 30 ? "session-timer session-timer--warning" : "session-timer"
-              }
-              role="timer"
-              aria-label={messages.idle.countdown(remainingSeconds)}
-              aria-atomic="true"
-              style={{ "--session-timer-progress": timerProgress } as CSSProperties}
-            >
-              <span className="session-timer__dial" aria-hidden="true">
-                <strong>{remainingSeconds}</strong>
-                <small>{messages.idle.seconds}</small>
-              </span>
-              <span className="session-timer__label">{messages.idle.timeRemaining}</span>
-            </div>
-          ) : null}
           {canCancel ? (
             <button
               className="button button--quiet topbar__cancel"

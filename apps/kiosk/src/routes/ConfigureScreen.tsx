@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { DocumentCard, pageButtonKey, type EnlargedPage } from "../components/DocumentCard.js";
+import { SessionTimer } from "../components/SessionTimer.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
@@ -266,10 +267,11 @@ export function ConfigureScreen() {
         </section>
 
         <aside className="summary-card" aria-labelledby="summary-title">
-          <div className="paper-preview" aria-hidden="true">
-            <div className="paper">
+          <div className="paper-preview paper-preview--timed">
+            <div className="paper" aria-hidden="true">
               <span /> <span /> <span /> <span />
             </div>
+            <SessionTimer />
           </div>
           <h2 id="summary-title">{messages.configure.summaryTitle}</h2>
           <dl className="summary-list">

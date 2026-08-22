@@ -6,6 +6,7 @@ import type { UploadedFileRejectionCode } from "@printing-kiosk/contracts";
 
 import { useKioskNavigate } from "../app/router.js";
 import { useKioskOutletContext } from "../components/KioskLayout.js";
+import { SessionTimer } from "../components/SessionTimer.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import {
@@ -58,6 +59,12 @@ export function UploadScreen() {
   // this presentational activity treatment.
   const showProcessingActivity =
     !filesQuery.isError && !firstRejected && visibleFiles.some((file) => isFileBeingPrepared(file));
+  const statusMessage =
+    visibleFiles.length === 0
+      ? messages.upload.waitingForPhone
+      : pending
+        ? fileStatusLabel(pending, messages.upload)
+        : messages.upload.documentsReady(readyCount);
 
   if (!state.session) return null;
 
@@ -96,37 +103,35 @@ export function UploadScreen() {
             marginSize={2}
             title={messages.upload.qrTitle}
           />
-          <span
-            className={`status-pill status-pill--${pending && statusTone(pending) === "danger" ? "danger" : "waiting"}`}
-          >
-            <span aria-hidden="true">●</span>{" "}
-            {visibleFiles.length === 0
-              ? messages.upload.waitingForPhone
-              : pending
-                ? fileStatusLabel(pending, messages.upload)
-                : messages.upload.documentsReady(readyCount)}
-          </span>
+          <UploadStatusPill
+            danger={Boolean(pending && statusTone(pending) === "danger")}
+            message={statusMessage}
+            processing={showProcessingActivity}
+            processingMessages={messages.upload.processingMessages}
+          />
         </div>
 
         {visibleFiles.length > 0 ? (
           <ul className="file-card-list" aria-label={messages.upload.uploadedDocuments}>
-            {visibleFiles.map((file) => (
+            {visibleFiles.map((file, index) => (
               <li key={file.id}>
                 <article className="file-card" aria-label={messages.upload.uploadedDocument}>
                   <div className="file-card__icon" aria-hidden="true">
                     {file.kind ?? "FILE"}
                   </div>
-                  <div>
-                    <strong>
-                      {file.name ??
-                        messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
-                    </strong>
-                    <span>
-                      {fileStatusLabel(file, messages.upload)}
-                      {file.sizeBytes === null
-                        ? ""
-                        : ` · ${formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)}`}
-                    </span>
+                  <div className="file-card__details">
+                    <div className="file-card__identity">
+                      <strong>
+                        {file.name ??
+                          messages.upload.fileName(file.ordinal + 1, fileExtension(file.kind))}
+                      </strong>
+                      {file.sizeBytes === null ? null : (
+                        <span className="file-card__meta">
+                          {formatFileSize(file.sizeBytes, numberLocale, messages.units.megabytes)}
+                        </span>
+                      )}
+                    </div>
+                    {index === 0 ? <SessionTimer compact /> : null}
                   </div>
                   <span
                     className={`file-card__check file-card__check--${statusTone(file)}`}
@@ -141,13 +146,10 @@ export function UploadScreen() {
         ) : (
           <div className="upload-placeholder" aria-live="polite">
             <span className="pulse" aria-hidden="true" />
-            {messages.upload.placeholder}
+            <span>{messages.upload.placeholder}</span>
+            <SessionTimer compact />
           </div>
         )}
-
-        {showProcessingActivity ? (
-          <ProcessingActivity messages={messages.upload.processingMessages} />
-        ) : null}
 
         {/* The phone can keep sending while this screen is open, so the hint
             stays up as long as there is room for another document. */}
@@ -182,39 +184,56 @@ export function UploadScreen() {
   );
 }
 
-function ProcessingActivity({ messages }: { messages: readonly [string, string, string] }) {
+function UploadStatusPill({
+  danger,
+  message,
+  processing,
+  processingMessages
+}: {
+  danger: boolean;
+  message: string;
+  processing: boolean;
+  processingMessages: readonly [string, string, string];
+}) {
   const [messageIndex, setMessageIndex] = useState(0);
 
   useEffect(() => {
     setMessageIndex(0);
+    if (!processing) return;
     const timer = window.setInterval(
-      () => setMessageIndex((current) => (current + 1) % messages.length),
+      () => setMessageIndex((current) => (current + 1) % processingMessages.length),
       2_600
     );
     return () => window.clearInterval(timer);
-  }, [messages]);
+  }, [processing, processingMessages]);
 
-  const currentMessage = messages[messageIndex] ?? messages[0];
+  const currentMessage = processing
+    ? (processingMessages[messageIndex] ?? processingMessages[0])
+    : message;
   return (
-    <div
-      className="processing-activity"
+    <span
+      className={`status-pill status-pill--${danger ? "danger" : "waiting"}`}
       role="status"
       aria-live="polite"
       aria-atomic="true"
       aria-label={currentMessage}
     >
-      <div className="processing-activity__art" aria-hidden="true">
-        <span className="processing-activity__orbit" />
-        <span className="processing-activity__document">
-          <i />
-          <i />
-          <i />
-        </span>
-      </div>
-      <span className="processing-activity__message" key={messageIndex}>
+      {processing ? (
+        <span className="status-pill__spinner" aria-hidden="true" />
+      ) : (
+        <span aria-hidden="true">●</span>
+      )}
+      <span
+        className={
+          processing
+            ? "status-pill__message status-pill__message--processing"
+            : "status-pill__message"
+        }
+        key={processing ? messageIndex : currentMessage}
+      >
         {currentMessage}
       </span>
-    </div>
+    </span>
   );
 }
 

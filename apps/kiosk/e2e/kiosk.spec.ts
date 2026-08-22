@@ -70,7 +70,11 @@ test("receives the phone upload while keeping unvalidated settings locked", asyn
 
   await expect(page.getByText("Document 1.pdf")).toBeVisible();
   await expect(page.getByText("4829 1357")).toHaveCount(0);
-  await expect(page.getByText("Received — waiting for a secure check").first()).toBeVisible();
+  await expect(page.locator(".status-pill__spinner")).toBeVisible();
+  await expect(page.locator(".status-pill__message")).toBeVisible();
+  await expect(page.locator(".file-card .status-pill__message")).toHaveCount(0);
+  await expect(page.locator(".file-card").getByRole("timer")).toBeVisible();
+  await expect(page.locator(".topbar").getByRole("timer")).toHaveCount(0);
   await expect(page.getByText(/8 pages/i)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
   await expect(page.getByRole("button", { name: /simulate phone upload/i })).toHaveCount(0);
