@@ -1373,7 +1373,8 @@ describe("kiosk prototype journey", () => {
     expect(screen.getByText("RESULT UNCONFIRMED")).toBeVisible();
   });
 
-  it("treats a control-plane-canceled print as settled instead of retrying it", () => {
+  it("keeps a non-success print terminal state visible instead of auto-dismissing it", async () => {
+    vi.useFakeTimers();
     renderKiosk({
       initialEntries: ["/failure/printer"],
       initialState: {
@@ -1405,8 +1406,14 @@ describe("kiosk prototype journey", () => {
     fireEvent.click(screen.getByRole("button", { name: "English" }));
 
     expect(screen.getByRole("heading", { name: "The printer needs attention" })).toBeVisible();
+    expect(screen.queryByRole("timer")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Finish" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Retry printing" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    expect(screen.getByRole("heading", { name: "The printer needs attention" })).toBeVisible();
   });
 
   it("shows the recovery screen when the control plane declines the payment", async () => {
@@ -1786,6 +1793,25 @@ describe("kiosk prototype journey", () => {
     });
   });
 
+  it("shows lightweight rotating activity while an uploaded document is being prepared", async () => {
+    vi.useFakeTimers();
+    renderKiosk({
+      initialEntries: ["/upload"],
+      initialState: { ...initialPrototypeState, session: testSession }
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.getByRole("status", { name: "Preparing your document" })).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_600);
+    });
+    expect(screen.getByRole("status", { name: "Checking document details" })).toBeVisible();
+  });
+
   it("refreshes authoritative state and unlocks settings on file.ready", async () => {
     const eventSources = installFakeEventSource();
     renderKiosk({
@@ -1808,7 +1834,7 @@ describe("kiosk prototype journey", () => {
 
   it("refreshes an authoritative rejection reason without trusting the realtime payload", async () => {
     const eventSources = installFakeEventSource();
-    renderKiosk({
+    const { container } = renderKiosk({
       initialEntries: ["/upload"],
       initialState: { ...initialPrototypeState, session: testSession }
     });
@@ -1822,6 +1848,7 @@ describe("kiosk prototype journey", () => {
     });
 
     expect(await screen.findByText(/Ֆայլը վնասված է.*Հեռացրեք այս ֆայլը հեռախոսում/)).toBeVisible();
+    expect(container.querySelector(".processing-activity")).not.toBeInTheDocument();
     expect(screen.queryByText(/վնասակար բովանդակության/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Անցնել տպման կարգավորումներին/i })).toBeDisabled();
   });
@@ -1838,6 +1865,8 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByRole("timer", { name: "Մնացել է 120 վայրկյան" })).toBeVisible();
+    expect(screen.getByRole("timer")).toHaveTextContent("120վրկ");
+    expect(screen.getByRole("timer")).not.toHaveTextContent("02:00");
 
     listedFileStatus = "VALIDATING";
     await act(async () => {
@@ -1948,29 +1977,50 @@ describe("kiosk prototype journey", () => {
     expect(cancelIdempotencyKeys).toEqual([retainedKey, retainedKey]);
   });
 
-  it("finishes a completed session locally without making cleanup a network gate", async () => {
+  it("automatically finishes a completed session after five seconds without a network gate", async () => {
+    vi.useFakeTimers();
     window.sessionStorage.setItem("printing-kiosk.pending-create", "private-create-key");
     window.sessionStorage.setItem(
       `printing-kiosk.pending-cancel.${testSession.id}`,
       "private-cancel-key"
     );
-    const user = userEvent.setup();
     renderKiosk({
       initialEntries: ["/complete"],
       initialState: {
         ...initialPrototypeState,
         session: testSession,
-        files: [readyFixture]
+        files: [readyFixture],
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        },
+        print: { job: settledPrintJob, errorCode: null, failureDisposition: null }
       }
     });
-    await user.click(screen.getByRole("button", { name: "English" }));
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
     expect(screen.getByText("Secure deletion scheduled")).toBeVisible();
+    expect(screen.getByText("This screen will close automatically.")).toBeVisible();
+    expect(screen.queryByRole("timer")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Finish" })).not.toBeInTheDocument();
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
 
-    await user.click(screen.getByRole("button", { name: "Finish" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_999);
+    });
+    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
 
-    expect(await screen.findByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.getByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).toBeNull();
     expect(

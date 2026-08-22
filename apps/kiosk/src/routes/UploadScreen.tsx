@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import type { UploadedFileRejectionCode } from "@printing-kiosk/contracts";
 
@@ -53,6 +53,11 @@ export function UploadScreen() {
   // A rejection is the one thing worth explaining in full, so the first one
   // gets the explanation even while other documents are still arriving.
   const firstRejected = visibleFiles.find((file) => file.status === "REJECTED");
+  // These messages deliberately describe general preparation rather than
+  // backend milestones. Authoritative errors and rejections always replace
+  // this presentational activity treatment.
+  const showProcessingActivity =
+    !filesQuery.isError && !firstRejected && visibleFiles.some((file) => isFileBeingPrepared(file));
 
   if (!state.session) return null;
 
@@ -140,6 +145,10 @@ export function UploadScreen() {
           </div>
         )}
 
+        {showProcessingActivity ? (
+          <ProcessingActivity messages={messages.upload.processingMessages} />
+        ) : null}
+
         {/* The phone can keep sending while this screen is open, so the hint
             stays up as long as there is room for another document. */}
         {visibleFiles.length > 0 ? (
@@ -170,6 +179,48 @@ export function UploadScreen() {
         ) : null}
       </section>
     </div>
+  );
+}
+
+function ProcessingActivity({ messages }: { messages: readonly [string, string, string] }) {
+  const [messageIndex, setMessageIndex] = useState(0);
+
+  useEffect(() => {
+    setMessageIndex(0);
+    const timer = window.setInterval(
+      () => setMessageIndex((current) => (current + 1) % messages.length),
+      2_600
+    );
+    return () => window.clearInterval(timer);
+  }, [messages]);
+
+  const currentMessage = messages[messageIndex] ?? messages[0];
+  return (
+    <div
+      className="processing-activity"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      aria-label={currentMessage}
+    >
+      <div className="processing-activity__art" aria-hidden="true">
+        <span className="processing-activity__orbit" />
+        <span className="processing-activity__document">
+          <i />
+          <i />
+          <i />
+        </span>
+      </div>
+      <span className="processing-activity__message" key={messageIndex}>
+        {currentMessage}
+      </span>
+    </div>
+  );
+}
+
+function isFileBeingPrepared(file: PrototypeFile): boolean {
+  return (
+    file.status === "UPLOADING" || file.status === "QUARANTINED" || file.status === "VALIDATING"
   );
 }
 

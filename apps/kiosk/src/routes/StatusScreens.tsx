@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import type { PaymentSnapshot, PrintJobSnapshot } from "@printing-kiosk/contracts";
 
@@ -42,6 +42,7 @@ const PRINT_POLL_INTERVAL_MS = 1_500;
 /** Consecutive unreadable statuses before the screen stops waiting. */
 const PAYMENT_READ_FAILURE_LIMIT = 5;
 const PRINT_READ_FAILURE_LIMIT = 5;
+const COMPLETE_SCREEN_HOLD_MS = 5_000;
 
 /**
  * Watches one payment the control plane already created.
@@ -449,8 +450,30 @@ export function CompleteScreen() {
   const { messages, numberLocale, resetLocale } = useLanguage();
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
+  const finishStartedRef = useRef(false);
 
   const documents = readyFiles(state.files);
+  const completedSuccessfully = state.print.job !== null && isPrintJobSuccessful(state.print.job);
+  const sessionId = state.session?.id;
+  const finish = useCallback(() => {
+    if (finishStartedRef.current) return;
+    finishStartedRef.current = true;
+    clearStoredSessionKeys(sessionId);
+    clearFulfillmentState();
+    dispatch({ type: "RESET" });
+    resetLocale();
+    void navigate("/", { replace: true });
+  }, [dispatch, navigate, resetLocale, sessionId]);
+
+  useEffect(() => {
+    if (documents.length === 0 || !completedSuccessfully) return;
+    // Only the success route mounts this timer. It reuses the same reset action
+    // and local cleanup as the former Finish action, and the ref keeps cleanup
+    // idempotent if another customer interaction races the timeout.
+    const timer = window.setTimeout(finish, COMPLETE_SCREEN_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [completedSuccessfully, documents.length, finish]);
+
   if (documents.length === 0) return <KioskRedirect to="/" />;
 
   const quote = state.pricing.quote;
@@ -463,14 +486,6 @@ export function CompleteScreen() {
   // fallback for a receipt shown before a payment exists.
   const captured = state.payment.payment;
   const paid = captured ? (isPaymentSuccessful(captured) ? captured : null) : quote;
-
-  const finish = () => {
-    clearStoredSessionKeys(state.session?.id);
-    clearFulfillmentState();
-    dispatch({ type: "RESET" });
-    resetLocale();
-    void navigate("/", { replace: true });
-  };
 
   return (
     <div className="terminal-state terminal-state--success">
@@ -515,9 +530,7 @@ export function CompleteScreen() {
           <dd>{messages.status.deletionScheduled}</dd>
         </div>
       </dl>
-      <button className="button button--primary" type="button" onClick={finish}>
-        {messages.status.finish}
-      </button>
+      <p className="completion-auto-close">{messages.status.completeAutoClose}</p>
     </div>
   );
 }
@@ -563,7 +576,10 @@ function StageArt({ stage }: { stage: PrintStage }) {
   // Checking, sending and printing all show the device, so the object on screen
   // stays put across three stages instead of being swapped twice.
   return (
-    <div className={`stage-art stage-art--printer stage-art--${stage.toLowerCase()}`} aria-hidden="true">
+    <div
+      className={`stage-art stage-art--printer stage-art--${stage.toLowerCase()}`}
+      aria-hidden="true"
+    >
       <span className="stage-art__paper" />
       <span className="stage-art__body" />
     </div>

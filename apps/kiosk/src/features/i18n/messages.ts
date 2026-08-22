@@ -66,6 +66,7 @@ export interface MessageCatalog {
     fileUploading: string;
     fileQuarantined: string;
     fileChecking: string;
+    processingMessages: [string, string, string];
     fileRejected: string;
     fileDeleting: string;
     fileDeleted: string;
@@ -241,11 +242,13 @@ export interface MessageCatalog {
     paid: string;
     files: string;
     deletionScheduled: string;
+    completeAutoClose: string;
     finish: string;
   };
   idle: {
     countdown: (seconds: number) => string;
     timeRemaining: string;
+    seconds: string;
     title: string;
     description: string;
     endSession: string;
@@ -348,6 +351,11 @@ const english: MessageCatalog = {
     fileUploading: "Upload in progress",
     fileQuarantined: "Received — waiting for a secure check",
     fileChecking: "Checking safety and preparing page previews",
+    processingMessages: [
+      "Preparing your document",
+      "Checking document details",
+      "Getting everything ready"
+    ],
     fileRejected: "File rejected",
     fileDeleting: "Removing file",
     fileDeleted: "File removed",
@@ -533,11 +541,13 @@ const english: MessageCatalog = {
     paid: "Paid",
     files: "Files",
     deletionScheduled: "Secure deletion scheduled",
+    completeAutoClose: "This screen will close automatically.",
     finish: "Finish"
   },
   idle: {
     countdown: (seconds) => `${seconds} seconds remaining`,
     timeRemaining: "Time remaining",
+    seconds: "sec",
     title: "Do you need more time?",
     description:
       "For your privacy, this session will close and remove its files when the timer reaches zero.",
@@ -624,6 +634,11 @@ const russian: MessageCatalog = {
     fileUploading: "Файл загружается",
     fileQuarantined: "Файл получен и ожидает безопасной проверки",
     fileChecking: "Проверяем безопасность и готовим страницы для просмотра",
+    processingMessages: [
+      "Подготавливаем документ",
+      "Проверяем данные документа",
+      "Готовим всё необходимое"
+    ],
     fileRejected: "Файл отклонён",
     fileDeleting: "Удаляем файл",
     fileDeleted: "Файл удалён",
@@ -816,12 +831,14 @@ const russian: MessageCatalog = {
     paid: "Оплачено",
     files: "Файлы",
     deletionScheduled: "Безопасное удаление запланировано",
+    completeAutoClose: "Этот экран закроется автоматически.",
     finish: "Завершить"
   },
   idle: {
     countdown: (seconds) =>
       `Осталось ${seconds} ${russianPlural(seconds, "секунда", "секунды", "секунд")}`,
     timeRemaining: "Осталось времени",
+    seconds: "сек",
     title: "Нужно больше времени?",
     description:
       "Для защиты ваших данных сеанс закроется, а файлы будут удалены, когда таймер дойдёт до нуля.",
@@ -909,6 +926,11 @@ const armenian: MessageCatalog = {
     fileUploading: "Ֆայլը վերբեռնվում է",
     fileQuarantined: "Ֆայլը ստացվել է․ սպասում է անվտանգության ստուգման",
     fileChecking: "Ստուգում ենք ֆայլն ու պատրաստում էջերի նախադիտումը",
+    processingMessages: [
+      "Պատրաստում ենք ձեր փաստաթուղթը",
+      "Ստուգում ենք փաստաթղթի տվյալները",
+      "Պատրաստում ենք ամեն ինչ"
+    ],
     fileRejected: "Ֆայլը մերժվել է",
     fileDeleting: "Ֆայլը հեռացվում է",
     fileDeleted: "Ֆայլը հեռացվել է",
@@ -1092,11 +1114,13 @@ const armenian: MessageCatalog = {
     paid: "Վճարված է",
     files: "Ֆայլեր",
     deletionScheduled: "Անվտանգ հեռացումը նախատեսված է",
+    completeAutoClose: "Այս էկրանն ավտոմատ կփակվի։",
     finish: "Ավարտել"
   },
   idle: {
     countdown: (seconds) => `Մնացել է ${seconds} վայրկյան`,
     timeRemaining: "Մնացել է",
+    seconds: "վրկ",
     title: "Ավելի շատ ժամանա՞կ է պետք։",
     description:
       "Ձեր տվյալները պաշտպանելու համար, երբ ժամանակը սպառվի, տպման գործընթացը կավարտվի, իսկ ֆայլերը կհեռացվեն։",

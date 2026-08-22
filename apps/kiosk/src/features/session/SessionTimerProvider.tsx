@@ -18,6 +18,8 @@ const SESSION_DURATION_SECONDS = 120;
 const WARNING_AT_SECONDS = 30;
 
 interface SessionTimerContextValue {
+  durationSeconds: number;
+  isRunning: boolean;
   remainingSeconds: number;
   recordActivity: () => void;
 }
@@ -123,8 +125,13 @@ export function SessionTimerProvider({ children }: { children: ReactNode }) {
   }, [active, location.pathname, recordActivity]);
 
   const value = useMemo(
-    () => ({ remainingSeconds, recordActivity }),
-    [recordActivity, remainingSeconds]
+    () => ({
+      durationSeconds: SESSION_DURATION_SECONDS,
+      isRunning: active,
+      remainingSeconds,
+      recordActivity
+    }),
+    [active, recordActivity, remainingSeconds]
   );
 
   const recoveryMode = closureStatus !== "idle";
@@ -211,10 +218,4 @@ export function useSessionTimer(): SessionTimerContextValue {
   const context = useContext(SessionTimerContext);
   if (!context) throw new Error("SESSION_TIMER_CONTEXT_MISSING");
   return context;
-}
-
-export function formatSessionTime(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }

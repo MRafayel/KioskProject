@@ -65,7 +65,8 @@ test("receives the phone upload while keeping unvalidated settings locked", asyn
 
   await page.getByRole("button", { name: "Start printing" }).click();
   await expect(page.getByRole("heading", { name: "Upload your document" })).toBeVisible();
-  await expect(page.getByRole("timer")).toContainText("02:00");
+  await expect(page.getByRole("timer")).toContainText("120");
+  await expect(page.getByRole("timer")).toContainText("sec");
 
   await expect(page.getByText("Document 1.pdf")).toBeVisible();
   await expect(page.getByText("4829 1357")).toHaveCount(0);
@@ -168,6 +169,7 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
   await expect(page.getByRole("heading", { name: "Printing your document" })).toBeVisible({
     timeout: 15_000
   });
+  await expect(page.getByRole("timer")).toHaveCount(0);
 
   // Printing is a request naming the capture, and the receipt appears only
   // once the control plane reports a confirmed completion.
@@ -187,6 +189,10 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
   expect(printRequest).toBeDefined();
   expect(JSON.parse(printRequest ?? "{}")).toEqual({
     paymentId: "01900000-0000-7000-8000-0000000000bb"
+  });
+
+  await expect(page.getByRole("button", { name: "Սկսել տպումը" })).toBeVisible({
+    timeout: 7_000
   });
 });
 
