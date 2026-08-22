@@ -73,7 +73,9 @@ test("receives the phone upload while keeping unvalidated settings locked", asyn
   await expect(page.locator(".status-pill__spinner")).toBeVisible();
   await expect(page.locator(".status-pill__message")).toBeVisible();
   await expect(page.locator(".file-card .status-pill__message")).toHaveCount(0);
-  await expect(page.locator(".file-card").getByRole("timer")).toBeVisible();
+  await expect(page.locator(".file-card").getByRole("timer")).toHaveCount(0);
+  await expect(page.locator(".upload-session-timer").getByRole("timer")).toBeVisible();
+  await expect(page.getByRole("timer")).toHaveCount(1);
   await expect(page.locator(".topbar").getByRole("timer")).toHaveCount(0);
   await expect(page.getByText(/8 pages/i)).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Continue to print settings/i })).toBeDisabled();
@@ -162,6 +164,9 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
 
   await reviewButton.click();
   await expect(page.getByRole("heading", { name: "Review and pay" })).toBeVisible();
+  await expect(page.locator(".payment-card__topline").getByRole("timer")).toBeVisible();
+  await expect(page.locator(".payment-card__topline .session-timer__label")).toHaveCount(0);
+  await expect(page.locator(".payment-card .lock-mark")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Pay\s+AMD\s*60\.00/ })).toBeEnabled();
   await expect(page.getByText(/AMD\s*10\.00/)).toBeVisible();
   await expectNoHorizontalOverflow(page);

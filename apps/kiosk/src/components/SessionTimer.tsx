@@ -29,7 +29,7 @@ export function SessionTimer({ compact = false }: { compact?: boolean }) {
         <strong>{remainingSeconds}</strong>
         <small>{messages.idle.seconds}</small>
       </span>
-      <span className="session-timer__label">{messages.idle.timeRemaining}</span>
+      {compact ? null : <span className="session-timer__label">{messages.idle.timeRemaining}</span>}
     </div>
   );
 }

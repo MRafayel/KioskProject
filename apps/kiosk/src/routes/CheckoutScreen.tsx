@@ -197,12 +197,9 @@ export function CheckoutScreen() {
 
       <aside className="payment-card" aria-labelledby="payment-summary-title">
         <div className="payment-card__topline">
-          <div className="lock-mark" aria-hidden="true">
-            ⌁
-          </div>
-          <SessionTimer />
+          <SessionTimer compact />
+          <h2 id="payment-summary-title">{messages.checkout.paymentSummary}</h2>
         </div>
-        <h2 id="payment-summary-title">{messages.checkout.paymentSummary}</h2>
         <dl className="summary-list">
           <div>
             <dt>{messages.checkout.monochromeSides(quote.printedSides)}</dt>

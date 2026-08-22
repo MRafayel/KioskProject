@@ -113,7 +113,7 @@ export function UploadScreen() {
 
         {visibleFiles.length > 0 ? (
           <ul className="file-card-list" aria-label={messages.upload.uploadedDocuments}>
-            {visibleFiles.map((file, index) => (
+            {visibleFiles.map((file) => (
               <li key={file.id}>
                 <article className="file-card" aria-label={messages.upload.uploadedDocument}>
                   <div className="file-card__icon" aria-hidden="true">
@@ -131,7 +131,6 @@ export function UploadScreen() {
                         </span>
                       )}
                     </div>
-                    {index === 0 ? <SessionTimer compact /> : null}
                   </div>
                   <span
                     className={`file-card__check file-card__check--${statusTone(file)}`}
@@ -147,9 +146,12 @@ export function UploadScreen() {
           <div className="upload-placeholder" aria-live="polite">
             <span className="pulse" aria-hidden="true" />
             <span>{messages.upload.placeholder}</span>
-            <SessionTimer compact />
           </div>
         )}
+
+        <div className="upload-session-timer">
+          <SessionTimer compact />
+        </div>
 
         {/* The phone can keep sending while this screen is open, so the hint
             stays up as long as there is room for another document. */}

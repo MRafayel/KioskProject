@@ -769,12 +769,8 @@ p {
 }
 
 .file-card__details {
-  display: grid;
   min-width: 0;
   flex: 1;
-  align-items: center;
-  gap: 0.7rem;
-  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .file-card__identity {
@@ -799,9 +795,13 @@ p {
   font-size: 0.78rem;
 }
 
-.file-card .session-timer,
-.upload-placeholder .session-timer {
-  flex: 0 0 auto;
+.upload-session-timer {
+  display: flex;
+  min-height: 50px;
+  margin: -0.45rem 0 0.45rem;
+  padding-inline: 0.8rem;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .file-card__check {
@@ -1529,25 +1529,11 @@ p {
   display: flex;
   margin-bottom: 1rem;
   align-items: center;
-  justify-content: space-between;
   gap: 1rem;
 }
 
-.lock-mark {
-  display: grid;
-  width: 58px;
-  height: 58px;
-  margin-bottom: 1rem;
-  place-items: center;
-  border-radius: 1rem;
-  color: var(--green);
-  background: var(--green-light);
-  font-size: 1.8rem;
-  font-weight: 900;
-}
-
-.payment-card__topline .lock-mark {
-  margin-bottom: 0;
+.payment-card__topline h2 {
+  margin: 0;
 }
 
 .price-total--large {

@@ -214,6 +214,7 @@ function formatAmd(amountMinor: number): string {
 }
 
 let listedFileStatus: string;
+let listedFileCount: number;
 let cancelFailuresRemaining: number;
 let cancelIdempotencyKeys: string[];
 let fileDeleteFailuresRemaining: number;
@@ -238,6 +239,7 @@ let printReadsWhilePrinting: number;
 beforeEach(() => {
   window.sessionStorage.clear();
   listedFileStatus = "QUARANTINED";
+  listedFileCount = 1;
   cancelFailuresRemaining = 0;
   cancelIdempotencyKeys = [];
   fileDeleteFailuresRemaining = 0;
@@ -509,19 +511,17 @@ beforeEach(() => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              items: [
-                {
-                  id: "01900000-0000-7000-8000-000000000011",
-                  ordinal: 0,
-                  status: listedFileStatus,
-                  kind: "PDF",
-                  pageCount: listedFileStatus === "READY" ? 8 : null,
-                  processingRevision: 1,
-                  rejectionCode: listedFileStatus === "REJECTED" ? "DOCUMENT_MALFORMED" : null,
-                  sizeBytes: 2_400_000,
-                  createdAt: "2030-01-01T00:00:00.000Z"
-                }
-              ]
+              items: Array.from({ length: listedFileCount }, (_, index) => ({
+                id: "01900000-0000-7000-8000-" + String(index + 11).padStart(12, "0"),
+                ordinal: index,
+                status: listedFileStatus,
+                kind: "PDF",
+                pageCount: listedFileStatus === "READY" ? 8 : null,
+                processingRevision: 1,
+                rejectionCode: listedFileStatus === "REJECTED" ? "DOCUMENT_MALFORMED" : null,
+                sizeBytes: 2_400_000,
+                createdAt: "2030-01-01T00:00:00.000Z"
+              }))
             }),
             { status: 200, headers: { "content-type": "application/json" } }
           )
@@ -574,7 +574,8 @@ describe("kiosk prototype journey", () => {
     expect(screen.getAllByText("Preparing your document")).toHaveLength(1);
     const uploadedFile = screen.getByRole("article", { name: "Uploaded document" });
     expect(within(uploadedFile).queryByText("Preparing your document")).not.toBeInTheDocument();
-    expect(within(uploadedFile).getByRole("timer")).toBeVisible();
+    expect(within(uploadedFile).queryByRole("timer")).not.toBeInTheDocument();
+    expect(screen.getByRole("timer").closest(".upload-session-timer")).not.toBeNull();
     expect(document.querySelector(".topbar [role='timer']")).not.toBeInTheDocument();
     expect(screen.queryByText("4829 1357")).not.toBeInTheDocument();
     expect(screen.queryByText(/8 pages/i)).not.toBeInTheDocument();
@@ -582,6 +583,23 @@ describe("kiosk prototype journey", () => {
     expect(
       screen.queryByRole("button", { name: /simulate phone upload/i })
     ).not.toBeInTheDocument();
+  });
+
+  it("places one session timer after the complete uploaded-file list", async () => {
+    listedFileCount = 2;
+    const user = userEvent.setup();
+    renderKiosk();
+    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(screen.getByRole("button", { name: "Start printing" }));
+
+    expect(await screen.findByText("Document 2.pdf")).toBeVisible();
+    const uploadedFiles = screen.getAllByRole("article", { name: "Uploaded document" });
+    expect(uploadedFiles).toHaveLength(2);
+    for (const uploadedFile of uploadedFiles) {
+      expect(within(uploadedFile).queryByRole("timer")).not.toBeInTheDocument();
+    }
+    expect(screen.getAllByRole("timer")).toHaveLength(1);
+    expect(screen.getByRole("timer").closest(".upload-session-timer")).not.toBeNull();
   });
 
   it("shows a rejected upload without treating it as printable", async () => {
@@ -681,9 +699,12 @@ describe("kiosk prototype journey", () => {
 
     await user.click(screen.getByRole("button", { name: /Review and pay/i }));
     expect(screen.getByRole("heading", { name: "Review and pay" })).toBeVisible();
-    expect(
-      within(screen.getByRole("complementary", { name: "Payment summary" })).getByRole("timer")
-    ).toBeVisible();
+    const paymentSummary = screen.getByRole("complementary", { name: "Payment summary" });
+    const checkoutTimer = within(paymentSummary).getByRole("timer");
+    expect(checkoutTimer).toBeVisible();
+    expect(checkoutTimer.closest(".payment-card__topline")).not.toBeNull();
+    expect(within(paymentSummary).queryByText("Time remaining")).not.toBeInTheDocument();
+    expect(paymentSummary.querySelector(".lock-mark")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: payButtonName(quoteFixture.totalMinor) })
     ).toBeEnabled();
