@@ -52,14 +52,39 @@ describe("telemetry may only make a reading worse", () => {
     expect(result.health).toBe("OFFLINE");
   });
 
-  it("does not overwrite a warning the driver itself raised", () => {
+  it("puts the printer's own reading in front of the driver's guess", () => {
+    // The driver's warning comes from a status string; on the certified Canon
+    // that string reads `Normal` with an empty tray. This comes from the
+    // printer's own supply and tray columns. When the two disagree about a
+    // physical condition, the one that can actually see the paper wins — the
+    // old order let an authoritative PAPER_LOW hide behind a stale TONER_LOW.
     const result = applyPrinterTelemetry(
       { health: "WARNING", warningCode: "TONER_LOW" },
       snapshot({ faults: ["LOW_PAPER"] }),
       { required: true }
     );
-    expect(result.warningCode).toBe("TONER_LOW");
+    expect(result.warningCode).toBe("PAPER_LOW");
     expect(result.health).toBe("WARNING");
+  });
+
+  it("still shows the driver's warning when telemetry has nothing to say", () => {
+    // Authority, not erasure. A deployment with no telemetry link keeps exactly
+    // the behaviour it had.
+    const result = applyPrinterTelemetry(
+      { health: "WARNING", warningCode: "TONER_LOW" },
+      snapshot({ faults: [] }),
+      { required: true }
+    );
+    expect(result.warningCode).toBe("TONER_LOW");
+  });
+
+  it("cannot lift health even while replacing the warning", () => {
+    const result = applyPrinterTelemetry(
+      { health: "OFFLINE", warningCode: "TONER_LOW" },
+      snapshot({ faults: ["LOW_PAPER"] }),
+      { required: true }
+    );
+    expect(result.health).toBe("OFFLINE");
   });
 });
 

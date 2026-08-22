@@ -654,33 +654,6 @@ $QueuePausedPattern = 'Paused|PendingDeletion'
 $QueueOperationalPattern =
   'Normal|Idle|Printing|Busy|IOActive|Processing|Waiting|Initializing|WarmingUp|TonerLow|PaperLow|OutputBinFull'
 
-# Which printer-level conditions are evidence that *this* operation's pages did
-# not all reach the tray. Deliberately narrower than $QueueFaultPattern, because
-# this one can take a confirmed completion away from a customer who is standing
-# at the machine:
-#
-#   * Offline, PowerSave and Paused are absent. A printer that goes to sleep or
-#     is paused *after* it finished is the ordinary end of a healthy print, and
-#     vetoing on those would send every idle-timeout kiosk into operator
-#     recovery.
-#   * TonerLow, PaperLow and OutputBinFull are absent. They are consumable
-#     warnings; the pages still came out, and they already travel as warningCode.
-#   * ServerUnknown is absent: it describes a print server this USB-only
-#     deployment does not have.
-#
-# What is left is the set a device raises when it has stopped putting paper out.
-$OperationFaultPattern =
-  'PaperOut|PaperJam|PaperProblem|DoorOpen|NoToner|UserInterventionRequired|OutOfMemory|ManualFeed|PagePunt|Error'
-# How long the host keeps watching the printer after the last spooler job
-# retires. The spooler deletes a job when the *data* reached the device, not when
-# paper did, so this window is the only place a mid-operation paper-out can still
-# be attributed to the operation that caused it. Paid for once per successful
-# operation, so it is deliberately short and overridable per request.
-$DefaultSettleWatchMilliseconds = 3000
-$MinimumSettleWatchMilliseconds = 0
-$MaximumSettleWatchMilliseconds = 15000
-$SettleWatchPollMilliseconds = 250
-
 function ConvertTo-QueueState {
   param($Printer)
   # The status may carry several flags at once, so order is the classification:
@@ -695,122 +668,6 @@ function ConvertTo-QueueState {
   # callers that can refuse work over it record the raw status when they do, so
   # an unsupported device fails visibly rather than looking unplugged.
   return 'ERROR'
-}
-
-<#
-.SYNOPSIS
-  What a printer-level status means for an operation's pages. Pure.
-
-.DESCRIPTION
-  Returns a failure code when the status says the device stopped producing
-  paper, and $null for everything else — including every consumable warning and
-  every idle, asleep or paused state. Callers use the answer only to take a
-  success claim away, never to grant one, so a status this function does not
-  recognise leaves the queue's own evidence untouched.
-#>
-function Get-PrinterFaultCode {
-  param([string] $Status)
-
-  if ([string]::IsNullOrWhiteSpace($Status)) { return $null }
-  # Order matters: a status may carry several flags at once, and the most
-  # specific cause is the one an operator needs to read.
-  if ($Status -match 'PaperOut') { return 'OUT_OF_PAPER' }
-  if ($Status -match 'PaperJam') { return 'PAPER_JAM' }
-  if ($Status -match 'DoorOpen') { return 'COVER_OPEN' }
-  if ($Status -match $OperationFaultPattern) { return 'DEVICE_ERROR' }
-  return $null
-}
-
-<#
-.SYNOPSIS
-  Apply a printer fault to an operation's outcome. Pure, and downgrade-only.
-
-.DESCRIPTION
-  The single rule: a printer fault may remove a claim that pages were produced,
-  and may never add one. Only a COMPLETED outcome is rewritten, because that is
-  the only outcome that claims success on evidence the printer just contradicted.
-
-  A FAILED or CANCELED outcome that already proved nothing came out is left
-  exactly as it is — it is a definite, refundable answer, and turning it into an
-  ambiguous one would take a refund away from a customer who is owed it. An open
-  operation is left alone because it has not claimed anything yet.
-
-  The rewrite is FAILED/UNCONFIRMED with the fault as the reason, which the
-  settlement reducer turns into RECOVERY_REQUIRED with no refund obligation:
-  some sheets probably did print, so only a person can say what the customer
-  holds.
-#>
-function Merge-DeviceFault {
-  param($Outcome, [string] $FaultCode)
-
-  if ([string]::IsNullOrWhiteSpace($FaultCode)) { return $Outcome }
-  if ([string]$Outcome.state -ne 'COMPLETED') { return $Outcome }
-
-  return @{
-    state = 'FAILED'
-    confidence = 'UNCONFIRMED'
-    failureCode = $FaultCode
-    warningCode = $Outcome.warningCode
-    # The queue's sheet count was only ever the count this host *intended*. A
-    # printer that faulted mid-operation is the proof it was not what came out.
-    sheetsProduced = $null
-    open = 0
-  }
-}
-
-function Get-RequestedSettleMilliseconds {
-  param($Request)
-  $requested = [int](Get-Field -Source $Request -Name 'settleMs' `
-    -Default $DefaultSettleWatchMilliseconds)
-  if ($requested -lt $MinimumSettleWatchMilliseconds) { return $MinimumSettleWatchMilliseconds }
-  if ($requested -gt $MaximumSettleWatchMilliseconds) { return $MaximumSettleWatchMilliseconds }
-  return $requested
-}
-
-<#
-.SYNOPSIS
-  Watch the printer for a fault in the moments after the queue went empty.
-
-.DESCRIPTION
-  This is the only window in which a mid-operation paper-out is still
-  attributable. Before it, the pre-submit queue-state gate has already refused
-  to start on a faulted printer, so any fault seen here appeared while this
-  operation's pages were the device's most recent work. After it, the next
-  customer's job could be the cause and this host would have no way to tell.
-
-  Returns on the first fault: a device that has stopped producing paper does not
-  need watching further, and answering the customer sooner is better than
-  watching an already-decided operation.
-#>
-function Watch-PrinterSettle {
-  param([string] $QueueName, [int] $Milliseconds)
-
-  $seen = New-Object 'System.Collections.Generic.List[string]'
-  $result = @{ faultCode = $null; statuses = @(); elapsedMs = 0 }
-  if ($Milliseconds -le 0) { return $result }
-
-  $watch = [System.Diagnostics.Stopwatch]::StartNew()
-  while ($true) {
-    $printer = Get-Printer -Name $QueueName -ErrorAction SilentlyContinue
-    # A queue that cannot be read says nothing about the pages. It is not a
-    # fault: treating an unreadable status as one would fail healthy prints
-    # whenever the spooler is briefly busy.
-    if ($null -ne $printer) {
-      $status = [string]$printer.PrinterStatus
-      if ($status.Length -gt 0 -and -not $seen.Contains($status)) { $seen.Add($status) }
-      $fault = Get-PrinterFaultCode -Status $status
-      if ($null -ne $fault) {
-        $result.faultCode = $fault
-        break
-      }
-    }
-    if ($watch.ElapsedMilliseconds -ge $Milliseconds) { break }
-    Start-Sleep -Milliseconds $SettleWatchPollMilliseconds
-  }
-
-  $result.statuses = @($seen)
-  $result.elapsedMs = [int]$watch.ElapsedMilliseconds
-  return $result
 }
 
 function Get-StatePath {
@@ -1185,7 +1042,6 @@ function Invoke-Submit {
   param($Request)
   $script:DiagnosticStage = 'submit.queue'
   $waitSeconds = Get-RequestedWaitSeconds -Request $Request
-  $settleMs = Get-RequestedSettleMilliseconds -Request $Request
   # The queue is resolved before anything else so the name handed to the spooler
   # below is one the operator certified, never one the request supplied.
   $printer = Get-QueueOrFail -QueueName $Request.queue
@@ -1205,8 +1061,7 @@ function Invoke-Submit {
       knownJobs = @($existing.jobs).Count
     }
     Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-      -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds `
-      -SettleMilliseconds $settleMs)
+      -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds)
     return
   }
 
@@ -1401,8 +1256,7 @@ function Invoke-Submit {
 
     $script:DiagnosticStage = 'submit.observe'
     Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-      -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds `
-      -SettleMilliseconds $settleMs)
+      -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds)
   } finally {
     Remove-Item -LiteralPath $renderPath -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -1435,12 +1289,11 @@ function Confirm-DeviceJob {
 function Invoke-Status {
   param($Request)
   $printer = Get-QueueOrFail -QueueName $Request.queue
-  # No settle watch here. A status call can arrive long after the pages did, and
-  # a fault seen then may belong to the next customer's job rather than this
-  # one. A fault the submitting call already latched still answers, because the
-  # latch lives in this operation's state file.
+  # Read-only, and it re-reads the operation's own state file rather than the
+  # printer: a status call can arrive long after the pages did, so anything the
+  # device says now may belong to the next customer's job.
   Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-    -QueueName $printer.Name -WaitForCompletion $false -SettleMilliseconds 0)
+    -QueueName $printer.Name -WaitForCompletion $false)
 }
 
 <#
@@ -1522,7 +1375,7 @@ function Invoke-Cancel {
   # A cancellation is already an answer nobody is calling a success, so there is
   # nothing here for a printer fault to take away.
   Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
-    -QueueName $printer.Name -WaitForCompletion $false -SettleMilliseconds 0)
+    -QueueName $printer.Name -WaitForCompletion $false)
 }
 
 <#
@@ -1783,8 +1636,7 @@ function Get-OperationReport {
     [string] $OperationId,
     [string] $QueueName,
     [bool] $WaitForCompletion,
-    [int] $WaitSeconds = $DefaultObserveSeconds,
-    [int] $SettleMilliseconds = $DefaultSettleWatchMilliseconds
+    [int] $WaitSeconds = $DefaultObserveSeconds
   )
 
   $state = Read-OperationState -OperationId $OperationId
@@ -1798,14 +1650,8 @@ function Get-OperationReport {
   # A job this host removed on request cannot be read as one that retired
   # cleanly, however it looks from the queue afterwards.
   $cancelRequested = [bool](Get-Field -Source $state -Name 'cancelRequested' -Default $false)
-  # Both are sticky and belong to this operation alone: they live in this
-  # operation's own state file, so a fault latched here can never be read
-  # against another customer's print, and a second call cannot reach a different
-  # answer or pay for the settle watch twice.
-  $deviceFaultCode = [string](Get-Field -Source $state -Name 'deviceFaultCode' -Default '')
-  $settleWatched = [bool](Get-Field -Source $state -Name 'settleWatched' -Default $false)
-  $settleStatuses = @()
-  $settleElapsedMs = 0
+  # Read from this operation's own state file, so a second call reaches the same
+  # answer and nothing another customer's print did can be read against it.
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
   $polls = 0
 
@@ -1836,33 +1682,15 @@ function Get-OperationReport {
     $outcome = Resolve-OperationOutcome -Observations $observations -CancelRequested $cancelRequested
     $exiting = ([int]$outcome.open -eq 0 -or -not $WaitForCompletion -or (Get-Date) -ge $deadline)
 
-    # The queue has said everything it is going to say. Before that becomes a
-    # confirmed completion, give the device its own chance to contradict it: the
-    # spooler retires a job when the data arrived, which is not the same event
-    # as the paper arriving.
-    if ($exiting -and -not $settleWatched -and [string]$outcome.state -eq 'COMPLETED' `
-        -and [string]$outcome.confidence -eq 'CONFIRMED') {
-      $settle = Watch-PrinterSettle -QueueName $QueueName -Milliseconds $SettleMilliseconds
-      $settleStatuses = @($settle.statuses)
-      $settleElapsedMs = [int]$settle.elapsedMs
-      $settleWatched = $true
-      Set-Field -Target $state -Name 'settleWatched' -Value $true
-      if ($null -ne $settle.faultCode) {
-        $deviceFaultCode = [string]$settle.faultCode
-        Set-Field -Target $state -Name 'deviceFaultCode' -Value $deviceFaultCode
-        Write-LocalEvent -EventName 'operation.device-fault' -Level 'warn' -Fields @{
-          queue = $QueueName
-          faultCode = $deviceFaultCode
-          printerStatuses = $settleStatuses
-          settleMs = $settleElapsedMs
-        }
-      }
-      Write-OperationState -OperationId $OperationId -State $state
-      Add-PhaseMark -Name 'settled'
-    }
-    # Downgrade-only, and applied on every poll so a fault latched by an earlier
-    # call keeps answering for this operation.
-    $outcome = Merge-DeviceFault -Outcome $outcome -FaultCode $deviceFaultCode
+    # Nothing here re-examines the printer after the queue empties.
+    #
+    # A three-second watch of `PrinterStatus` used to sit at this point, on the
+    # theory that a device could contradict the spooler. It never did: across
+    # every recorded run it reported `Normal` identically on the two jobs that
+    # printed short and on the ones that printed in full, and it cost every job
+    # three seconds to learn nothing. The question it was asking — did the pages
+    # actually come out — is now answered by the print engine's own page counter
+    # in the agent, against evidence that exists.
 
     # The evidence the decision was made from, and where the time went, travel
     # back with the answer. That is what lets the control plane explain an
@@ -1894,12 +1722,6 @@ function Get-OperationReport {
         processStartMs = $script:ProcessStartMilliseconds
         phaseMs = $script:PhaseMarks
         jobs = $jobEvidence
-        # What the printer itself said after the queue emptied. Recorded even
-        # when it said nothing interesting: knowing which statuses a driver does
-        # and does not raise is the only way to tune the window above.
-        settleMs = $settleElapsedMs
-        printerStatuses = $settleStatuses
-        deviceFaultCode = $deviceFaultCode
       }
     }
 

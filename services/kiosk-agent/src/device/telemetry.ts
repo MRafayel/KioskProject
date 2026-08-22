@@ -150,7 +150,7 @@ export function applyPrinterTelemetry(
   if (paperPresence(verdict.snapshot.inputs) === "EMPTY") {
     return {
       health: worst(base.health, "OFFLINE"),
-      warningCode: base.warningCode ?? "PAPER_LOW",
+      warningCode: "PAPER_LOW",
       reason: "printer blocked (no paper in any tray)"
     };
   }
@@ -165,7 +165,7 @@ export function applyPrinterTelemetry(
   if (blocking.length > 0) {
     return {
       health: worst(base.health, "OFFLINE"),
-      warningCode: base.warningCode ?? advisoryCodeFor(faults),
+      warningCode: advisoryCodeFor(faults) ?? base.warningCode,
       reason: `printer blocked (${blocking.join(", ")})`
     };
   }
@@ -174,9 +174,14 @@ export function applyPrinterTelemetry(
   if (advisory !== null) {
     return {
       health: worst(base.health, "WARNING"),
-      // The adapter's own code wins if it has one: telemetry adds information,
-      // it does not overwrite what the driver reported about its own device.
-      warningCode: base.warningCode ?? advisory,
+      // Telemetry wins on the physical conditions, and this is the one place
+      // the order matters. The driver's warning is a guess from a status string
+      // — on the certified Canon it reads `Normal` with an empty tray — while
+      // this comes from the printer's own supply and tray columns. Letting the
+      // driver's answer stand in front of it was how an authoritative
+      // `PAPER_LOW` could be hidden behind a stale `TONER_LOW`. The driver's
+      // code still shows through when telemetry has nothing to say.
+      warningCode: advisory ?? base.warningCode,
       reason: `printer warning (${faults.join(", ")})`
     };
   }

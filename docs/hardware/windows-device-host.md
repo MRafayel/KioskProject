@@ -289,37 +289,26 @@ That is a real observed failure: a two-sheet operation whose spooler jobs both
 retired cleanly, on a printer holding one sheet, reported `COMPLETED` /
 `CONFIRMED` with `sheetsProduced: 2`.
 
-So before a confirmed completion is returned, and only then, the host reads the
-printer's own status for a short window (`$DefaultSettleWatchMilliseconds`,
-3000ms, overridable per request as `settleMs`). A fault seen in that window is
-latched into the operation's state file and the outcome becomes `FAILED` /
-`UNCONFIRMED` carrying the device's reason, which the settlement reducer turns
-into `RECOVERY_REQUIRED` with **no refund obligation** — some sheets almost
-certainly did print, so what the customer holds is a question for a person.
+That question is no longer asked here, because this host cannot answer it.
 
-Four things keep this from condemning the wrong operation:
+A three-second watch of `PrinterStatus` used to sit before every confirmed
+completion, latching any fault it saw into the operation's state file. It never
+saw one. Across every recorded run it returned `printerStatuses: ["Normal"]` —
+identically on the two operations that printed short and on the ones that
+printed in full — while costing every job three seconds to learn nothing. The
+driver simply does not surface the print engine's state through that field.
 
-- **It can only ever downgrade.** Only a `COMPLETED` outcome is rewritten. A
-  failure that already proved nothing came out stays a definite, refundable
-  failure; a cancellation and an open operation are untouched.
-- **A stale fault cannot reach it.** `submit` already refuses to start on a
-  queue that is not `READY`, so a printer that was already faulted never gets as
-  far as producing an outcome to veto.
-- **The latch is per-operation.** It lives in that operation's own state file,
-  so it can never be read against another customer's print, and a repeated call
-  returns the same answer without watching again.
-- **The pattern is narrow.** `$OperationFaultPattern` excludes `Offline`,
-  `PowerSave` and `Paused` — a printer that sleeps after finishing is a healthy
-  print — and excludes `TonerLow`, `PaperLow` and `OutputBinFull`, which are
-  consumable warnings that already travel as `warningCode`.
+The claim it was trying to check — that paper actually came out — is now checked
+by the agent against `prtMarkerLifeCount`, the print engine's own page counter,
+read over the printer's telemetry link either side of the operation. That is
+evidence about paper rather than about a queue, and it enforces the same
+downgrade-only rule: a counter short of what the job needed removes a success
+claim, and a healthy counter grants nothing. See
+[printer-telemetry-verification.md](printer-telemetry-verification.md).
 
-`status` and `cancel` pass `settleMs: 0`. A status call can arrive long after the
-pages did, and a fault seen then may belong to the next customer's job.
-
-Every window records `settleMs`, `printerStatuses` and `deviceFaultCode` in the
-diagnostics, whether or not it found anything. Which statuses a given driver
-actually raises is otherwise unknowable without standing at the machine, and it
-is what the window length should be tuned from.
+What remains here is what this host can still see better than anything else: the
+queue's own state, the identity and fate of each spooled job, and whether the
+device accepted the work at all.
 
 ### Queue state
 

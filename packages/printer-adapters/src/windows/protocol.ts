@@ -273,7 +273,6 @@ export function readHostBinding(value: unknown): DeviceHostBinding {
 const MAX_DIAGNOSTIC_JOBS = 16;
 const MAX_DIAGNOSTIC_PHASES = 40;
 const MAX_PHASE_NAME_LENGTH = 64;
-const MAX_DIAGNOSTIC_STATUSES = 8;
 
 export function readDiagnostics(value: unknown): PrintDeviceDiagnostics | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -309,24 +308,13 @@ export function readDiagnostics(value: unknown): PrintDeviceDiagnostics | null {
     }
   }
 
-  const printerStatuses: string[] = [];
-  if (Array.isArray(diagnostics.printerStatuses)) {
-    for (const entry of diagnostics.printerStatuses.slice(0, MAX_DIAGNOSTIC_STATUSES)) {
-      const status = boundedString(entry);
-      if (status !== null) printerStatuses.push(status);
-    }
-  }
-
   return {
     queueName: boundedString(diagnostics.queue),
     pollCount: boundedCount(diagnostics.pollCount),
     processStartMs: boundedCount(diagnostics.processStartMs),
     phaseMs,
     jobs,
-    stage: boundedString(diagnostics.stage),
-    settleMs: boundedCount(diagnostics.settleMs),
-    printerStatuses,
-    deviceFaultCode: boundedString(diagnostics.deviceFaultCode)
+    stage: boundedString(diagnostics.stage)
   };
 }
 

@@ -490,3 +490,67 @@ nothing can know a tray is empty sooner than it looks. Lowering
 `PRINTER_TELEMETRY_POLL_SECONDS` is the direct knob. SNMP traps would remove it
 entirely and are rejected — they need an inbound listener on NIC2, which the
 threat model forbids.
+
+## The USB/SNMP boundary, settled (22 Aug 2026)
+
+With the engine counter in place there were two sources of truth for the
+printer's physical state, and the weaker one had precedence. Both are resolved.
+
+**Removed — the settle window.** `Watch-PrinterSettle`, `Get-PrinterFaultCode`,
+`Merge-DeviceFault`, `Get-RequestedSettleMilliseconds`, `$OperationFaultPattern`,
+and the `settleMs` / `printerStatuses` / `deviceFaultCode` diagnostics. It read
+`PrinterStatus` for three seconds before every confirmed completion and never
+once saw a fault: `["Normal"]` identically on the two jobs that printed short
+and on every job that printed in full. It cost a flat **3.0 s per job** to learn
+nothing. Its question is now answered by `prtMarkerLifeCount` under the same
+downgrade-only rule, against evidence that exists.
+
+**Fixed — warning precedence.** `applyPrinterTelemetry` used
+`base.warningCode ?? advisory`, so the driver's guess stood in front of the
+printer's own supply and tray columns. An authoritative `PAPER_LOW` could hide
+behind a stale `TONER_LOW`. Now `advisory ?? base.warningCode`: telemetry is
+authoritative for physical conditions, and the driver's code still shows through
+where telemetry has nothing to say, so a deployment without the cable is
+unchanged.
+
+**Retained deliberately.** Everything the driver can see that SNMP cannot:
+
+| Signal | Why it stays |
+|---|---|
+| `Test-QueueApproved`, Local/unshared/`^USB\d+$` | The certification boundary. SNMP has no opinion on which queue may be printed to. |
+| `Get-QueueOrFail`, `ConvertTo-QueueState` | Whether the Windows queue exists, is paused, or is in error. A deleted or paused queue swallows a job silently and no printer MIB reports it. |
+| `submit.queue-state` pre-submit gate | Refuses to hand work to a queue that is not `READY`. |
+| `Test-QueueA4`, `Test-QueueDuplex` | Driver capability, not device state. |
+| Job identity, `Resolve-JobOutcome`, `Confirm-DeviceJob`, cancellation, the `operationId` state file | Which spooled job is whose, and what became of it. The MIB counts marks; it cannot tell one customer's job from another's. |
+| `pagesPrinted` | Always `0` on this driver, and kept anyway: it only ever *blocks* a "proved zero" claim, so removing it would make definite failures easier to reach and weaken refund safety. |
+| `getHealth()` as a liveness probe | A queue that will not answer withdraws approval. SNMP answering says nothing about a broken Windows print path. |
+
+**The boundary:** USB owns *can this job be handed over, and what became of the
+spooled job*. SNMP owns *what is physically true of the printer and whether the
+pages came out*. Neither is consulted about the other's question.
+
+## Payment → print, measured (22 Aug 2026)
+
+From real jobs, before the settle removal:
+
+| Stage | Time |
+|---|---|
+| payment captured → print job created | 1.6 s |
+| job created → agent claims it | 0.2–0.6 s |
+| dispatch → completion (1 sheet) | 11.7–13.7 s |
+| dispatch → completion (5 sheets) | 28 s |
+
+Device-side `phaseMs` for a one-page job (9.6 s of host time):
+
+| Phase | Elapsed | Cost |
+|---|---|---|
+| process start + `requestRead` | 0.33 → 0.14 s | PowerShell startup |
+| `queueResolved` | 0.81 s | |
+| `printingRuntimeReady` | 1.29 s | WinRT init ≈ 0.5 s |
+| `rendered` | 2.63 s | PDF render ≈ 1.3 s |
+| `startDoc` → `endDoc` | 2.96 → 5.28 s | device handover ≈ 2.3 s |
+| `settled` | 9.59 s | queue drain ≈ 1.3 s + **settle 3.0 s** |
+
+Removing the settle window takes a flat 3.0 s off every job — about **22 % of
+the 13.7 s** payment-to-completion time for a single sheet, with no new surface
+and nothing crossing the payment boundary.

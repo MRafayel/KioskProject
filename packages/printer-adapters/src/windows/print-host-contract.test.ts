@@ -113,21 +113,41 @@ describe("Windows print host prohibitions", () => {
   });
 
   /**
-   * The printer-status veto exists to remove success claims, never to grant
-   * them. Both halves of that are structural: only a COMPLETED outcome is
-   * rewritten, and the states that mean "asleep" or "paused" are absent from
-   * the pattern that triggers it. A printer that powers down after finishing is
-   * the ordinary end of a healthy print.
+   * This host no longer judges whether paper came out, and must not start again.
+   *
+   * A three-second watch of `PrinterStatus` used to run before every confirmed
+   * completion. It never once saw a fault — `["Normal"]` on the jobs that
+   * printed short and on the ones that printed in full — because this driver
+   * does not surface the print engine through that field. The question is now
+   * answered by the engine's own page counter in the agent, against evidence
+   * that exists.
+   *
+   * Guarded structurally because the failure mode is silent: a re-added watch
+   * would cost every job three seconds and still answer `Normal`, which reads
+   * as a working check.
    */
-  it("keeps the printer-status veto one-directional and narrow", () => {
-    expect(hostSource).toContain("if ([string]$Outcome.state -ne 'COMPLETED') { return $Outcome }");
-    const pattern = hostSource.match(/\$OperationFaultPattern\s*=\s*\n?\s*'([^']+)'/);
-    expect(pattern).not.toBeNull();
-    for (const benign of ["Offline", "PowerSave", "Paused", "TonerLow", "PaperLow", "OutputBinFull"]) {
-      expect(pattern?.[1]).not.toContain(benign);
+  it("does not re-examine the printer after the queue empties", () => {
+    for (const removed of [
+      "Watch-PrinterSettle",
+      "Merge-DeviceFault",
+      "Get-PrinterFaultCode",
+      "$OperationFaultPattern",
+      "settleMs"
+    ]) {
+      expect(hostSource).not.toContain(removed);
     }
-    for (const fault of ["PaperOut", "PaperJam", "DoorOpen"]) {
-      expect(pattern?.[1]).toContain(fault);
+  });
+
+  /**
+   * The queue-state vocabulary stays, and stays narrow. It is about the *queue*
+   * — can this job be handed over at all — which is the one thing SNMP cannot
+   * see, and it must not drift into judging the paper.
+   */
+  it("keeps sleep and pause out of the queue fault vocabulary", () => {
+    const pattern = hostSource.match(/\$QueueFaultPattern\s*=\s*\n?\s*'([^']+)'/);
+    expect(pattern).not.toBeNull();
+    for (const benign of ["TonerLow", "PaperLow", "OutputBinFull"]) {
+      expect(pattern?.[1]).not.toContain(benign);
     }
   });
 

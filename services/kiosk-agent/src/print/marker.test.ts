@@ -312,12 +312,12 @@ describe("what the evidence is allowed to do to a result", () => {
   it("keeps diagnostics the device host already gathered", () => {
     const withStage: PrintOperationStatus = {
       ...claimed,
-      deviceDiagnostics: { queueName: "CanonLBP361_UFR_II", settleMs: 3090 }
+      deviceDiagnostics: { queueName: "CanonLBP361_UFR_II", pollCount: 4 }
     };
     const result = applyMarkerEvidence(withStage, evidence(100, 104));
     expect(result.deviceDiagnostics).toMatchObject({
       queueName: "CanonLBP361_UFR_II",
-      settleMs: 3090,
+      pollCount: 4,
       marker: { outcome: "SHORTFALL" }
     });
   });
