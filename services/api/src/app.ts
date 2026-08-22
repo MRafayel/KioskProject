@@ -223,6 +223,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const printerReadiness = new PrinterReadinessGate({
     clock,
     maxSilenceMs: options.environment.AGENT_HEARTBEAT_SECONDS * 3 * 1_000,
+    maxTelemetryAgeMs: options.environment.PRINTER_TELEMETRY_MAX_AGE_SECONDS * 1_000,
     logger: app.log
   });
 

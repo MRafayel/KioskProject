@@ -111,6 +111,12 @@ model Printer {
   capabilityHash String?   @map("capability_hash") @db.VarChar(64)
   lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
   lastHealthyAt  DateTime? @map("last_healthy_at")
+  /// When the printer's own telemetry was last actually read — not when the
+  /// agent last spoke. `lastSeenAt` proves the kiosk is alive and is refreshed
+  /// every heartbeat whether or not the printer answered, so it cannot tell a
+  /// one-second-old SNMP reading from a one-minute-old one. Payment needs that
+  /// difference; `null` means this printer has no telemetry link at all.
+  telemetryAt    DateTime? @map("telemetry_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
   kiosk          Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)

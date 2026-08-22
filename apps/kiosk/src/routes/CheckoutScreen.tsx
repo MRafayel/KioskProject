@@ -237,7 +237,12 @@ export function CheckoutScreen() {
         </button>
         {startFailure ? (
           <p className="payment-card__error" role="alert">
-            {messages.checkout.paymentStartFailed}
+            {startFailure === "PRINTER_UNAVAILABLE"
+              ? // The last gate before money moves refused. Telling the customer
+                // their payment failed would send them to try their card again
+                // on a machine whose problem is the paper.
+                messages.welcome.printerUnavailableError
+              : messages.checkout.paymentStartFailed}
           </p>
         ) : null}
         <p className="payment-card__note">{messages.checkout.demoNotice}</p>

@@ -27,6 +27,11 @@ export type PrinterBlockReason =
   | "PRINTER_OFFLINE"
   /** Nothing has been heard from this kiosk's agent recently enough. */
   | "PRINTER_SILENT"
+  /**
+   * The agent is alive and its printer looks well, but the reading behind that
+   * is too old to spend money on. Only ever raised at payment.
+   */
+  | "PRINTER_TELEMETRY_STALE"
   /** The agent is reporting, but could not bind a certified printer. */
   | "PRINTER_NOT_READY";
 
@@ -38,6 +43,12 @@ export interface ApprovedPrinterState {
   readonly health: string;
   readonly warningCode: string | null;
   readonly lastSeenAt: Date;
+  /**
+   * When the printer's own telemetry was last read, or `null` for a kiosk with
+   * no telemetry link. Null is not staleness: it is a printer nobody can ask,
+   * and treating it as expired would close every deployment without the cable.
+   */
+  readonly telemetryAt?: Date | null;
 }
 
 /**
@@ -56,6 +67,13 @@ export function classifyPrinterReadiness(input: {
   readonly hasAnyPrinter: boolean;
   readonly now: Date;
   readonly maxSilenceMs: number;
+  /**
+   * How old the underlying telemetry reading may be, or `null` to accept any
+   * age. Null is the session-start setting: turning a customer away at the
+   * welcome screen because a poll is due costs a print for nothing, since the
+   * payment check will look again before any money moves.
+   */
+  readonly maxTelemetryAgeMs?: number | null;
 }): PrinterReadiness {
   if (!input.approved) {
     // Rows exist but none is approved: this kiosk had a certified printer and
@@ -82,6 +100,23 @@ export function classifyPrinterReadiness(input: {
     };
   }
 
+  // The printer looks well. Whether that is still true depends on how long ago
+  // anybody checked, and at payment that question has to be asked out loud.
+  //
+  // A healthy verdict is exactly the one that ages badly: the tray was full when
+  // it was taken, and a customer who emptied it since is carried through
+  // checkout by a reading that predates them. Health being OFFLINE already
+  // blocks above, so this only ever catches the case where the last thing we
+  // heard was good news and it is no longer recent enough to spend money on.
+  if (
+    input.maxTelemetryAgeMs !== null &&
+    input.maxTelemetryAgeMs !== undefined &&
+    input.approved.telemetryAt != null &&
+    input.now.getTime() - input.approved.telemetryAt.getTime() > input.maxTelemetryAgeMs
+  ) {
+    return { ready: false, reason: "PRINTER_TELEMETRY_STALE" };
+  }
+
   // READY and WARNING both sell. A warning is a note for whoever restocks the
   // machine — toner running down, a tray that will need paper — and turning
   // customers away for one would close the kiosk for a condition it can still
@@ -96,6 +131,20 @@ export interface PrinterReadinessGateOptions {
    * that has stopped talking.
    */
   readonly maxSilenceMs: number;
+  /**
+   * How old the telemetry reading may be at the last check before money moves.
+   *
+   * Must comfortably exceed the agent's heartbeat interval plus its telemetry
+   * poll interval, because between changes the stored reading ages by both: the
+   * agent only learns on a poll and only says so on a beat. Set it below that
+   * sum and healthy kiosks start refusing payments on a schedule.
+   *
+   * It is a backstop, not the mechanism that closes the empty-tray race — the
+   * agent beats immediately when telemetry changes, so a real fault arrives in
+   * about a second. What this catches is a poller that has wedged while its
+   * last reading still says the printer is fine.
+   */
+  readonly maxTelemetryAgeMs: number;
   readonly clock: { now(): Date };
   /**
    * Optional, and only ever told about the device row this gate read. A refusal
@@ -120,11 +169,21 @@ export interface PrinterReadinessGateOptions {
 export class PrinterReadinessGate {
   public constructor(private readonly options: PrinterReadinessGateOptions) {}
 
+  /**
+   * `strict` is the difference between the two places this runs.
+   *
+   * Session start reads the cached verdict and accepts whatever age it has: a
+   * customer turned away at the welcome screen because a poll was due has lost a
+   * print for nothing, and payment will look again before any money moves.
+   * Payment is that second look, and it is the last one — past it a failure
+   * belongs to recovery and refund settlement, not to a refusal.
+   */
   public async assertReady(
     transaction: Prisma.TransactionClient,
-    kioskId: string
+    kioskId: string,
+    options: { readonly strict?: boolean } = {}
   ): Promise<void> {
-    const readiness = await this.read(transaction, kioskId);
+    const readiness = await this.read(transaction, kioskId, options);
     if (readiness.ready) return;
     throw new ApiError(
       409,
@@ -136,11 +195,12 @@ export class PrinterReadinessGate {
 
   public async read(
     transaction: Prisma.TransactionClient,
-    kioskId: string
+    kioskId: string,
+    options: { readonly strict?: boolean } = {}
   ): Promise<PrinterReadiness> {
     const approved = await transaction.printer.findFirst({
       where: { kioskId, approval: "APPROVED" },
-      select: { health: true, warningCode: true, lastSeenAt: true }
+      select: { health: true, warningCode: true, lastSeenAt: true, telemetryAt: true }
     });
     // Only asked when there is no approved printer, which is the rare case.
     const hasAnyPrinter =
@@ -151,7 +211,8 @@ export class PrinterReadinessGate {
       approved,
       hasAnyPrinter,
       now,
-      maxSilenceMs: this.options.maxSilenceMs
+      maxSilenceMs: this.options.maxSilenceMs,
+      maxTelemetryAgeMs: options.strict ? this.options.maxTelemetryAgeMs : null
     });
 
     // The whole basis of the decision, so a kiosk that turned somebody away —
@@ -162,11 +223,15 @@ export class PrinterReadinessGate {
     const fields = {
       kioskId,
       decision: readiness.ready ? "PASS" : readiness.reason,
+      strict: options.strict === true,
       approvedPrinter: approved !== null,
       hasAnyPrinter,
       health: approved?.health ?? null,
       warningCode: approved?.warningCode ?? null,
       ageMs: approved ? now.getTime() - approved.lastSeenAt.getTime() : null,
+      telemetryAgeMs: approved?.telemetryAt
+        ? now.getTime() - approved.telemetryAt.getTime()
+        : null,
       maxSilenceMs: this.options.maxSilenceMs
     };
     if (readiness.ready) this.options.logger?.debug(fields, "printer readiness gate passed");

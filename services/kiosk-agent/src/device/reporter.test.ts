@@ -496,6 +496,9 @@ describe("printer telemetry in the report", () => {
         reads += 1;
         return faults(["LOW_PAPER"]);
       },
+      observedAt: () => null,
+      onChange: () => undefined,
+      readNow: () => Promise.resolve(null),
       start: () => undefined,
       close: () => undefined
     };
@@ -508,8 +511,18 @@ describe("printer telemetry in the report", () => {
   });
 });
 
-function telemetrySource(verdict: TelemetryVerdict): PrinterTelemetrySource {
-  return { current: () => verdict, start: () => undefined, close: () => undefined };
+function telemetrySource(
+  verdict: TelemetryVerdict,
+  observedAt: Date | null = null
+): PrinterTelemetrySource {
+  return {
+    current: () => verdict,
+    observedAt: () => observedAt,
+    onChange: () => undefined,
+    readNow: () => Promise.resolve(null),
+    start: () => undefined,
+    close: () => undefined
+  };
 }
 
 function faults(list: ("LOW_PAPER" | "NO_PAPER")[]): TelemetryVerdict {

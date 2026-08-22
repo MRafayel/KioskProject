@@ -22,16 +22,18 @@ import {
 
 const NOW = new Date("2026-08-22T10:00:00.000Z");
 const MAX_SILENCE_MS = 90_000;
+const MAX_TELEMETRY_AGE_MS = 90_000;
 
 function classify(
   approved: ApprovedPrinterState | null,
-  options: { hasAnyPrinter?: boolean; now?: Date } = {}
+  options: { hasAnyPrinter?: boolean; now?: Date; strict?: boolean } = {}
 ) {
   return classifyPrinterReadiness({
     approved,
     hasAnyPrinter: options.hasAnyPrinter ?? approved !== null,
     now: options.now ?? NOW,
-    maxSilenceMs: MAX_SILENCE_MS
+    maxSilenceMs: MAX_SILENCE_MS,
+    maxTelemetryAgeMs: options.strict ? MAX_TELEMETRY_AGE_MS : null
   });
 }
 
@@ -157,7 +159,8 @@ describe("the gate as the services use it", () => {
   it("refuses with a reason the kiosk can turn into words", async () => {
     const gate = new PrinterReadinessGate({
       clock: { now: () => NOW },
-      maxSilenceMs: MAX_SILENCE_MS
+      maxSilenceMs: MAX_SILENCE_MS,
+      maxTelemetryAgeMs: MAX_TELEMETRY_AGE_MS
     });
 
     const error = await gate
@@ -176,7 +179,8 @@ describe("the gate as the services use it", () => {
   it("says nothing and returns when the printer is fine", async () => {
     const gate = new PrinterReadinessGate({
       clock: { now: () => NOW },
-      maxSilenceMs: MAX_SILENCE_MS
+      maxSilenceMs: MAX_SILENCE_MS,
+      maxTelemetryAgeMs: MAX_TELEMETRY_AGE_MS
     });
     await expect(gate.assertReady(database(printer()), "kiosk-1")).resolves.toBeUndefined();
   });
@@ -185,7 +189,8 @@ describe("the gate as the services use it", () => {
     let counted = 0;
     const gate = new PrinterReadinessGate({
       clock: { now: () => NOW },
-      maxSilenceMs: MAX_SILENCE_MS
+      maxSilenceMs: MAX_SILENCE_MS,
+      maxTelemetryAgeMs: MAX_TELEMETRY_AGE_MS
     });
     await gate.assertReady(database(printer(), () => (counted += 1)), "kiosk-1");
     // The count is the rare path. Session creation runs this on every customer.
@@ -204,3 +209,60 @@ function database(approved: ApprovedPrinterState | null, onCount?: () => void) {
     }
   } as unknown as Parameters<PrinterReadinessGate["assertReady"]>[0];
 }
+
+/**
+ * The 22 August race: healthy session, tray emptied on the way to checkout, and
+ * the customer paid anyway.
+ *
+ * Two things had to be true for that to happen. The reading the gate consults
+ * was taken before the tray was touched, and nothing recorded how old it was —
+ * `lastSeenAt` refreshes every beat whether or not the printer answered, so a
+ * minute-old SNMP reading sat inside a one-second-old row. This is the second
+ * look, and it is the last one a customer can be refused by.
+ */
+describe("the check before money moves", () => {
+  it("lets a fresh healthy reading through", () => {
+    const telemetryAt = new Date(NOW.getTime() - 5_000);
+    expect(classify(printer({ telemetryAt }), { strict: true })).toEqual({ ready: true });
+  });
+
+  it("refuses to spend money on a reading nobody has refreshed", () => {
+    // Not a fault: the printer may well be fine. It is the *claim* that has
+    // expired, and payment is the wrong moment to accept an expired one.
+    const telemetryAt = new Date(NOW.getTime() - MAX_TELEMETRY_AGE_MS - 1);
+    expect(classify(printer({ telemetryAt }), { strict: true })).toEqual({
+      ready: false,
+      reason: "PRINTER_TELEMETRY_STALE"
+    });
+  });
+
+  it("does not apply the same bar at session start", () => {
+    // The customer has spent nothing yet and payment will look again. Refusing
+    // here costs a print and prevents nothing.
+    const telemetryAt = new Date(NOW.getTime() - MAX_TELEMETRY_AGE_MS - 1);
+    expect(classify(printer({ telemetryAt }))).toEqual({ ready: true });
+  });
+
+  it("keeps selling on a kiosk that has no telemetry link at all", () => {
+    // Null is not an expired reading, it is a printer nobody can ask. Reading it
+    // as staleness would close every deployment without the cable at checkout.
+    expect(classify(printer({ telemetryAt: null }), { strict: true })).toEqual({ ready: true });
+  });
+
+  it("still names the paper when the printer has actually said so", () => {
+    // Health is decided before freshness. A printer that reported empty gets the
+    // specific message, not a vaguer one about the reading being old.
+    const telemetryAt = new Date(NOW.getTime() - MAX_TELEMETRY_AGE_MS - 1);
+    expect(
+      classify(printer({ health: "OFFLINE", warningCode: "PAPER_LOW", telemetryAt }), {
+        strict: true
+      })
+    ).toEqual({ ready: false, reason: "PRINTER_OUT_OF_PAPER" });
+  });
+
+  it("reopens as soon as a fresh reading lands", () => {
+    const stale = new Date(NOW.getTime() - MAX_TELEMETRY_AGE_MS - 1);
+    expect(classify(printer({ telemetryAt: stale }), { strict: true }).ready).toBe(false);
+    expect(classify(printer({ telemetryAt: NOW }), { strict: true }).ready).toBe(true);
+  });
+});

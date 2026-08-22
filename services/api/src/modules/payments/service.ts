@@ -145,7 +145,14 @@ export class PaymentService {
             //
             // The idempotency replay above returns first, so retrying a payment
             // that already exists is never re-gated.
-            await this.options.printerReadiness?.assertReady(transaction, input.kioskId);
+            // The last refusal a customer can be given. Strict here and nowhere
+            // else: this is the final moment before money moves, so the reading
+            // it decides on has to be recent enough to still describe the
+            // machine. Everything after this point settles through recovery and
+            // refund, never through a refusal.
+            await this.options.printerReadiness?.assertReady(transaction, input.kioskId, {
+              strict: true
+            });
 
             const open = await transaction.payment.findFirst({
               where: { sessionId: session.id, status: { in: OPEN_STATUSES } },

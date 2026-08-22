@@ -58,6 +58,8 @@ interface DeviceReading {
   warningCode: "TONER_LOW" | "PAPER_LOW" | "OUTPUT_TRAY_FULL" | null;
   capabilities: PrinterCapabilitiesSnapshot | null;
   capabilityHash: string;
+  /** When the telemetry behind `health` was read, or null with no link. */
+  telemetryAt: string | null;
 }
 
 /**
@@ -91,9 +93,40 @@ export class DeviceRegistryReporter {
   private reportedHash: string | null = null;
   private reportedTelemetryReason: string | null = null;
 
+  private pendingNudge = false;
+
   public constructor(private readonly options: DeviceRegistryReporterOptions) {
     this.fetch = options.fetch ?? globalThis.fetch;
     this.allowlist = parseQueueAllowlist(options.environment.PRINTER_QUEUE_ALLOWLIST);
+    // A tray that empties between two scheduled beats would otherwise wait out
+    // the rest of the interval before the control plane heard about it, and a
+    // customer reaching payment inside that window would be sold a print the
+    // machine could not produce. Telemetry says when something moved; this turns
+    // that into a beat now rather than a beat later.
+    this.options.telemetry?.onChange(() => this.nudge());
+  }
+
+  /**
+   * Bring the next beat forward.
+   *
+   * Coalescing rather than beating per change: several readings can move at
+   * once when a job ends, and the control plane wants the settled answer, not
+   * three of them. A change arriving mid-beat sets the flag instead, because
+   * that beat may already have read its telemetry before the change landed.
+   */
+  private nudge(): void {
+    if (this.stopped) return;
+    if (this.running) {
+      this.pendingNudge = true;
+      return;
+    }
+    if (this.timer) clearTimeout(this.timer);
+    this.schedule(0);
+  }
+
+  /** When telemetry last actually heard from the printer. */
+  private telemetryAt(): string | null {
+    return this.options.telemetry?.observedAt()?.toISOString() ?? null;
   }
 
   public start(): void {
@@ -161,7 +194,8 @@ export class DeviceRegistryReporter {
         health: "OFFLINE",
         warningCode: null,
         capabilities: null,
-        capabilityHash: NO_CAPABILITY_HASH
+        capabilityHash: NO_CAPABILITY_HASH,
+        telemetryAt: this.telemetryAt()
       };
     }
 
@@ -177,7 +211,8 @@ export class DeviceRegistryReporter {
         health: "OFFLINE",
         warningCode: null,
         capabilities: null,
-        capabilityHash: NO_CAPABILITY_HASH
+        capabilityHash: NO_CAPABILITY_HASH,
+        telemetryAt: this.telemetryAt()
       };
     }
 
@@ -210,7 +245,8 @@ export class DeviceRegistryReporter {
       health: telemetry.health,
       warningCode: telemetry.warningCode,
       capabilities,
-      capabilityHash: capabilitySnapshotHash(capabilities)
+      capabilityHash: capabilitySnapshotHash(capabilities),
+      telemetryAt: this.telemetryAt()
     };
   }
 
@@ -278,7 +314,8 @@ export class DeviceRegistryReporter {
       queueName: reading.queueName,
       printerHealth: reading.health,
       capabilityHash: reading.capabilityHash,
-      activeOperations: this.options.activeOperations?.() ?? 0
+      activeOperations: this.options.activeOperations?.() ?? 0,
+      telemetryAt: reading.telemetryAt
     });
 
     if (response?.status === 409) {
@@ -377,7 +414,11 @@ export class DeviceRegistryReporter {
 
   private async tick(): Promise<void> {
     await this.runOnce();
-    this.schedule(this.interval);
+    // A change that landed while the beat was in flight gets its own beat
+    // straight away; that beat may have read its telemetry before the change.
+    const soon = this.pendingNudge;
+    this.pendingNudge = false;
+    this.schedule(soon ? 0 : this.interval);
   }
 
   private get interval(): number {

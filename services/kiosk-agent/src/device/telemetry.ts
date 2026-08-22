@@ -238,6 +238,34 @@ export function describeEngine(snapshot: PrinterTelemetrySnapshot): string {
 export interface PrinterTelemetrySource {
   /** The latest verdict, aged against the clock. Never blocks. */
   current(): TelemetryVerdict;
+  /**
+   * When this source last actually heard from the printer, or `null` if it
+   * never has.
+   *
+   * Deliberately the last *successful* reading rather than the last attempt, and
+   * deliberately not cleared when an attempt fails. A link that has started
+   * failing keeps an ageing timestamp, which is what lets the control plane
+   * refuse a payment on stale telemetry; a kiosk with no link at all keeps
+   * `null`, which is not staleness and must never be read as it.
+   */
+  observedAt(): Date | null;
+  /**
+   * Called when the folded health could have changed, so the caller can report
+   * it now instead of at the next scheduled beat. The whole race this closes is
+   * the minute between a tray emptying and a heartbeat carrying that fact.
+   */
+  onChange(listener: () => void): void;
+  /**
+   * One reading taken now, bypassing the cache. `null` when the printer could
+   * not be reached, or when this kiosk has no telemetry link at all.
+   *
+   * The cache is the right answer for health, which describes a kiosk over
+   * minutes. It is the wrong answer for a page counter around a job that lasted
+   * seconds — a reading from before the job started would be compared against
+   * itself. This is the only caller that needs the wire, and it needs it twice
+   * per print rather than continuously.
+   */
+  readNow(): Promise<PrinterTelemetrySnapshot | null>;
   start(): void;
   close(): void;
 }
@@ -277,6 +305,11 @@ export function createPrinterTelemetrySource(
     // place the difference is visible.
     return {
       current: () => ({ kind: "DISABLED" }),
+      // Never observed, and never will be. Distinct from a link that has gone
+      // quiet, which keeps an ageing timestamp instead.
+      observedAt: () => null,
+      onChange: () => undefined,
+      readNow: () => Promise.resolve(null),
       start: () =>
         options.logger.warn(
           { telemetry: "disabled" },
@@ -289,8 +322,11 @@ export function createPrinterTelemetrySource(
   const client = options.client ?? buildClient(environment, now);
   let latest: TelemetryVerdict = { kind: "UNAVAILABLE", reason: "TIMEOUT", consecutiveFailures: 0 };
   let readAt: number | null = null;
+  let lastSnapshotAt: Date | null = null;
   let failures = 0;
   let lastLogged = "";
+  let lastSignature = healthSignature(latest);
+  const listeners: (() => void)[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = true;
   let running = false;
@@ -298,13 +334,25 @@ export function createPrinterTelemetrySource(
   const record = (verdict: TelemetryVerdict): void => {
     latest = verdict;
     readAt = now().getTime();
+    if (verdict.kind === "SNAPSHOT") lastSnapshotAt = verdict.snapshot.readAt;
+
     const summary = describeVerdict(verdict);
     // Logged on change only. A kiosk polling every thirty seconds would
     // otherwise write the same line two thousand times a day, and the line that
     // matters is the one where something moved.
-    if (summary === lastLogged) return;
-    lastLogged = summary;
-    options.logger.info({ telemetry: summary }, "printer telemetry changed");
+    if (summary !== lastLogged) {
+      lastLogged = summary;
+      options.logger.info({ telemetry: summary }, "printer telemetry changed");
+    }
+
+    // Wake the reporter only when this reading could change the *fold*, not
+    // whenever any field moved. The marker counter advances on every page and
+    // the engine flips throughout a job; neither decides health, and beating on
+    // them would put a request per page on the control plane for nothing.
+    const signature = healthSignature(verdict);
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    for (const listener of listeners) listener();
   };
 
   const poll = async (): Promise<void> => {
@@ -348,6 +396,22 @@ export function createPrinterTelemetrySource(
         reason: "STALE",
         consecutiveFailures: Math.max(failures, FAILURES_BEFORE_UNAVAILABLE)
       };
+    },
+    observedAt: () => lastSnapshotAt,
+    onChange(listener: () => void): void {
+      listeners.push(listener);
+    },
+    async readNow(): Promise<PrinterTelemetrySnapshot | null> {
+      // Deliberately not folded into the cache. A reading taken mid-job is
+      // about that job, and letting it set the kiosk's health would let a
+      // printer that asserts `noPaper` on its last sheet close the kiosk on
+      // the strength of a job that finished.
+      try {
+        const result = await client.read();
+        return result.outcome === "OK" ? result.snapshot : null;
+      } catch {
+        return null;
+      }
     },
     start(): void {
       if (!stopped) return;
@@ -397,6 +461,31 @@ function buildClient(environment: NonAdminEnvironment, now: () => Date): Printer
     budgetMs: environment.PRINTER_TELEMETRY_BUDGET_MS,
     attemptsPerColumn: environment.PRINTER_TELEMETRY_ATTEMPTS
   });
+}
+
+/**
+ * Everything about a reading that can change what `applyPrinterTelemetry`
+ * decides, and nothing that cannot.
+ *
+ * The marker counter and the engine state are excluded on purpose: both move
+ * constantly during a job and neither is consulted by the fold, so including
+ * them would wake the reporter once per page to report a health that had not
+ * changed. Failure counts are bucketed at the threshold the fold actually uses,
+ * for the same reason — the second consecutive timeout changes nothing, and the
+ * third changes everything.
+ */
+export function healthSignature(verdict: TelemetryVerdict): string {
+  if (verdict.kind === "DISABLED") return "disabled";
+  if (verdict.kind === "UNAVAILABLE") {
+    const sustained = verdict.consecutiveFailures >= FAILURES_BEFORE_UNAVAILABLE;
+    return `unavailable:${sustained ? "sustained" : "transient"}`;
+  }
+  const faults = verdict.snapshot.faults;
+  return [
+    "snapshot",
+    faults === null ? "unreported" : [...faults].sort().join("+") || "none",
+    paperPresence(verdict.snapshot.inputs)
+  ].join(":");
 }
 
 /**

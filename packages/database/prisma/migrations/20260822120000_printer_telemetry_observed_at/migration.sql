@@ -1,0 +1,14 @@
+-- When the printer's own telemetry was last read, as distinct from when the
+-- agent last spoke.
+--
+-- `last_seen_at` is refreshed on every heartbeat whether or not the printer
+-- answered, so a row can be seconds old while the SNMP reading inside it is a
+-- minute old. The payment gate needs that difference: a customer who empties
+-- the tray after the session gate must not be carried through checkout by a
+-- reading taken before they touched it.
+--
+-- Nullable and left null on backfill on purpose. A null means "this printer has
+-- never reported telemetry", which is the truth for every existing row and for
+-- any deployment without the link; the gate treats it as absent rather than as
+-- stale, so adding the column cannot close a kiosk that was open before it.
+ALTER TABLE "printers" ADD COLUMN IF NOT EXISTS "telemetry_at" TIMESTAMP(3);

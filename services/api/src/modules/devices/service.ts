@@ -153,6 +153,11 @@ export class DeviceRegistryService {
           health: input.body.printerHealth,
           lastSeenAt: now,
           updatedAt: now,
+          // Only written when the agent actually offers one. An older agent, or
+          // a kiosk with no telemetry link, leaves whatever is stored alone
+          // rather than overwriting it with a null that would read as a link
+          // that had just gone quiet.
+          ...(input.body.telemetryAt ? { telemetryAt: new Date(input.body.telemetryAt) } : {}),
           ...(input.body.printerHealth === "READY" ? { lastHealthyAt: now } : {})
         }
       });

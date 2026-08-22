@@ -166,6 +166,14 @@ export interface PrintDeviceDiagnostics {
   printerStatuses?: string[];
   /** The fault that watch attributed to this operation, if any. */
   deviceFaultCode?: string | null;
+  /** What the print engine's own page counter did across this operation. */
+  marker?: {
+    outcome: "SHORTFALL" | "SUFFICIENT" | "UNKNOWN";
+    unit?: "IMPRESSIONS" | "SHEETS" | "UNKNOWN" | null;
+    expected?: number | null;
+    observed?: number | null;
+    reason?: string | null;
+  } | null;
 }
 
 export interface PrintDeviceJobEvidence {

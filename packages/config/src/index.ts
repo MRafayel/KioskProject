@@ -314,6 +314,16 @@ const environmentSchema = z
     PRINTER_TELEMETRY_TIMEOUT_MS: z.coerce.number().int().min(200).max(5_000).default(1_000),
     PRINTER_TELEMETRY_BUDGET_MS: z.coerce.number().int().min(500).max(30_000).default(5_000),
     PRINTER_TELEMETRY_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
+    // How old the telemetry behind a healthy verdict may be at the last check
+    // before money moves. Read only by the payment gate; session start accepts
+    // any age, because refusing a customer at the welcome screen over a poll
+    // that is merely due costs a print and prevents nothing.
+    //
+    // The default allows for one heartbeat plus one poll plus slack, because
+    // between changes the stored reading ages by both. It is a backstop against
+    // a wedged poller rather than the thing that closes the empty-tray race —
+    // that is the agent's beat-on-change, which lands in about a second.
+    PRINTER_TELEMETRY_MAX_AGE_SECONDS: z.coerce.number().int().min(10).max(600).default(90),
     // How often the agent reports that it is alive, and how often it re-reads
     // what the printer can do. A swapped printer is noticed within one beat.
     AGENT_HEARTBEAT_SECONDS: z.coerce.number().int().min(5).max(600).default(30),
@@ -689,6 +699,24 @@ const environmentSchema = z
           code: "custom",
           path: ["PRINTER_TELEMETRY_BUDGET_MS"],
           message: "PRINTER_TELEMETRY_BUDGET_MS must exceed PRINTER_TELEMETRY_TIMEOUT_MS"
+        });
+      }
+
+      // Between changes the stored reading ages by a poll and then by a beat,
+      // because the agent only learns on one and only says so on the other. A
+      // ceiling below that sum refuses payments on a healthy kiosk on a fixed
+      // schedule — the worst kind of fault to diagnose, because the printer is
+      // fine every time somebody goes to look at it.
+      const propagationSeconds =
+        environment.PRINTER_TELEMETRY_POLL_SECONDS + environment.AGENT_HEARTBEAT_SECONDS;
+      if (environment.PRINTER_TELEMETRY_MAX_AGE_SECONDS <= propagationSeconds) {
+        context.addIssue({
+          code: "custom",
+          path: ["PRINTER_TELEMETRY_MAX_AGE_SECONDS"],
+          message:
+            "PRINTER_TELEMETRY_MAX_AGE_SECONDS must exceed " +
+            "PRINTER_TELEMETRY_POLL_SECONDS + AGENT_HEARTBEAT_SECONDS, or healthy " +
+            "kiosks will refuse payments whenever a reading is merely due"
         });
       }
     }

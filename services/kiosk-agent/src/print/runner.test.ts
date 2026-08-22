@@ -15,7 +15,7 @@ import {
   type PrintSubmission
 } from "@printing-kiosk/printer-adapters";
 
-import { PrintCommandRunner } from "./runner.js";
+import { PrintCommandRunner, type MarkerTelemetry } from "./runner.js";
 
 const operationId = "01900000-0000-7000-8000-000000000801";
 const printJobId = "01900000-0000-7000-8000-000000000802";
@@ -165,6 +165,8 @@ function buildRunner(
   overrides: {
     leaseRenewalMilliseconds?: number;
     devicePollIntervalMilliseconds?: number;
+    markerPollIntervalMilliseconds?: number;
+    telemetry?: MarkerTelemetry;
   } = {}
 ) {
   return new PrintCommandRunner({
@@ -753,4 +755,110 @@ async function writeArtifact(directory: string): Promise<string> {
   const path = join(target, "document.pdf");
   await writeFile(path, documentBytes);
   return path;
+}
+
+/**
+ * The counter, wired end to end.
+ *
+ * `marker.test.ts` covers the decision itself; these are about the runner
+ * actually taking a baseline, waiting for the engine, and letting the verdict
+ * reach the control plane — the wiring that was missing on 19 and 20 August,
+ * when the reported result described the spooler and nothing else.
+ */
+describe("PrintCommandRunner against the printer's own page counter", () => {
+  it("withdraws a success the engine did not produce", async () => {
+    // Two sides asked for, one marked, then the engine stops. Exactly the shape
+    // of the 19 August job that was sold as a success.
+    const transport = buildTransport([buildCommand()]);
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch, {
+      telemetry: countingTelemetry([100, 101, 101, 101, 101]),
+      markerPollIntervalMilliseconds: 1
+    }).runOnce();
+
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "UNCONFIRMED",
+      sheetsProduced: null,
+      deviceDiagnostics: { marker: { outcome: "SHORTFALL", expected: 2, observed: 1 } }
+    });
+  });
+
+  it("leaves a job alone when every page was marked", async () => {
+    const transport = buildTransport([buildCommand()]);
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch, {
+      telemetry: countingTelemetry([100, 101, 102]),
+      markerPollIntervalMilliseconds: 1
+    }).runOnce();
+
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      sheetsProduced: 2,
+      deviceDiagnostics: { marker: { outcome: "SUFFICIENT" } }
+    });
+  });
+
+  it("reports exactly as before when the printer will not answer", async () => {
+    // A telemetry outage must not fail prints. It removes the extra check and
+    // nothing else.
+    const transport = buildTransport([buildCommand()]);
+    const adapter = new MockPrinterAdapter({ outputDirectory });
+
+    await buildRunner(adapter, transport.fetch as typeof fetch, {
+      telemetry: { readNow: () => Promise.resolve(null) },
+      markerPollIntervalMilliseconds: 1
+    }).runOnce();
+
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED",
+      sheetsProduced: 2
+    });
+  });
+
+  it("does not interrogate the printer about a job that never printed", async () => {
+    // A refusal before submission has nothing to count, and asking would spend
+    // the job's remaining deadline on a question with no answer.
+    const transport = buildTransport([buildCommand()], undefined, "SUBMITTED");
+    let reads = 0;
+    const adapter = stubAdapter(() => completed());
+
+    await buildRunner(adapter, transport.fetch as typeof fetch, {
+      telemetry: {
+        readNow: () => {
+          reads += 1;
+          return Promise.resolve(null);
+        }
+      },
+      markerPollIntervalMilliseconds: 1
+    }).runOnce();
+
+    expect(transport.results()[0]?.body).toMatchObject({ state: "NOT_SUBMITTED" });
+    // One read only: the baseline, taken before the device was asked.
+    expect(reads).toBeLessThanOrEqual(1);
+  });
+});
+
+/** A printer whose counter walks a fixed sequence, one step per reading. */
+function countingTelemetry(counts: number[]): MarkerTelemetry {
+  let index = 0;
+  return {
+    readNow: () => {
+      const lifeCount = counts[Math.min(index, counts.length - 1)] ?? 0;
+      index += 1;
+      return Promise.resolve({
+        readAt: new Date(),
+        serialNumber: "SERIAL",
+        engine: "PRINTING" as const,
+        faults: [],
+        marker: { lifeCount, unit: "IMPRESSIONS" as const },
+        inputs: null,
+        supplies: null
+      });
+    }
+  };
 }

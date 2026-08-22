@@ -120,7 +120,18 @@ export const agentHeartbeatBodySchema = z
      */
     capabilityHash: z.string().regex(/^[0-9a-f]{64}$/),
     /** Open print operations this agent believes it is holding. */
-    activeOperations: z.number().int().min(0).max(64)
+    activeOperations: z.number().int().min(0).max(64),
+    /**
+     * When the reading behind `printerHealth` was actually taken from the
+     * printer, rather than when this beat was sent.
+     *
+     * The two are not the same and the difference is what payment turns on: an
+     * agent polls its printer on one schedule and reports on another, so a beat
+     * sent now can be carrying a reading from a minute ago. Null when this
+     * kiosk has no telemetry link, which is not staleness — it is a printer
+     * nobody can ask, and the gate treats it as absent rather than as expired.
+     */
+    telemetryAt: z.string().datetime().nullable().optional()
   })
   .strict();
 

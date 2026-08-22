@@ -29,9 +29,19 @@ const logger = {
   warn: (fields: Record<string, unknown>, message: string) => app.log.warn(fields, message)
 };
 
+// The printer's own telemetry, over its dedicated link. It polls on its own
+// schedule and the reporter reads a cache, so a printer that stops answering
+// can never delay the heartbeat that proves this machine is alive.
+const printerTelemetry = createPrinterTelemetrySource({ environment, logger });
+printerTelemetry.start();
+
 const printRunner = new PrintCommandRunner({
   environment,
   adapter: printerAdapter,
+  // The engine's page counter, read either side of a job. It is the only signal
+  // that describes paper rather than the queue feeding it, and it is allowed to
+  // take a success claim away — never to grant one.
+  telemetry: printerTelemetry,
   logger
 });
 printRunner.start();
@@ -39,11 +49,6 @@ printRunner.start();
 // The device plane. It tells the control plane which machine and which printer
 // this is, and republishes what the printer can do the moment that changes, so
 // a customer is never offered settings the attached hardware cannot produce.
-// The printer's own telemetry, over its dedicated link. It polls on its own
-// schedule and the reporter reads a cache, so a printer that stops answering
-// can never delay the heartbeat that proves this machine is alive.
-const printerTelemetry = createPrinterTelemetrySource({ environment, logger });
-printerTelemetry.start();
 
 const deviceReporter = new DeviceRegistryReporter({
   environment,

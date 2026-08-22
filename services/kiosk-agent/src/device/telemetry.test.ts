@@ -12,6 +12,7 @@ import {
   applyPrinterTelemetry,
   createPrinterTelemetrySource,
   describeVerdict,
+  healthSignature,
   type PrinterWarningCode,
   type TelemetryVerdict
 } from "./telemetry.js";
@@ -458,3 +459,57 @@ function silentClient(): PrinterTelemetryClient {
     close: () => undefined
   };
 }
+
+/**
+ * Telling the control plane *now* rather than at the next scheduled beat.
+ *
+ * The 22 August payment race was a minute wide because the agent learned on one
+ * schedule and reported on another. Closing it means waking the reporter when a
+ * reading changes — but only when it changes something the fold actually
+ * decides on, or a fifty-page job would send a beat per page.
+ */
+describe("what counts as a change worth reporting", () => {
+  it("ignores the counter climbing through a job", () => {
+    const before = healthSignature(snapshot({ faults: [], marker: 100 }));
+    const after = healthSignature(snapshot({ faults: [], marker: 150 }));
+    expect(after).toBe(before);
+  });
+
+  it("ignores the engine waking and sleeping", () => {
+    const idle = healthSignature(snapshot({ faults: [], engine: "IDLE" }));
+    const other = healthSignature(snapshot({ faults: [], engine: "OTHER" }));
+    const printing = healthSignature(snapshot({ faults: [], engine: "PRINTING" }));
+    expect(new Set([idle, other, printing]).size).toBe(1);
+  });
+
+  it("notices a tray running out", () => {
+    const loaded = healthSignature(snapshot({ faults: [], inputs: LOADED }));
+    const empty = healthSignature(snapshot({ faults: [], inputs: OUT_OF_PAPER }));
+    expect(empty).not.toBe(loaded);
+  });
+
+  it("notices a fault appearing and clearing", () => {
+    const well = healthSignature(snapshot({ faults: [] }));
+    const jammed = healthSignature(snapshot({ faults: ["JAMMED"] }));
+    expect(jammed).not.toBe(well);
+    expect(healthSignature(snapshot({ faults: [] }))).toBe(well);
+  });
+
+  it("does not care what order the printer lists its faults in", () => {
+    const one = healthSignature(snapshot({ faults: ["LOW_PAPER", "LOW_TONER"] }));
+    const other = healthSignature(snapshot({ faults: ["LOW_TONER", "LOW_PAPER"] }));
+    expect(other).toBe(one);
+  });
+
+  it("stays quiet through the timeouts that change nothing", () => {
+    // One and two dropped readings leave the fold alone, so they are not worth
+    // a beat. The third withdraws the printer, and that is.
+    const first = healthSignature(unavailable("TIMEOUT", 1));
+    expect(healthSignature(unavailable("TIMEOUT", 2))).toBe(first);
+    expect(healthSignature(unavailable("TIMEOUT", 3))).not.toBe(first);
+  });
+
+  it("separates a reading from the absence of one", () => {
+    expect(healthSignature({ kind: "DISABLED" })).not.toBe(healthSignature(unavailable("TIMEOUT", 1)));
+  });
+});

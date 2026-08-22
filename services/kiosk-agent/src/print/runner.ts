@@ -13,7 +13,14 @@ import {
   type PrintOperationStatus
 } from "@printing-kiosk/printer-adapters";
 
+import type { MarkerCounter, PrinterTelemetrySnapshot } from "@printing-kiosk/printer-telemetry";
+
 import { LocalPrintLedger } from "./ledger.js";
+import {
+  describeMarkerEvidence,
+  observeMarkerCompletion,
+  type MarkerEvidence
+} from "./marker.js";
 import { PrintSpool } from "./spool.js";
 
 type UpstreamFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -24,6 +31,28 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const DEVICE_POLL_INTERVAL_MS = 5_000;
 /** A renewal cadence below this would beat on the control plane for no gain. */
 const MIN_LEASE_RENEWAL_MS = 5_000;
+/**
+ * How often the engine's counter is read while waiting for a job to finish
+ * marking. The certified hardware takes about three seconds a page, so this
+ * sees every page without asking twice for the same one.
+ */
+const MARKER_POLL_INTERVAL_MS = 3_000;
+/**
+ * Consecutive flat readings before the engine counts as stopped.
+ *
+ * More than one, because a printer pauses between sheets and a single unchanged
+ * reading is a pause rather than a stall. Three at the interval above is about
+ * nine seconds of a genuinely still engine — long enough that a slow page does
+ * not look like a failure, short enough that a customer is not left waiting.
+ */
+const MARKER_STILL_READS_BEFORE_STOPPED = 3;
+/**
+ * Reasons that mean no measurement was ever taken, as opposed to one that was
+ * taken and came out inconclusive. The first kind is the normal state of a kiosk
+ * without a telemetry link and is not worth recording; the second is a printer
+ * behaving oddly and is exactly what an operator would want to see.
+ */
+const NOT_MEASURED: ReadonlySet<string> = new Set(["NO_BASELINE", "NOT_A_SUCCESS_CLAIM"]);
 /** Device states that describe work whose outcome is still open. */
 const OPEN_DEVICE_STATES: ReadonlySet<PrintOperationStatus["state"]> = new Set([
   "SUBMITTED",
@@ -47,6 +76,22 @@ export interface PrintCommandRunnerOptions {
   leaseRenewalMilliseconds?: number;
   /** How often a device that has not finished describing its work is asked. */
   devicePollIntervalMilliseconds?: number;
+  /**
+   * The printer's own telemetry, when a deployment has one.
+   *
+   * Used here for a single purpose: reading the engine's page counter either
+   * side of the job, so a result that claims success can be checked against how
+   * many pages the machine actually marked. Absent leaves every result exactly
+   * as the device host described it.
+   */
+  telemetry?: MarkerTelemetry;
+  /** How often the counter is read while waiting for the engine to settle. */
+  markerPollIntervalMilliseconds?: number;
+}
+
+/** The slice of the telemetry source this runner needs. */
+export interface MarkerTelemetry {
+  readNow(): Promise<PrinterTelemetrySnapshot | null>;
 }
 
 /**
@@ -270,6 +315,15 @@ export class PrintCommandRunner {
       return;
     }
 
+    // The engine's counter as it stands before the device is given anything.
+    //
+    // Read here rather than earlier because everything above can still abort
+    // without printing, and a baseline is only worth taking for work that is
+    // actually about to be handed over. A reading that fails leaves this null,
+    // which disables the whole comparison for this operation and changes
+    // nothing: no baseline is a reason to stay quiet, never a reason to doubt.
+    const markerBefore = await this.readMarker();
+
     let status: PrintOperationStatus;
     const startedAt = Date.now();
     // The device is about to be given the work, and it may hold it for longer
@@ -309,6 +363,13 @@ export class PrintCommandRunner {
       await this.spool.discard(command.operationId).catch(() => undefined);
     }
 
+    // What the printer's own counter says about what just happened. This can
+    // only ever take a success away — see `marker.ts` for why that asymmetry is
+    // the entire safety property — and it runs after the lease renewal has
+    // stopped, so a slow settle cannot hold a command open.
+    const evidence = await this.confirmAgainstMarker(command, status, markerBefore);
+    status = applyMarkerEvidence(status, evidence);
+
     this.options.logger.info(
       {
         operationId: command.operationId,
@@ -318,6 +379,7 @@ export class PrintCommandRunner {
         failureCode: status.failureCode,
         warningCode: status.warningCode,
         sheetsProduced: status.sheetsProduced,
+        marker: describeMarkerEvidence(evidence),
         elapsedMs: Date.now() - startedAt
       },
       "device finished with print operation"
@@ -448,6 +510,50 @@ export class PrintCommandRunner {
         ? { deviceDiagnostics: { stage: adapterError.deviceStage } }
         : {})
     };
+  }
+
+  /** The engine's counter right now, or null if it could not be read. */
+  private async readMarker(): Promise<MarkerCounter | null> {
+    const snapshot = await this.options.telemetry?.readNow().catch(() => null);
+    return snapshot?.marker ?? null;
+  }
+
+  /**
+   * Check a claimed success against the pages the engine actually marked.
+   *
+   * Only runs on a result that claims one. A job already headed for recovery
+   * cannot be made worse by this, and a job the device says it never submitted
+   * has nothing to count — so neither is worth the wait or the requests. That
+   * also keeps the cost proportionate: two readings and a short watch per
+   * successful print, and nothing at all the rest of the time.
+   */
+  private async confirmAgainstMarker(
+    command: AgentPrintCommand,
+    status: PrintOperationStatus,
+    before: MarkerCounter | null
+  ): Promise<MarkerEvidence> {
+    if (status.state !== "COMPLETED" || status.confidence !== "CONFIRMED") {
+      return { kind: "UNKNOWN", reason: "NOT_A_SUCCESS_CLAIM" };
+    }
+    const telemetry = this.options.telemetry;
+    if (!telemetry) return { kind: "UNKNOWN", reason: "NO_BASELINE" };
+
+    const deadline = Date.parse(command.deadlineAt);
+    return observeMarkerCompletion({
+      before,
+      job: {
+        printedSides: command.manifest.printedSides,
+        physicalSheets: command.manifest.physicalSheets
+      },
+      read: () => telemetry.readNow().catch(() => null),
+      // Past the job's own deadline the work is no longer worth waiting for,
+      // and the control plane may already have taken the command back.
+      deadlineAt: Number.isFinite(deadline) ? deadline : Date.now(),
+      now: () => Date.now(),
+      delay,
+      pollIntervalMs: this.options.markerPollIntervalMilliseconds ?? MARKER_POLL_INTERVAL_MS,
+      stillReadsBeforeStopped: MARKER_STILL_READS_BEFORE_STOPPED
+    });
   }
 
   private async askDevice(command: AgentPrintCommand): Promise<PrintOperationStatus> {
@@ -590,6 +696,54 @@ const PRINTER_ADAPTER_ERROR_CODES = new Set([
   "SUBMISSION_UNCONFIRMED",
   "DEVICE_ERROR"
 ]);
+
+/**
+ * Fold the counter's verdict into a result. One direction only.
+ *
+ * A shortfall removes the success claim and says so; everything else leaves the
+ * result untouched and merely records what was seen. There is deliberately no
+ * branch here that raises confidence, sets `COMPLETED`, or fills in a sheet
+ * count — a printer that reports a healthy counter has not thereby proved a
+ * customer's pages came out, and the moment this function could say otherwise
+ * a compromised or simply optimistic device could manufacture a success.
+ */
+export function applyMarkerEvidence(
+  status: PrintOperationStatus,
+  evidence: MarkerEvidence
+): PrintOperationStatus {
+  // Nothing was measured, so there is nothing to record. A kiosk with no
+  // telemetry link would otherwise attach the same empty finding to every job it
+  // ever prints, which buries the readings that do mean something.
+  if (evidence.kind === "UNKNOWN" && NOT_MEASURED.has(evidence.reason)) return status;
+
+  const diagnostics: PrintOperationStatus["deviceDiagnostics"] = {
+    ...status.deviceDiagnostics,
+    marker:
+      evidence.kind === "UNKNOWN"
+        ? { outcome: "UNKNOWN", reason: evidence.reason }
+        : {
+            outcome: evidence.kind,
+            expected: evidence.expected,
+            observed: evidence.observed,
+            ...(evidence.kind === "SHORTFALL" ? { unit: evidence.unit } : {})
+          }
+  };
+
+  if (evidence.kind !== "SHORTFALL") return { ...status, deviceDiagnostics: diagnostics };
+
+  return {
+    ...status,
+    // `COMPLETED` with an unconfirmed result is the existing route to
+    // RECOVERY_REQUIRED with no refund owed: the pages may well be sitting in
+    // the tray, and a person has to look. The state is left alone on purpose —
+    // rewriting it to FAILED would claim knowledge nobody has.
+    confidence: "UNCONFIRMED",
+    // The device's own count described a job the engine did not finish. Keeping
+    // it would put a number on a page count we have just refused to vouch for.
+    sheetsProduced: null,
+    deviceDiagnostics: diagnostics
+  };
+}
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {

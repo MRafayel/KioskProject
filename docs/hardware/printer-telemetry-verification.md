@@ -420,3 +420,73 @@ an empty printer retires in ~1.3 s and settles `CONFIRMED`. Only Phase 3 —
 downgrade-only confirmation from `prtMarkerLifeCount` — changes that, and it is
 not built. Telemetry at Phase 2 gates the *next* customer; it never revisits a
 job that was already submitted.
+
+## Phase 3 — the engine's counter decides, in one direction (22 Aug 2026)
+
+`prtMarkerLifeCount` is now read either side of every operation that claims a
+success, and a counter short of what the job needed withdraws that claim.
+
+**Unit.** `prtMarkerCounterUnit` decides which of the job's two counts applies:
+`impressions(7)` → `printedSides`, `sheets(8)` → `physicalSheets`, anything else
+→ no comparison. The certified Canon reports impressions, proved by the duplex
+run of 21 Aug — `97 → 98 → 99` for a two-page duplex job that pulled a single
+sheet, with the tray level moving once. Reading the wrong column would be
+*quietly* wrong: on simplex the two counts are equal and every test passes, and
+the error would first appear as a healthy duplex job sent to recovery.
+
+**Waiting.** The comparison cannot be made when the print host returns, because
+retirement measures the data hand-off — flat at ~1.3 s for 1, 2 and 5 pages. The
+counter is followed at 3 s intervals until it reaches the expected figure, until
+it sits still for three consecutive readings, or until the job's own deadline.
+An explicit fault (`noPaper`, jam, door, toner, output full) ends the wait early,
+but never decides the outcome on its own — this printer asserts `noPaper` on the
+last sheet of jobs that printed in full.
+
+**What each outcome does.**
+
+| Counter | Verdict | Effect |
+|---|---|---|
+| moved < expected, engine stopped | `SHORTFALL` | `confidence: UNCONFIRMED`, `sheetsProduced: null` → `RECOVERY_REQUIRED`, no refund owed |
+| moved ≥ expected | `SUFFICIENT` | **nothing** — recorded, never promoted |
+| no reading, no baseline, unit unknown or changed, counter regressed, still advancing at deadline | `UNKNOWN` | **nothing** — the host's answer stands |
+
+There is deliberately no branch that raises confidence, sets `COMPLETED`, or
+fills in a sheet count. A device that lies, is impersonated, or simply resets its
+counter can cause unnecessary operator recovery and can never manufacture a
+success.
+
+**Residual risk, accepted:** the counter is device-global, so a foreign job
+printing concurrently inflates the delta and could mask a shortfall. On a
+USB-only kiosk with every network print protocol disabled there is no path for
+one, and guarding against it would mean attributing marks to jobs, which the MIB
+does not support.
+
+## RESULT: paper removed before payment still sold (22 Aug 2026)
+
+Healthy session started, all paper removed on the way to checkout, payment
+allowed. Not a fault in the health logic — a propagation delay.
+
+`printers.last_seen_at` refreshes on every heartbeat whether or not the printer
+answered, so it measures *agent* liveness and cannot tell a one-second-old SNMP
+reading from a one-minute-old one. The gate had no way to know the reading it
+trusted predated the customer. The window was the sum of two independent timers:
+up to `PRINTER_TELEMETRY_POLL_SECONDS` to notice, then up to
+`AGENT_HEARTBEAT_SECONDS` to say so — 60 s on the defaults.
+
+**Closed in two parts.** `telemetry_at` now records when SNMP was actually read
+and travels on every heartbeat; and the agent brings its next beat forward the
+moment a reading changes anything the health fold decides on. Faults and tray
+presence trigger a beat; the marker counter and engine state do not, or a
+fifty-page job would send a beat per page.
+
+The payment gate is `strict` and refuses `PRINTER_TELEMETRY_STALE` past
+`PRINTER_TELEMETRY_MAX_AGE_SECONDS`; session start is not, because refusing a
+customer at the welcome screen over a poll that is merely due costs a print and
+prevents nothing. Startup refuses a ceiling below poll + heartbeat, since that
+configuration makes healthy kiosks refuse payments on a schedule.
+
+**The residual window is one SNMP poll**, and that is a floor, not an oversight:
+nothing can know a tray is empty sooner than it looks. Lowering
+`PRINTER_TELEMETRY_POLL_SECONDS` is the direct knob. SNMP traps would remove it
+entirely and are rejected — they need an inbound listener on NIC2, which the
+threat model forbids.

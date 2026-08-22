@@ -314,7 +314,31 @@ export const deviceDiagnosticsSchema = z
      */
     printerStatuses: z.array(z.string().max(120)).max(8).optional(),
     /** The fault the watch attributed to this operation, if any. */
-    deviceFaultCode: z.string().max(48).nullable().optional()
+    deviceFaultCode: z.string().max(48).nullable().optional(),
+    /**
+     * What the print engine's own page counter did across this operation.
+     *
+     * Recorded for every operation that could be measured, including the ones
+     * that measured fine, because the value of this column is comparative: a
+     * shortfall means nothing without knowing what the same printer reports on
+     * the jobs that worked. The reducer never reads it — a device cannot move
+     * its own outcome by what it claims its counter said.
+     */
+    marker: z
+      .object({
+        outcome: z.enum(["SHORTFALL", "SUFFICIENT", "UNKNOWN"]),
+        /** `prtMarkerCounterUnit`: what one tick of the counter means. */
+        unit: z.enum(["IMPRESSIONS", "SHEETS", "UNKNOWN"]).nullable().optional(),
+        /** Ticks the job needed, on that unit's scale. */
+        expected: z.number().int().min(0).max(1_000_000).nullable().optional(),
+        /** Ticks the counter actually moved. */
+        observed: z.number().int().min(-1_000_000_000).max(1_000_000_000).nullable().optional(),
+        /** Why no comparison was possible, when none was. */
+        reason: z.string().max(32).nullable().optional()
+      })
+      .strict()
+      .nullable()
+      .optional()
   })
   .strict();
 
