@@ -650,9 +650,10 @@ describe("kiosk prototype journey", () => {
     expect(screen.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
     expect(screen.queryByText("Paper size", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("Orientation", { exact: true })).not.toBeInTheDocument();
-    expect(
-      within(screen.getByRole("complementary", { name: "Print summary" })).getByRole("timer")
-    ).toBeVisible();
+    const printSummary = screen.getByRole("complementary", { name: "Print summary" });
+    expect(within(printSummary).getByRole("timer")).toBeVisible();
+    expect(within(printSummary).queryByText("Time remaining")).not.toBeInTheDocument();
+    expect(printSummary.querySelector(".session-timer__label")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "From page" }), {
       target: { value: "3" }

@@ -498,12 +498,11 @@ p {
 
 .session-timer {
   display: grid;
-  min-width: 145px;
+  min-width: 58px;
   align-items: center;
-  gap: 0.65rem;
   color: var(--blue);
   background: transparent;
-  grid-template-columns: 58px 1fr;
+  grid-template-columns: 58px;
 }
 
 .session-timer__dial {
@@ -524,7 +523,7 @@ p {
   background: white;
   box-shadow: inset 0 0 0 1px #e2ebf2;
   content: "";
-  inset: 4px;
+  inset: 3px;
 }
 
 .session-timer__dial strong,
@@ -548,17 +547,8 @@ p {
   text-transform: uppercase;
 }
 
-.session-timer__label {
-  max-width: 72px;
-  color: var(--blue);
-  font-size: 0.72rem;
-  font-weight: 800;
-  line-height: 1.2;
-}
-
 .session-timer--compact {
   min-width: 50px;
-  gap: 0;
   grid-template-columns: 50px;
 }
 
@@ -569,10 +559,6 @@ p {
 
 .session-timer--compact .session-timer__dial strong {
   font-size: 1.08rem;
-}
-
-.session-timer--compact .session-timer__label {
-  display: none;
 }
 
 .screen-grid,
@@ -1529,6 +1515,7 @@ p {
   min-height: 50px;
   margin-bottom: 0.8rem;
   align-items: center;
+  justify-content: center;
 }
 
 .price-total--large {
@@ -2113,7 +2100,7 @@ p {
   }
 
   .session-timer {
-    min-width: 150px;
+    min-width: 58px;
   }
 }
 
@@ -2182,10 +2169,6 @@ p {
   .session-timer {
     min-width: 58px;
     grid-template-columns: 58px;
-  }
-
-  .session-timer__label {
-    display: none;
   }
 
   .session-timer--compact {

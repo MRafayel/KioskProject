@@ -153,6 +153,7 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
   await page.getByRole("button", { name: "Start printing" }).click();
   await page.getByRole("button", { name: /Continue to print settings/i }).click();
   await expect(page.getByRole("heading", { name: "Choose print settings" })).toBeVisible();
+  await expect(page.locator(".session-timer__label")).toHaveCount(0);
 
   const reviewButton = page.getByRole("button", { name: /Review and pay/i });
   await expect(page.getByText(/AMD\s*60\.00/)).toBeVisible();
