@@ -35,6 +35,8 @@ export interface MessageCatalog {
     start: string;
     startError: string;
     paidSessionError: string;
+    printerUnavailableError: string;
+    printerOutOfPaperError: string;
     footerSecure: string;
     footerNoAccount: string;
     footerTouchscreen: string;
@@ -314,6 +316,8 @@ const english: MessageCatalog = {
     startError: "Could not start a print session. Please try again.",
     paidSessionError:
       "The previous paid print has not finished. Operator assistance is required before a new print can start.",
+    printerUnavailableError: "Printer temporarily unavailable — please contact staff.",
+    printerOutOfPaperError: "The printer is out of paper — please contact staff.",
     footerSecure: "Secure session",
     footerNoAccount: "No account needed",
     footerTouchscreen: "Touchscreen kiosk"
@@ -587,6 +591,8 @@ const russian: MessageCatalog = {
     startError: "Не удалось создать сеанс печати. Попробуйте ещё раз.",
     paidSessionError:
       "Предыдущая оплаченная печать ещё не завершена. Для запуска новой печати обратитесь к оператору.",
+    printerUnavailableError: "Принтер временно недоступен — обратитесь к персоналу.",
+    printerOutOfPaperError: "В принтере закончилась бумага — обратитесь к персоналу.",
     footerSecure: "Защищённый сеанс",
     footerNoAccount: "Без регистрации",
     footerTouchscreen: "Сенсорный терминал"
@@ -869,6 +875,8 @@ const armenian: MessageCatalog = {
     startError: "Չհաջողվեց սկսել տպումը։ Փորձեք կրկին։",
     paidSessionError:
       "Նախորդ վճարված տպումը դեռ ավարտված չէ։ Նոր տպում սկսելու համար դիմեք սպասարկողին։",
+    printerUnavailableError: "Տպիչը ժամանակավորապես անհասանելի է․ դիմեք սպասարկողին։",
+    printerOutOfPaperError: "Տպիչում թուղթը վերջացել է․ դիմեք սպասարկողին։",
     footerSecure: "Անվտանգ կապ",
     footerNoAccount: "Գրանցում պետք չէ",
     footerTouchscreen: "Սենսորային էկրան"

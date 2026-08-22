@@ -22,6 +22,7 @@ import {
 
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { digestIdempotencyKey, hashRequest } from "../sessions/crypto.js";
+import type { PrinterReadinessGate } from "../devices/readiness.js";
 import { ApiError } from "../sessions/errors.js";
 import { isRetryableTransactionError, isUniqueConstraintError } from "../sessions/transactions.js";
 
@@ -55,6 +56,8 @@ export interface PaymentServiceOptions {
   idempotencyPepper: string;
   idempotencyTtlHours: number;
   paymentTimeoutSeconds: number;
+  /** The printer gate. Absent leaves payment creation exactly as it was. */
+  printerReadiness?: PrinterReadinessGate;
 }
 
 interface CreatePaymentInput {
@@ -129,6 +132,20 @@ export class PaymentService {
               where: { id: input.sessionId, kioskId: input.kioskId }
             });
             assertSessionPayable(session, now);
+
+            // The last moment a refusal is free.
+            //
+            // A printer can fail between the welcome screen and here — the
+            // customer spends minutes uploading and choosing — so the gate is
+            // asked twice and this is the closing of that window. It is also
+            // the last place it may be asked at all: past this point a payment
+            // exists, and refusing a job somebody has paid for is the recovery
+            // path's decision, not a gate's. A printer that fails after this
+            // settles as UNCONFIRMED and is refunded, never silently dropped.
+            //
+            // The idempotency replay above returns first, so retrying a payment
+            // that already exists is never re-gated.
+            await this.options.printerReadiness?.assertReady(transaction, input.kioskId);
 
             const open = await transaction.payment.findFirst({
               where: { sessionId: session.id, status: { in: OPEN_STATUSES } },

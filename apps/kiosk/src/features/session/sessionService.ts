@@ -42,7 +42,13 @@ const CANCEL_VERSION_ATTEMPTS = 2;
 export class SessionRequestError extends Error {
   constructor(
     readonly code: string,
-    readonly status: number
+    readonly status: number,
+    /**
+     * The `details.reason` the API sent, when it sent one. It is what lets the
+     * screen say "out of paper" instead of "unavailable" — and only for reasons
+     * the control plane calls reliable, never a guess made here.
+     */
+    readonly reason: string | null = null
   ) {
     super(code);
     this.name = "SessionRequestError";
@@ -68,7 +74,11 @@ export async function createKioskSession(locale: Locale): Promise<PrototypeSessi
   if (response.status === 409) {
     const failure = await readSessionConflict(response);
     if (!BLOCKING_SESSION_CODES.has(failure.code ?? "")) {
-      throw new SessionRequestError(failure.code ?? "SESSION_CREATE_FAILED", response.status);
+      throw new SessionRequestError(
+        failure.code ?? "SESSION_CREATE_FAILED",
+        response.status,
+        failure.reason ?? null
+      );
     }
 
     assertSessionCanBeDiscarded(failure.currentState);
@@ -135,17 +145,19 @@ function assertSessionCanBeDiscarded(state: string | undefined): void {
 
 async function readSessionConflict(
   response: Response
-): Promise<{ code?: string; sessionId?: string; currentState?: string }> {
+): Promise<{ code?: string; sessionId?: string; currentState?: string; reason?: string }> {
   try {
     const body = (await response.json()) as {
       error?: { code?: string; details?: Record<string, unknown> };
     };
     const sessionId = body.error?.details?.sessionId;
     const currentState = body.error?.details?.currentState;
+    const reason = body.error?.details?.reason;
     return {
       ...(body.error?.code ? { code: body.error.code } : {}),
       ...(typeof sessionId === "string" ? { sessionId } : {}),
-      ...(typeof currentState === "string" ? { currentState } : {})
+      ...(typeof currentState === "string" ? { currentState } : {}),
+      ...(typeof reason === "string" ? { reason } : {})
     };
   } catch {
     return {};

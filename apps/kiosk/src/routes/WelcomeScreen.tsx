@@ -6,6 +6,30 @@ import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { createKioskSession, SessionRequestError } from "../features/session/sessionService.js";
 
+/**
+ * What to tell somebody standing at the machine.
+ *
+ * The printer cases are the reason this exists: a kiosk whose printer cannot
+ * finish a job says so here, before the customer photographs a QR code, uploads
+ * their documents and reaches a checkout — all of which used to end in the same
+ * refusal, several minutes later, with their files already on the machine.
+ *
+ * Only one cause is named. `PRINTER_OUT_OF_PAPER` is set from the printer's own
+ * tray level, so it is worth telling somebody; every other reason gets the
+ * general wording rather than a guess that sends staff to the wrong problem.
+ */
+function describeStartFailure(
+  error: unknown,
+  copy: { startError: string; paidSessionError: string; printerUnavailableError: string; printerOutOfPaperError: string }
+): string {
+  if (!(error instanceof SessionRequestError)) return copy.startError;
+  if (error.code === "PAID_SESSION_REQUIRES_FULFILLMENT") return copy.paidSessionError;
+  if (error.code !== "PRINTER_UNAVAILABLE") return copy.startError;
+  return error.reason === "PRINTER_OUT_OF_PAPER"
+    ? copy.printerOutOfPaperError
+    : copy.printerUnavailableError;
+}
+
 export function WelcomeScreen() {
   const { locale, messages } = useLanguage();
   const { dispatch } = usePrototypeSession();
@@ -17,11 +41,7 @@ export function WelcomeScreen() {
       void navigate("/upload");
     }
   });
-  const startError =
-    createSession.error instanceof SessionRequestError &&
-    createSession.error.code === "PAID_SESSION_REQUIRES_FULFILLMENT"
-      ? messages.welcome.paidSessionError
-      : messages.welcome.startError;
+  const startError = describeStartFailure(createSession.error, messages.welcome);
 
   return (
     <main className="welcome">

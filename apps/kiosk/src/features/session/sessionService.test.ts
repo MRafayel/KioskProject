@@ -254,3 +254,61 @@ describe("closeKioskSession", () => {
     ).toBeNull();
   });
 });
+
+/**
+ * What somebody standing at the machine is told when the printer cannot finish
+ * a job. The reason is only ever repeated, never inferred: the kiosk names a
+ * cause when the control plane vouches for one and stays general otherwise, so
+ * a jam never sends staff to look at the paper tray.
+ */
+describe("a printer that cannot print stops the session at the welcome screen", () => {
+  it("carries the reason through so the screen can be specific", async () => {
+    installApi(() => printerUnavailable("PRINTER_OUT_OF_PAPER"));
+
+    const error = (await createKioskSession("en").then(
+      () => null,
+      (thrown: unknown) => thrown
+    )) as SessionRequestError;
+
+    expect(error.code).toBe("PRINTER_UNAVAILABLE");
+    expect(error.reason).toBe("PRINTER_OUT_OF_PAPER");
+  });
+
+  it("leaves the reason empty when the control plane did not give one", async () => {
+    installApi(() => printerUnavailable(null));
+
+    const error = (await createKioskSession("en").then(
+      () => null,
+      (thrown: unknown) => thrown
+    )) as SessionRequestError;
+
+    expect(error.code).toBe("PRINTER_UNAVAILABLE");
+    expect(error.reason).toBeNull();
+  });
+
+  it("does not retry a refusal into a second session", async () => {
+    let calls = 0;
+    installApi(() => {
+      calls += 1;
+      return printerUnavailable("PRINTER_OFFLINE");
+    });
+
+    await createKioskSession("en").catch(() => undefined);
+
+    // A blocked printer is not a conflict to recover from. Retrying would create
+    // a session the customer cannot use and leave it to expire.
+    expect(calls).toBe(1);
+  });
+});
+
+function printerUnavailable(reason: string | null): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "PRINTER_UNAVAILABLE",
+        ...(reason ? { details: { reason } } : {})
+      }
+    }),
+    { status: 409, headers: { "content-type": "application/json" } }
+  );
+}

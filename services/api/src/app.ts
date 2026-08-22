@@ -78,6 +78,7 @@ import {
 } from "./modules/sessions/crypto.js";
 import { ApiError } from "./modules/sessions/errors.js";
 import { createKioskAuthenticationThrottle } from "./modules/sessions/rate-limit.js";
+import { PrinterReadinessGate } from "./modules/devices/readiness.js";
 import { registerSessionRoutes } from "./modules/sessions/routes.js";
 import { SessionService } from "./modules/sessions/service.js";
 
@@ -215,6 +216,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     settledGraceMilliseconds: options.environment.RETENTION_SETTLED_GRACE_SECONDS * 1_000,
     recoveryGraceMilliseconds: options.environment.RETENTION_RECOVERY_GRACE_SECONDS * 1_000
   };
+  // The device gate. A kiosk whose printer cannot finish a job should say so on
+  // the welcome screen, not after a customer has uploaded their documents and
+  // reached a checkout. Several missed heartbeats is a machine that has stopped
+  // talking; a couple is a slow network.
+  const printerReadiness = new PrinterReadinessGate({
+    clock,
+    maxSilenceMs: options.environment.AGENT_HEARTBEAT_SECONDS * 3 * 1_000
+  });
+
   const sessions = new SessionService({
     database,
     clock,
@@ -224,7 +234,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     idleTtlMinutes: options.environment.SESSION_IDLE_TTL_MINUTES,
     hardTtlMinutes: options.environment.SESSION_ABSOLUTE_TTL_MINUTES,
     idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
-    retentionPolicy
+    retentionPolicy,
+    printerReadiness
   });
   const mobileAccess = new MobileAccessService({
     database,
@@ -285,7 +296,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     provider: paymentProvider,
     idempotencyPepper: options.environment.UPLOAD_TOKEN_PEPPER,
     idempotencyTtlHours: options.environment.IDEMPOTENCY_TTL_HOURS,
-    paymentTimeoutSeconds: options.environment.PAYMENT_TIMEOUT_SECONDS
+    paymentTimeoutSeconds: options.environment.PAYMENT_TIMEOUT_SECONDS,
+    printerReadiness
   });
   // The scenario control never exists in a production build: configuration
   // validation refuses to enable it there, and this second check means a

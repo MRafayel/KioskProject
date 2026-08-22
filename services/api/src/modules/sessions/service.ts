@@ -31,6 +31,7 @@ import {
   hashRequest,
   safelyEqualHexDigests
 } from "./crypto.js";
+import type { PrinterReadinessGate } from "../devices/readiness.js";
 import { ApiError } from "./errors.js";
 import { isRetryableTransactionError } from "./transactions.js";
 
@@ -67,6 +68,11 @@ interface SessionServiceOptions {
   hardTtlMinutes: number;
   idempotencyTtlHours: number;
   retentionPolicy: RetentionPolicy;
+  /**
+   * The printer gate. Absent leaves every session creation exactly as it was,
+   * which is what keeps a deployment without a device plane working.
+   */
+  printerReadiness?: PrinterReadinessGate;
 }
 
 interface CreateSessionInput {
@@ -131,6 +137,18 @@ export class SessionService {
                 transactionReplay
               );
             }
+
+            // The earliest point a customer can be told. Before this they have
+            // done nothing; after it they start uploading documents, choosing
+            // settings and reaching a checkout — all of which would end in the
+            // same refusal, several minutes later, with their files already on
+            // the machine.
+            //
+            // Placed after the idempotency replay above on purpose: a retry of
+            // a session that was already created must return that session, not
+            // be refused because the printer went down in between. The gate is
+            // for new work only.
+            await this.options.printerReadiness?.assertReady(transaction, input.kioskId);
 
             const existing = await transaction.printSession.findFirst({
               where: { kioskId: input.kioskId, state: { notIn: TERMINAL_STATES } },
