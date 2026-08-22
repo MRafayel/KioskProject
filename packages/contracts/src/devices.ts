@@ -201,6 +201,41 @@ export const reportPrinterStateResponseSchema = z
   .strict();
 
 export type PrinterAdapterKindValue = z.infer<typeof printerAdapterKindSchema>;
+/**
+ * Whether this kiosk can take a new customer right now.
+ *
+ * The kiosk screen asks this on a timer so it can close itself before somebody
+ * starts a session it would only have to refuse. It carries a verdict and a
+ * reason and nothing else: no health value, no queue name, no serial. A screen
+ * strangers stand in front of has no business describing the hardware, and the
+ * reason is already the only part of it that changes what the customer is told.
+ */
+export const kioskAvailabilitySchema = z
+  .object({
+    /** False only for conditions that block a new session outright. */
+    available: z.boolean(),
+    /**
+     * Why not, when not. `PRINTER_OUT_OF_PAPER` is the one cause reliable
+     * enough to name to a customer; everything else takes the general wording.
+     */
+    reason: z
+      .enum([
+        "PRINTER_OUT_OF_PAPER",
+        "PRINTER_OFFLINE",
+        "PRINTER_SILENT",
+        "PRINTER_TELEMETRY_STALE",
+        "PRINTER_NOT_READY"
+      ])
+      .nullable()
+  })
+  .strict();
+
+export const getKioskAvailabilityResponseSchema = z
+  .object({ availability: kioskAvailabilitySchema })
+  .strict();
+
+export type KioskAvailability = z.infer<typeof kioskAvailabilitySchema>;
+export type GetKioskAvailabilityResponse = z.infer<typeof getKioskAvailabilityResponseSchema>;
 export type PrinterQueueStateValue = z.infer<typeof printerQueueStateSchema>;
 export type PrinterHealthStateValue = z.infer<typeof printerHealthStateSchema>;
 export type PrinterApprovalState = z.infer<typeof printerApprovalStateSchema>;

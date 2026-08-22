@@ -47,6 +47,17 @@ const MARKER_POLL_INTERVAL_MS = 3_000;
  */
 const MARKER_STILL_READS_BEFORE_STOPPED = 3;
 /**
+ * The same allowance before the job's first impression lands.
+ *
+ * Ten readings is thirty seconds, which is generous on purpose: the print host
+ * returns about a second after submission, and a printer waking from sleep can
+ * take most of that half-minute to produce its first page. The cost of being
+ * generous falls only on jobs that genuinely printed nothing — a case the
+ * pre-payment readiness gate already makes rare — while the cost of being mean
+ * falls on healthy jobs, which is the wrong way round.
+ */
+const MARKER_STARTUP_READS_BEFORE_STOPPED = 10;
+/**
  * Reasons that mean no measurement was ever taken, as opposed to one that was
  * taken and came out inconclusive. The first kind is the normal state of a kiosk
  * without a telemetry link and is not worth recording; the second is a printer
@@ -552,7 +563,8 @@ export class PrintCommandRunner {
       now: () => Date.now(),
       delay,
       pollIntervalMs: this.options.markerPollIntervalMilliseconds ?? MARKER_POLL_INTERVAL_MS,
-      stillReadsBeforeStopped: MARKER_STILL_READS_BEFORE_STOPPED
+      stillReadsBeforeStopped: MARKER_STILL_READS_BEFORE_STOPPED,
+      startupReadsBeforeStopped: MARKER_STARTUP_READS_BEFORE_STOPPED
     });
   }
 

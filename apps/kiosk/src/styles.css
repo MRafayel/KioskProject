@@ -2223,3 +2223,12 @@ p {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* A kiosk that cannot print says so in its own status pill as well as in the
+   dialog over it, so the state is still legible from across the room once
+   somebody has walked away from the screen. */
+.status-pill--down {
+  border-color: rgb(196 62 62 / 35%);
+  background: rgb(196 62 62 / 12%);
+  color: #8c2f2f;
+}

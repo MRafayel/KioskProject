@@ -1,8 +1,14 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { useKioskNavigate } from "../app/router.js";
+import { PrinterUnavailableModal } from "../components/PrinterUnavailableModal.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
+import {
+  ASSUME_AVAILABLE,
+  AVAILABILITY_POLL_MS,
+  readKioskAvailability
+} from "../features/session/availability.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { createKioskSession, SessionRequestError } from "../features/session/sessionService.js";
 
@@ -41,7 +47,25 @@ export function WelcomeScreen() {
       void navigate("/upload");
     }
   });
+  // Asked on a timer while this screen is idle, so a printer that runs out
+  // closes the kiosk on its own and a refill reopens it — both without a reload
+  // and without anybody pressing anything.
+  const availability = useQuery({
+    queryKey: ["kiosk-availability"],
+    queryFn: ({ signal }) => readKioskAvailability(signal),
+    refetchInterval: AVAILABILITY_POLL_MS,
+    refetchOnWindowFocus: true,
+    // Never leaves the screen showing "closed" while a slower answer is on its
+    // way, and never blocks the first render on the network.
+    placeholderData: ASSUME_AVAILABLE,
+    initialData: ASSUME_AVAILABLE
+  });
   const startError = describeStartFailure(createSession.error, messages.welcome);
+  // Only a definite negative closes the kiosk. WARNING-level conditions — toner
+  // running down, a tray that will need paper — never reach this: the gate
+  // reports those as available, because the machine can still print through
+  // them and closing for one would cost real customers real prints.
+  const unavailable = availability.data.available === false;
 
   return (
     <main className="welcome">
@@ -56,8 +80,9 @@ export function WelcomeScreen() {
           </span>
         </div>
         <div className="welcome__actions">
-          <span className="status-pill">
-            <span aria-hidden="true">●</span> {messages.common.ready}
+          <span className={unavailable ? "status-pill status-pill--down" : "status-pill"}>
+            <span aria-hidden="true">●</span>{" "}
+            {unavailable ? messages.common.unavailable : messages.common.ready}
           </span>
         </div>
       </header>
@@ -82,12 +107,17 @@ export function WelcomeScreen() {
             className="button button--primary button--wide"
             type="button"
             onClick={() => createSession.mutate()}
-            disabled={createSession.isPending}
+            // Disabled as well as covered. The modal is what the customer sees,
+            // but a button that is merely hidden behind something is still a
+            // button a stray tap or a keyboard can reach.
+            disabled={createSession.isPending || unavailable}
           >
             {createSession.isPending ? messages.welcome.starting : messages.welcome.start}
             <span aria-hidden="true">→</span>
           </button>
-          {createSession.isError ? <p className="inline-error">{startError}</p> : null}
+          {createSession.isError && !unavailable ? (
+            <p className="inline-error">{startError}</p>
+          ) : null}
         </article>
       </section>
 
@@ -99,6 +129,12 @@ export function WelcomeScreen() {
           <span>{messages.welcome.footerTouchscreen}</span>
         </div>
       </footer>
+
+      {unavailable ? (
+        <PrinterUnavailableModal
+          outOfPaper={availability.data.reason === "PRINTER_OUT_OF_PAPER"}
+        />
+      ) : null}
     </main>
   );
 }

@@ -9,6 +9,7 @@ export interface MessageCatalog {
   };
   common: {
     ready: string;
+    unavailable: string;
     cancel: string;
     printProgress: string;
     steps: [string, string, string, string];
@@ -35,6 +36,7 @@ export interface MessageCatalog {
     start: string;
     startError: string;
     paidSessionError: string;
+    printerUnavailableTitle: string;
     printerUnavailableError: string;
     printerOutOfPaperError: string;
     footerSecure: string;
@@ -290,6 +292,7 @@ const english: MessageCatalog = {
   },
   common: {
     ready: "Ready",
+    unavailable: "Unavailable",
     cancel: "Cancel",
     printProgress: "Print progress",
     steps: ["Upload", "Settings", "Pay", "Print"],
@@ -319,7 +322,8 @@ const english: MessageCatalog = {
     startError: "Could not start a print session. Please try again.",
     paidSessionError:
       "The previous paid print has not finished. Operator assistance is required before a new print can start.",
-    printerUnavailableError: "Printer temporarily unavailable — please contact staff.",
+    printerUnavailableTitle: "Printer temporarily unavailable",
+    printerUnavailableError: "Printer temporarily unavailable. Please contact support.",
     printerOutOfPaperError: "The printer is out of paper — please contact staff.",
     footerSecure: "Secure session",
     footerNoAccount: "No account needed",
@@ -572,6 +576,7 @@ const russian: MessageCatalog = {
   },
   common: {
     ready: "Готов",
+    unavailable: "Недоступен",
     cancel: "Отменить",
     printProgress: "Этапы печати",
     steps: ["Загрузка", "Настройки", "Оплата", "Печать"],
@@ -601,7 +606,8 @@ const russian: MessageCatalog = {
     startError: "Не удалось создать сеанс печати. Попробуйте ещё раз.",
     paidSessionError:
       "Предыдущая оплаченная печать ещё не завершена. Для запуска новой печати обратитесь к оператору.",
-    printerUnavailableError: "Принтер временно недоступен — обратитесь к персоналу.",
+    printerUnavailableTitle: "Принтер временно недоступен",
+    printerUnavailableError: "Принтер временно недоступен. Обратитесь в поддержку.",
     printerOutOfPaperError: "В принтере закончилась бумага — обратитесь к персоналу.",
     footerSecure: "Защищённый сеанс",
     footerNoAccount: "Без регистрации",
@@ -863,6 +869,7 @@ const armenian: MessageCatalog = {
   },
   common: {
     ready: "Պատրաստ է",
+    unavailable: "Անհասանելի է",
     cancel: "Չեղարկել",
     printProgress: "Տպման փուլերը",
     steps: ["Վերբեռնում", "Կարգավորումներ", "Վճարում", "Տպում"],
@@ -892,7 +899,8 @@ const armenian: MessageCatalog = {
     startError: "Չհաջողվեց սկսել տպումը։ Փորձեք կրկին։",
     paidSessionError:
       "Նախորդ վճարված տպումը դեռ ավարտված չէ։ Նոր տպում սկսելու համար դիմեք սպասարկողին։",
-    printerUnavailableError: "Տպիչը ժամանակավորապես անհասանելի է․ դիմեք սպասարկողին։",
+    printerUnavailableTitle: "Տպիչը ժամանակավորապես անհասանելի է",
+    printerUnavailableError: "Տպիչը ժամանակավորապես անհասանելի է։ Դիմեք սպասարկման ծառայությանը։",
     printerOutOfPaperError: "Տպիչում թուղթը վերջացել է․ դիմեք սպասարկողին։",
     footerSecure: "Անվտանգ կապ",
     footerNoAccount: "Գրանցում պետք չէ",

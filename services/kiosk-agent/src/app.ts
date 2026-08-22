@@ -88,6 +88,25 @@ export async function buildAgent(
 
   const upstreamFetch = options.upstreamFetch ?? globalThis.fetch;
 
+  /**
+   * Whether the touchscreen may offer a new session at all.
+   *
+   * Read-only and polled while the welcome screen is idle, so the kiosk can
+   * close itself the moment its printer cannot finish a job rather than letting
+   * somebody start and be refused. The answer comes from the control plane's own
+   * readiness gate — the same one session creation consults — so the screen
+   * never forms a second opinion about the printer.
+   */
+  app.get("/v1/availability", (_request, reply) =>
+    forwardApiResponse(
+      upstreamFetch,
+      environment,
+      `/v1/kiosks/${encodeURIComponent(environment.DEV_KIOSK_ID)}/availability`,
+      { method: "GET", headers: upstreamHeaders(environment) },
+      reply
+    )
+  );
+
   app.post("/v1/sessions", async (request, reply) => {
     const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
     if (!idempotencyKey) {

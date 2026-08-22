@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 
 import {
   agentHeartbeatBodySchema,
@@ -7,8 +8,11 @@ import {
 } from "@printing-kiosk/contracts";
 import type { PrismaClient } from "@printing-kiosk/database";
 
+import { ApiError } from "../sessions/errors.js";
+
 import type { Clock } from "../sessions/crypto.js";
 import { kioskRateLimitKey, type KioskAuthenticationThrottle } from "../sessions/rate-limit.js";
+import type { PrinterReadinessGate } from "./readiness.js";
 import type { DeviceRegistryService } from "./service.js";
 
 export interface DeviceRouteDependencies {
@@ -16,6 +20,7 @@ export interface DeviceRouteDependencies {
   clock: Clock;
   devices: DeviceRegistryService;
   kioskAuthentication: KioskAuthenticationThrottle;
+  printerReadiness: PrinterReadinessGate;
 }
 
 /**
@@ -27,10 +32,62 @@ export interface DeviceRouteDependencies {
  * credential is the only kiosk a caller can write to — none of these routes
  * takes a kiosk identifier from the request at all.
  */
+const kioskAvailabilityParamsSchema = z.object({ kioskId: z.string().min(1).max(64) });
+
 export function registerDeviceRoutes(
   app: FastifyInstance,
   dependencies: DeviceRouteDependencies
 ): void {
+  /**
+   * Whether this kiosk can take a new customer.
+   *
+   * The one route here a touchscreen may call, and the only one that does not
+   * need the agent scope. It exists so the welcome screen can close itself
+   * before somebody starts a session it would only have to refuse — a customer
+   * who has chosen files and reached a checkout has already lost more than the
+   * refusal costs to prevent.
+   *
+   * It answers from the same gate session creation uses, deliberately: a screen
+   * that decided availability for itself would be a second opinion about the
+   * printer, and the two would drift. Non-strict, like session start — payment
+   * is where freshness is enforced, and refusing here over a poll that is merely
+   * due would close a working kiosk.
+   */
+  app.get(
+    "/v1/kiosks/:kioskId/availability",
+    {
+      // Polled by every idle screen in the fleet, so it is cheap by design: one
+      // indexed row, no writes, and a ceiling that leaves room for a few seconds
+      // between asks without letting a stuck client hammer the database.
+      config: { rateLimit: { max: 120, timeWindow: "1 minute", keyGenerator: kioskRateLimitKey } }
+    },
+    async (request, reply) => {
+      const identity = await dependencies.kioskAuthentication.authenticate(
+        request,
+        dependencies.database,
+        dependencies.clock,
+        "sessions:create"
+      );
+      const params = kioskAvailabilityParamsSchema.parse(request.params);
+      // A credential may only ask about its own kiosk, and is told nothing about
+      // whether another one exists.
+      if (params.kioskId !== identity.kioskId) {
+        throw new ApiError(404, "KIOSK_NOT_FOUND", "No such kiosk.");
+      }
+
+      const readiness = await dependencies.printerReadiness.read(
+        dependencies.database,
+        identity.kioskId
+      );
+
+      return reply.header("cache-control", "no-store").send({
+        availability: readiness.ready
+          ? { available: true, reason: null }
+          : { available: false, reason: readiness.reason }
+      });
+    }
+  );
+
   app.post(
     "/v1/agent/register",
     {

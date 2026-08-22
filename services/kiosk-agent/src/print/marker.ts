@@ -194,6 +194,18 @@ export interface MarkerObservation {
    * pull a sheet and a single flat reading is not a stalled engine.
    */
   readonly stillReadsBeforeStopped: number;
+  /**
+   * The same allowance, before the job's *first* impression lands.
+   *
+   * It has to be larger, and the reason is mechanical: the print host returns
+   * when the spooler retires the job — when the data arrived — which is a second
+   * or so after submission and well before any ink reaches paper. A printer
+   * waking from sleep can take considerably longer than that to produce its
+   * first page, and during the whole of that window the counter reads exactly
+   * what it read before the job started. Judging a job on the gap before it has
+   * begun is judging it on nothing.
+   */
+  readonly startupReadsBeforeStopped: number;
 }
 
 /**
@@ -242,11 +254,25 @@ export async function observeMarkerCompletion(input: MarkerObservation): Promise
         stillReads += 1;
       }
 
-      // A stopped engine short of the count is the answer, and there is no
-      // reason to keep asking. The fault is not what decides it — the counter
-      // is — but it is proof that more pages are not coming.
-      if (snapshot && engineHasStopped(snapshot)) return evidence;
-      if (stillReads >= input.stillReadsBeforeStopped) return evidence;
+      // Whether this job has put anything on paper yet. Everything below turns
+      // on it, because a flat counter means two completely different things
+      // either side of the first impression: not started, or stopped.
+      const started = highest > before.lifeCount;
+
+      // A fault may end the watch early, but only once the engine has actually
+      // produced something and then stopped.
+      //
+      // Not before. An empty tray asserts `noPaper` the instant its last sheet
+      // is pulled — while that sheet is still in the paper path, still being
+      // marked, and on a duplex job still waiting for its second side. Trusting
+      // the fault at that moment is what turned a two-page duplex job that
+      // printed perfectly into a shortfall of `observed: 0`: the first reading
+      // landed before any ink, saw an empty tray, and concluded the engine had
+      // stopped when it had not yet begun.
+      if (started && stillReads > 0 && snapshot && engineHasStopped(snapshot)) return evidence;
+      if (stillReads >= (started ? input.stillReadsBeforeStopped : input.startupReadsBeforeStopped)) {
+        return evidence;
+      }
     }
 
     await input.delay(input.pollIntervalMs);

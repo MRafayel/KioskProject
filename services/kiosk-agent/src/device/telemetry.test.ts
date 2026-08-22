@@ -538,3 +538,121 @@ describe("what counts as a change worth reporting", () => {
     expect(healthSignature({ kind: "DISABLED" })).not.toBe(healthSignature(unavailable("TIMEOUT", 1)));
   });
 });
+
+/**
+ * The readings taken while a job is marking are the freshest view of the printer
+ * anybody has, and the job that empties the tray is exactly the one being
+ * watched. Letting them sit unread meant the next customer could start on a
+ * machine that ran out half a minute earlier.
+ */
+describe("readings taken during a print reach the same cache", () => {
+  it("wakes the reporter the moment the last sheet leaves the tray", async () => {
+    const beats: string[] = [];
+    const source = createPrinterTelemetrySource({
+      environment: environmentWith({ PRINTER_TELEMETRY_ENABLED: true }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+      client: scriptedClient([loadedSnapshot(), emptySnapshot()])
+    });
+    source.onChange(() => beats.push("beat"));
+
+    // The first reading is itself a change — from having heard nothing to
+    // having heard something — so prime past it before counting.
+    await source.readNow();
+    const primed = beats.length;
+
+    await source.readNow();
+
+    // One further beat, on the reading where the tray actually emptied.
+    expect(beats).toHaveLength(primed + 1);
+    expect(source.current()).toMatchObject({ kind: "SNAPSHOT" });
+  });
+
+  it("leaves the cached verdict describing the printer, not the job", async () => {
+    const source = createPrinterTelemetrySource({
+      environment: environmentWith({ PRINTER_TELEMETRY_ENABLED: true }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+      client: scriptedClient([emptySnapshot()])
+    });
+
+    await source.readNow();
+    const verdict = source.current();
+
+    // The fold decides, not this call: an empty tray is OFFLINE for whoever
+    // comes next, which is the same answer the poller would have reached.
+    expect(applyPrinterTelemetry(READY, verdict, { required: true })).toMatchObject({
+      health: "OFFLINE",
+      warningCode: "PAPER_LOW"
+    });
+  });
+
+  it("does not let a dropped reading during a print count as silence", async () => {
+    // At this loop's cadence three unlucky packets would otherwise withdraw the
+    // printer inside ten seconds, on a threshold tuned for the poller's minute.
+    const source = createPrinterTelemetrySource({
+      environment: environmentWith({ PRINTER_TELEMETRY_ENABLED: true }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+      client: {
+        read: () => Promise.resolve({ outcome: "UNAVAILABLE", reason: "TIMEOUT" } as const),
+        close: () => undefined
+      }
+    });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) await source.readNow();
+
+    expect(source.current()).toEqual({
+      kind: "UNAVAILABLE",
+      reason: "TIMEOUT",
+      consecutiveFailures: 0
+    });
+  });
+
+  it("refreshes how recently the printer was heard from", async () => {
+    const source = createPrinterTelemetrySource({
+      environment: environmentWith({ PRINTER_TELEMETRY_ENABLED: true }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+      client: scriptedClient([loadedSnapshot()])
+    });
+
+    expect(source.observedAt()).toBeNull();
+    await source.readNow();
+    // Payment reads this age. A print is the one moment the printer is being
+    // asked constantly, so it should count as having been heard from.
+    expect(source.observedAt()).toEqual(loadedSnapshot().readAt);
+  });
+});
+
+function scriptedClient(snapshots: PrinterTelemetrySnapshot[]): PrinterTelemetryClient {
+  let index = 0;
+  return {
+    read: () => {
+      const snapshot = snapshots[Math.min(index, snapshots.length - 1)];
+      index += 1;
+      return Promise.resolve(
+        snapshot
+          ? ({ outcome: "OK", snapshot } as const)
+          : ({ outcome: "UNAVAILABLE", reason: "TIMEOUT" } as const)
+      );
+    },
+    close: () => undefined
+  };
+}
+
+function baseSnapshot(): PrinterTelemetrySnapshot {
+  return {
+    readAt: new Date("2026-08-22T12:00:00.000Z"),
+    serialNumber: "SERIAL",
+    engine: "PRINTING",
+    faults: [],
+    marker: { lifeCount: 100, unit: "IMPRESSIONS" },
+    inputs: null,
+    supplies: null
+  };
+}
+
+function loadedSnapshot(): PrinterTelemetrySnapshot {
+  return { ...baseSnapshot(), inputs: LOADED };
+}
+
+function emptySnapshot(): PrinterTelemetrySnapshot {
+  return { ...baseSnapshot(), faults: ["LOW_PAPER"], inputs: OUT_OF_PAPER };
+}

@@ -1729,9 +1729,13 @@ describe("kiosk prototype journey", () => {
         "Նախորդ վճարված տպումը դեռ ավարտված չէ։ Նոր տպում սկսելու համար դիմեք սպասարկողին։"
       )
     ).toBeVisible();
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toContain("POST");
-    expect(requests[0]).not.toContain("/cancel");
+    // The welcome screen polls its own availability on a timer, which is not
+    // what this test is about: the subject is that a blocked start makes one
+    // session request and never reaches for /cancel.
+    const sessionRequests = requests.filter((entry) => !entry.includes("/availability"));
+    expect(sessionRequests).toHaveLength(1);
+    expect(sessionRequests[0]).toContain("POST");
+    expect(sessionRequests[0]).not.toContain("/cancel");
   });
 
   it("cancels safely and returns to the only available service", async () => {
@@ -2054,7 +2058,13 @@ describe("kiosk prototype journey", () => {
     });
 
     expect(screen.getByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
-    expect(fetchMock).not.toHaveBeenCalled();
+    // Nothing about finishing a session may depend on the network. The welcome
+    // screen it lands on does ask whether the printer can take a new customer,
+    // and that is a separate question with its own failure behaviour.
+    const settlementCalls = fetchMock.mock.calls.filter(
+      ([input]) => !requestUrl(input).includes("/availability")
+    );
+    expect(settlementCalls).toHaveLength(0);
     expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).toBeNull();
     expect(
       window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${testSession.id}`)

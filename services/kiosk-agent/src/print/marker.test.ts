@@ -135,9 +135,37 @@ describe("waiting for the engine rather than the spooler", () => {
     expect(result).toMatchObject({ observed: 3, expected: 5 });
   });
 
-  it("stops waiting immediately on an explicit fault", async () => {
-    // Paper ran out four sheets in. There is no reason to keep asking a printer
-    // that has told us why it stopped.
+  it("does not read an empty tray as a stopped engine before any ink lands", async () => {
+    // The 22 August duplex regression, exactly as it happened. Two pages on one
+    // sheet: the printer pulls its last sheet, the tray reads empty, and the
+    // print host has already returned because the spooler retired the data. The
+    // first counter reading therefore lands *before* the first impression, on a
+    // printer reporting `noPaper`. Concluding there is what recorded
+    // `observed: 0` against a job that went on to print both sides perfectly.
+    const counts = [100, 100, 101, 102];
+    let index = 0;
+    const result = await observeMarkerCompletion({
+      before: marker(100),
+      job: { printedSides: 2, physicalSheets: 1 },
+      read: () =>
+        Promise.resolve(snapshot(counts[Math.min(index, counts.length - 1)] ?? 0, ["NO_PAPER"])),
+      deadlineAt: 100_000,
+      now: () => 0,
+      delay: () => {
+        index += 1;
+        return Promise.resolve();
+      },
+      pollIntervalMs: 1,
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
+    });
+    expect(result).toEqual({ kind: "SUFFICIENT", observed: 2, expected: 2 });
+  });
+
+  it("still gives up early once the engine has produced something and stopped", async () => {
+    // Paper ran out four sheets into a five-sheet job. The fault is trusted here
+    // because the counter moved first and has since gone flat, which together
+    // mean the engine started and stopped — not that it had yet to begin.
     let reads = 0;
     const result = await observeMarkerCompletion({
       before: marker(100),
@@ -150,10 +178,51 @@ describe("waiting for the engine rather than the spooler", () => {
       now: () => 0,
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
-      stillReadsBeforeStopped: 3
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
     });
-    expect(result.kind).toBe("SHORTFALL");
-    expect(reads).toBe(1);
+    expect(result).toMatchObject({ kind: "SHORTFALL", observed: 4, expected: 5 });
+    // One reading to see it had started, one to see it had stopped.
+    expect(reads).toBe(2);
+  });
+
+  it("waits out a printer that is slow to wake before calling a job short", async () => {
+    // A printer coming out of sleep can take half a minute to mark its first
+    // page, and for all of it the counter reads what it read before the job.
+    const counts = [100, 100, 100, 100, 100, 101];
+    let index = 0;
+    const result = await observeMarkerCompletion({
+      before: marker(100),
+      job: { printedSides: 1, physicalSheets: 1 },
+      read: () => Promise.resolve(snapshot(counts[Math.min(index, counts.length - 1)] ?? 0)),
+      deadlineAt: 100_000,
+      now: () => 0,
+      delay: () => {
+        index += 1;
+        return Promise.resolve();
+      },
+      pollIntervalMs: 1,
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
+    });
+    expect(result.kind).toBe("SUFFICIENT");
+  });
+
+  it("still calls a job short when nothing is ever marked", async () => {
+    // The startup allowance is patience, not amnesty. A job that never produces
+    // an impression is still a shortfall once the allowance runs out.
+    const result = await observeMarkerCompletion({
+      before: marker(100),
+      job: JOB,
+      read: () => Promise.resolve(snapshot(100, ["NO_PAPER"])),
+      deadlineAt: 100_000,
+      now: () => 0,
+      delay: () => Promise.resolve(),
+      pollIntervalMs: 1,
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 4
+    });
+    expect(result).toMatchObject({ kind: "SHORTFALL", observed: 0, expected: 5 });
   });
 
   it("still needs the counter to agree before a fault means a shortfall", async () => {
@@ -167,7 +236,8 @@ describe("waiting for the engine rather than the spooler", () => {
       now: () => 0,
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
-      stillReadsBeforeStopped: 3
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
     });
     expect(result.kind).toBe("SUFFICIENT");
   });
@@ -186,7 +256,8 @@ describe("waiting for the engine rather than the spooler", () => {
         return Promise.resolve();
       },
       pollIntervalMs: 10,
-      stillReadsBeforeStopped: 3
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
     });
     expect(result).toEqual({ kind: "UNKNOWN", reason: "NO_FINAL_READING" });
   });
@@ -207,7 +278,8 @@ describe("waiting for the engine rather than the spooler", () => {
         return Promise.resolve();
       },
       pollIntervalMs: 10,
-      stillReadsBeforeStopped: 3
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
     });
     expect(result).toEqual({ kind: "UNKNOWN", reason: "STILL_ADVANCING" });
   });
@@ -225,7 +297,8 @@ describe("waiting for the engine rather than the spooler", () => {
       now: () => 0,
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
-      stillReadsBeforeStopped: 3
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10
     });
     expect(result).toEqual({ kind: "UNKNOWN", reason: "NO_BASELINE" });
     expect(reads).toBe(0);
@@ -359,6 +432,7 @@ async function observe(counts: number[]): Promise<MarkerEvidence> {
       return Promise.resolve();
     },
     pollIntervalMs: 10,
-    stillReadsBeforeStopped: 3
+    stillReadsBeforeStopped: 3,
+    startupReadsBeforeStopped: 10
   });
 }

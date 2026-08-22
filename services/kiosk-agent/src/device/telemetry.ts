@@ -407,13 +407,30 @@ export function createPrinterTelemetrySource(
       listeners.push(listener);
     },
     async readNow(): Promise<PrinterTelemetrySnapshot | null> {
-      // Deliberately not folded into the cache. A reading taken mid-job is
-      // about that job, and letting it set the kiosk's health would let a
-      // printer that asserts `noPaper` on its last sheet close the kiosk on
-      // the strength of a job that finished.
       try {
         const result = await client.read();
-        return result.outcome === "OK" ? result.snapshot : null;
+        if (result.outcome !== "OK") return null;
+        // Folded into the same cache the poller writes, through the same fold.
+        //
+        // These readings are taken every few seconds while a job is marking,
+        // which makes them the freshest view of the printer anyone has — and the
+        // job that empties the tray is precisely the one being watched here.
+        // Letting them sit unread meant the next customer could start a session
+        // on a machine that had run out half a minute earlier, purely because
+        // the scheduled poll had not come round yet.
+        //
+        // It cannot affect the job in flight: health is only ever a statement
+        // about the *next* customer, and this operation's outcome is decided by
+        // the counter alone. What it does is trip the same beat-on-change the
+        // poller uses, so an empty tray reaches the control plane in about a
+        // second instead of at the next poll.
+        //
+        // Only successful readings. A failed one here would count towards the
+        // sustained-silence threshold at this loop's cadence rather than the
+        // poller's, turning a few dropped packets during one print into an
+        // offline printer; the poller notices real silence on its own schedule.
+        record({ kind: "SNAPSHOT", snapshot: result.snapshot });
+        return result.snapshot;
       } catch {
         return null;
       }

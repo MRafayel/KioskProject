@@ -575,7 +575,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     kioskAuthentication,
     maxDocumentBytes: options.environment.MAX_NORMALIZED_FILE_BYTES
   });
-  registerDeviceRoutes(app, { database, clock, devices, kioskAuthentication });
+  registerDeviceRoutes(app, { database, clock, devices, kioskAuthentication, printerReadiness });
   registerDocumentPreviewRoutes(app, {
     database,
     objectStore,

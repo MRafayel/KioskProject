@@ -18,7 +18,7 @@ interface LanguageContextValue {
   resetLocale: () => void;
 }
 
-const DEFAULT_LOCALE: Locale = "hy";
+export const DEFAULT_LOCALE: Locale = "hy";
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function LanguageProvider({ children }: { children: ReactNode }) {

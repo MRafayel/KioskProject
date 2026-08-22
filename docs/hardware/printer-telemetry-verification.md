@@ -554,3 +554,73 @@ Device-side `phaseMs` for a one-page job (9.6 s of host time):
 Removing the settle window takes a flat 3.0 s off every job — about **22 % of
 the 13.7 s** payment-to-completion time for a single sheet, with no new surface
 and nothing crossing the payment boundary.
+
+## RESULT: duplex job failed on a counter that had not started (22 Aug 2026)
+
+Two pages duplex on one sheet, both sides printed, reported
+`RECOVERY_REQUIRED` with `marker: {expected: 2, observed: 0}`.
+
+**`observed: 0` is the whole diagnosis.** The watch concluded before the engine
+had marked anything. The print host returns when the spooler retires the job —
+about a second after submission, and well before ink reaches paper — so the first
+counter reading lands at the baseline. That job had pulled the tray's last sheet,
+so the tray already read empty and the fault early-exit fired: `engineHasStopped`
+saw `noPaper` and returned the shortfall it had at that instant.
+
+The tray being empty says nothing about the sheet already in the paper path, and
+on a duplex job that sheet still owes a second impression. The same bug produced
+`observed: 1` on a two-sheet simplex job in the row below it.
+
+Fixed by making the counter, not the fault, decide *when to stop asking*:
+
+- a fault ends the watch only once the job has produced at least one impression
+  **and** the counter has since gone flat — started, then stopped;
+- before the first impression a longer allowance applies
+  (`MARKER_STARTUP_READS_BEFORE_STOPPED`, 10 readings ≈ 30 s), because a printer
+  waking from sleep can take most of that to mark its first page.
+
+Genuine partial output is unaffected: 1 of 2 impressions with a stalled engine
+still settles `RECOVERY_REQUIRED` one poll later than before.
+
+## The tray that empties on the last sheet (22 Aug 2026)
+
+Readings taken during physical-completion tracking now feed the same cache the
+poller writes, through the same fold. They are the freshest view of the printer
+anyone has, and the job that empties the tray is precisely the one being watched
+— so an empty tray now trips the existing beat-on-change and reaches the control
+plane in about a second instead of at the next scheduled poll.
+
+No second health model: `record()` is the same function the poller calls, and
+`applyPrinterTelemetry` is the same fold, so an empty tray becomes `OFFLINE`
+because `paperPresence` says every input is empty, while a bare `LOW_PAPER`
+advisory stays `WARNING` and keeps selling. Only successful readings are
+recorded — a dropped packet at this loop's three-second cadence must not count
+towards a silence threshold tuned for the poller's minute.
+
+The job in flight is untouched. Health is only ever a statement about the next
+customer; this operation's outcome is decided by the counter alone.
+
+## The blocking screen (22 Aug 2026)
+
+`GET /v1/kiosks/:kioskId/availability` answers from `PrinterReadinessGate.read()`
+— the same gate session creation runs, non-strict, so the screen and the refusal
+behind it cannot drift. It returns a verdict and a reason and nothing else: no
+health value, no queue name, no serial.
+
+The welcome screen polls it every five seconds and, on a definite negative,
+disables Start and covers itself with a non-dismissible `alertdialog`: no close
+control, no backdrop dismissal, and a capturing Escape handler, because there is
+no choice to offer. It clears itself on the next poll that comes back available,
+with no reload.
+
+| Health | Screen |
+|---|---|
+| `READY` | open |
+| `WARNING` (`TONER_LOW`, `PAPER_LOW` advisory) | **open** — the machine can still print |
+| `OFFLINE` (empty trays, `noPaper`, jam, no toner, output full, tray missing) | blocked |
+| silent / stale agent, no certified printer | blocked |
+
+A failed poll leaves the screen open on purpose. The gate still runs on session
+creation, so an optimistic wrong answer costs only the refusal the customer would
+have had anyway, while a pessimistic wrong answer closes a working kiosk because
+its own agent was briefly slow.
