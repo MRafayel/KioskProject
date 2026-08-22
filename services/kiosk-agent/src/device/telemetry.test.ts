@@ -1,13 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type { NonAdminEnvironment } from "@printing-kiosk/config";
 import type {
   PrinterFault,
   PrinterInput,
+  PrinterTelemetryClient,
   PrinterTelemetrySnapshot
 } from "@printing-kiosk/printer-telemetry";
 
 import {
   applyPrinterTelemetry,
+  createPrinterTelemetrySource,
   describeVerdict,
   type PrinterWarningCode,
   type TelemetryVerdict
@@ -375,3 +378,83 @@ describe("paper presence comes from the trays, not the bit", () => {
     expect(result.reason).not.toContain("113");
   });
 });
+
+/**
+ * Whether telemetry is running at all, as something a kiosk can be asked.
+ *
+ * This is the gap that produced the 22 August no-paper session. The agent was
+ * built, wired and correct, and `PRINTER_TELEMETRY_ENABLED` was simply never set
+ * on the machine — so the fold was a no-op, the driver's `Normal` stood, and the
+ * kiosk sold a print against an empty tray. Nothing in any log distinguished
+ * that kiosk from one whose telemetry was working perfectly.
+ */
+describe("a kiosk can tell whether telemetry is actually on", () => {
+  it("says out loud that health is driver-only when telemetry is off", () => {
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const source = createPrinterTelemetrySource({
+      environment: environmentWith({ PRINTER_TELEMETRY_ENABLED: false }),
+      logger
+    });
+
+    source.start();
+
+    expect(source.current()).toEqual({ kind: "DISABLED" });
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.warn.mock.calls[0]?.[1]).toContain("driver-reported only");
+  });
+
+  it("says where it is polling, and never what it polls with", () => {
+    const logger = { info: vi.fn<LogLine>(), warn: vi.fn<LogLine>() };
+    const source = createPrinterTelemetrySource({
+      environment: environmentWith({
+        PRINTER_TELEMETRY_ENABLED: true,
+        PRINTER_TELEMETRY_HOST: "192.168.253.2",
+        PRINTER_TELEMETRY_SNMP_AUTH_KEY: "auth-passphrase",
+        PRINTER_TELEMETRY_SNMP_PRIV_KEY: "priv-passphrase",
+        PRINTER_TELEMETRY_SERIAL: "ABC12345"
+      }),
+      logger,
+      client: silentClient()
+    });
+
+    source.start();
+    source.close();
+
+    expect(logger.warn).not.toHaveBeenCalled();
+    const [fields, message] = logger.info.mock.calls[0] ?? [];
+    expect(message).toBe("printer telemetry polling");
+    expect(fields).toMatchObject({ telemetry: "enabled", host: "192.168.253.2", required: true });
+    // The kiosk is a public machine; its logs are not a place to keep the keys
+    // to the device it prints with.
+    const written = JSON.stringify(fields);
+    expect(written).not.toContain("auth-passphrase");
+    expect(written).not.toContain("priv-passphrase");
+    expect(written).not.toContain("ABC12345");
+  });
+});
+
+type LogLine = (fields: Record<string, unknown>, message: string) => void;
+
+/** Only the keys this source reads; the rest of the environment is not its business. */
+function environmentWith(overrides: Partial<NonAdminEnvironment>): NonAdminEnvironment {
+  return {
+    PRINTER_TELEMETRY_ENABLED: false,
+    PRINTER_TELEMETRY_HOST: "",
+    PRINTER_TELEMETRY_PORT: 161,
+    PRINTER_TELEMETRY_POLL_SECONDS: 30,
+    PRINTER_TELEMETRY_REQUIRED: true,
+    PRINTER_TELEMETRY_SERIAL: "",
+    PRINTER_TELEMETRY_MAC: "",
+    PRINTER_TELEMETRY_SNMP_USER: "",
+    PRINTER_TELEMETRY_SNMP_AUTH_KEY: "",
+    PRINTER_TELEMETRY_SNMP_PRIV_KEY: "",
+    ...overrides
+  } as NonAdminEnvironment;
+}
+
+function silentClient(): PrinterTelemetryClient {
+  return {
+    read: () => Promise.resolve({ outcome: "UNAVAILABLE", reason: "TIMEOUT" } as const),
+    close: () => undefined
+  };
+}

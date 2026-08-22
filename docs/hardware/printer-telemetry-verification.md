@@ -367,3 +367,56 @@ blocked-job on this device, and it is not consulted for any decision.
   needs a gate that does not exist yet and is a change to the customer path.
 - **The progress UI still runs on a timer.** Feeding it real marker counts needs
   the counter to reach the browser, which is a new API surface.
+
+## RESULT: the gate did not fire on an empty tray (22 Aug 2026)
+
+The first live test of the readiness gate: tray physically empty, printer panel
+showing **No Paper**, SNMPv3 confirmed working by the probe. **Start Printing
+still opened a session, and the print still reported success.**
+
+The gate was not bypassed. It ran, and it passed, because the value it reads was
+wrong:
+
+```
+ queue_name          | approval | health | warning_code | age
+ CanonLBP361_UFR_II  | APPROVED | READY  |              | 00:19:35
+```
+
+`READY`, with no paper in the machine. Approval was intact, the row was fresh
+when the session was created, idempotency was not involved, and the "no printer
+rows" exception was not taken — rows existed and one was approved.
+
+### Cause
+
+`PRINTER_TELEMETRY_ENABLED` was never set on the kiosk, and it defaults to
+`false`. `createPrinterTelemetrySource` then returns a stub whose verdict is
+`DISABLED`, `applyPrinterTelemetry` returns the reading unchanged, and the
+reported health is whatever the Windows driver says — which is `Normal` with an
+empty tray, exactly as 0a and 0b established. Every layer above behaved
+correctly on a value that had never been near the printer.
+
+The SNMPv3 credentials from 0e were set as `$env:` variables in the PowerShell
+session used to run the probe. They were never in the agent's environment file,
+and the 15 `PRINTER_TELEMETRY_*` keys had not been added to `.env.example`, so
+there was no template to configure them from.
+
+### Why nothing showed it
+
+A kiosk with telemetry off produced **no log line of any kind** distinguishing it
+from a kiosk whose telemetry was working. The disabled branch returned silently
+and the gate decided silently. That is now closed at both ends:
+
+- the agent logs `printer telemetry is off; printer health is driver-reported
+  only` at `warn` on start, or `printer telemetry polling` with host, port, poll
+  interval and `required` when it is on — never the keys, user or serial;
+- the API logs every gate decision — `debug` on pass, `warn` on refusal — with
+  the approval, health, warning code, reading age and silence budget behind it.
+
+### Not a cause: the print reporting success
+
+Separate and expected at this phase. Confirmation still comes from spooler
+retirement, which measures the data handoff and not paper, so a job submitted to
+an empty printer retires in ~1.3 s and settles `CONFIRMED`. Only Phase 3 —
+downgrade-only confirmation from `prtMarkerLifeCount` — changes that, and it is
+not built. Telemetry at Phase 2 gates the *next* customer; it never revisits a
+job that was already submitted.

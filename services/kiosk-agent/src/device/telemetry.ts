@@ -244,7 +244,10 @@ export interface PrinterTelemetrySource {
 
 export interface PrinterTelemetrySourceOptions {
   readonly environment: NonAdminEnvironment;
-  readonly logger: { info(fields: Record<string, unknown>, message: string): void };
+  readonly logger: {
+    info(fields: Record<string, unknown>, message: string): void;
+    warn(fields: Record<string, unknown>, message: string): void;
+  };
   /** Injected for tests; the real one is built from the environment. */
   readonly client?: PrinterTelemetryClient;
   readonly now?: () => Date;
@@ -266,7 +269,21 @@ export function createPrinterTelemetrySource(
   const intervalMs = environment.PRINTER_TELEMETRY_POLL_SECONDS * 1_000;
 
   if (!environment.PRINTER_TELEMETRY_ENABLED) {
-    return { current: () => ({ kind: "DISABLED" }), start: () => undefined, close: () => undefined };
+    // Said out loud, once, because the silent version of this cost a customer a
+    // print. With telemetry off the fold is a no-op and the reported health is
+    // whatever the driver claims — which on the certified Canon is `Normal`
+    // with an empty tray. A kiosk in that state looks identical in every other
+    // log line to one that can actually see its printer, so this is the only
+    // place the difference is visible.
+    return {
+      current: () => ({ kind: "DISABLED" }),
+      start: () =>
+        options.logger.warn(
+          { telemetry: "disabled" },
+          "printer telemetry is off; printer health is driver-reported only"
+        ),
+      close: () => undefined
+    };
   }
 
   const client = options.client ?? buildClient(environment, now);
@@ -335,6 +352,19 @@ export function createPrinterTelemetrySource(
     start(): void {
       if (!stopped) return;
       stopped = false;
+      // Device configuration only — never the user, the keys or the serial.
+      // Enough to tell a working link from a misaddressed one without putting
+      // anything on a public machine's disk that is worth stealing.
+      options.logger.info(
+        {
+          telemetry: "enabled",
+          host: environment.PRINTER_TELEMETRY_HOST,
+          port: environment.PRINTER_TELEMETRY_PORT,
+          pollSeconds: environment.PRINTER_TELEMETRY_POLL_SECONDS,
+          required: environment.PRINTER_TELEMETRY_REQUIRED
+        },
+        "printer telemetry polling"
+      );
       schedule(0);
     },
     close(): void {

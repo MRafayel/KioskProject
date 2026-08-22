@@ -97,6 +97,16 @@ export interface PrinterReadinessGateOptions {
    */
   readonly maxSilenceMs: number;
   readonly clock: { now(): Date };
+  /**
+   * Optional, and only ever told about the device row this gate read. A refusal
+   * here closes a kiosk to customers, so the reason it decided has to be
+   * recoverable afterwards from something other than a customer's account of
+   * what the screen said.
+   */
+  readonly logger?: {
+    debug(fields: Record<string, unknown>, message: string): void;
+    warn(fields: Record<string, unknown>, message: string): void;
+  };
 }
 
 /**
@@ -136,11 +146,32 @@ export class PrinterReadinessGate {
     const hasAnyPrinter =
       approved !== null || (await transaction.printer.count({ where: { kioskId } })) > 0;
 
-    return classifyPrinterReadiness({
+    const now = this.options.clock.now();
+    const readiness = classifyPrinterReadiness({
       approved,
       hasAnyPrinter,
-      now: this.options.clock.now(),
+      now,
       maxSilenceMs: this.options.maxSilenceMs
     });
+
+    // The whole basis of the decision, so a kiosk that turned somebody away —
+    // or one that should have and did not — can be explained without a
+    // reproduction. `health` here is the agent's folded verdict: if telemetry is
+    // off on that machine it is the driver's opinion, and the pair of this line
+    // and the agent's own telemetry line is what tells the two apart.
+    const fields = {
+      kioskId,
+      decision: readiness.ready ? "PASS" : readiness.reason,
+      approvedPrinter: approved !== null,
+      hasAnyPrinter,
+      health: approved?.health ?? null,
+      warningCode: approved?.warningCode ?? null,
+      ageMs: approved ? now.getTime() - approved.lastSeenAt.getTime() : null,
+      maxSilenceMs: this.options.maxSilenceMs
+    };
+    if (readiness.ready) this.options.logger?.debug(fields, "printer readiness gate passed");
+    else this.options.logger?.warn(fields, "printer readiness gate refused a customer");
+
+    return readiness;
   }
 }

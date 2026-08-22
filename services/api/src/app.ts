@@ -222,7 +222,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   // talking; a couple is a slow network.
   const printerReadiness = new PrinterReadinessGate({
     clock,
-    maxSilenceMs: options.environment.AGENT_HEARTBEAT_SECONDS * 3 * 1_000
+    maxSilenceMs: options.environment.AGENT_HEARTBEAT_SECONDS * 3 * 1_000,
+    logger: app.log
   });
 
   const sessions = new SessionService({
