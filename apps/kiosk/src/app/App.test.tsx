@@ -1049,7 +1049,7 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Please wait until all papers come out" })).toBeVisible();
 
     // Printing is asked for by naming the capture. The browser never describes
     // what to print, and the deterministic device scenario is the only extra.
@@ -1247,7 +1247,7 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Please wait until all papers come out" })).toBeVisible();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
@@ -1317,7 +1317,7 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Please wait until all papers come out" })).toBeVisible();
     expect(printJobRequests).toHaveLength(2);
     expect(printJobRequests.map(({ idempotencyKey }) => idempotencyKey)).toEqual([
       originalIdempotencyKey,
@@ -1385,7 +1385,7 @@ describe("kiosk prototype journey", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Retry printing" }));
-    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Please wait until all papers come out" })).toBeVisible();
     // The kiosk already knows the job ID, so a retry resumes GET polling and
     // does not replay even the idempotent start request.
     expect(printJobRequests).toHaveLength(1);
@@ -1630,7 +1630,7 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    expect(screen.getByRole("heading", { name: "Printing your document" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Please wait until all papers come out" })).toBeVisible();
   });
 
   it("does not print for a captured payment that the control plane marked for compensation", async () => {
@@ -1660,7 +1660,7 @@ describe("kiosk prototype journey", () => {
 
     expect(await screen.findByRole("heading", { name: "Payment arrived too late" })).toBeVisible();
     expect(
-      screen.queryByRole("heading", { name: "Printing your document" })
+      screen.queryByRole("heading", { name: "Please wait until all papers come out" })
     ).not.toBeInTheDocument();
   });
 

@@ -24,7 +24,7 @@ import {
 } from "../features/session/paymentService.js";
 import {
   FINISHING_HOLD_MS,
-  usePrintStage,
+  usePrintProgress,
   type PrintStage
 } from "../features/session/printProgress.js";
 import {
@@ -176,7 +176,7 @@ export function PrintingScreen() {
     : false;
   // Presentation only. It reads the job this screen already polls and cannot
   // reach the device, so it can neither delay a print nor change its outcome.
-  const stage = usePrintStage(observedPrintJob);
+  const { stage, fraction } = usePrintProgress(observedPrintJob);
 
   useEffect(() => {
     if (!sessionId || !paymentId) return;
@@ -287,11 +287,14 @@ export function PrintingScreen() {
 
   return (
     <TerminalProgress
-      eyebrow={messages.status.printingEyebrow}
+      // The rotating stage now carries the eyebrow. "Step 4 of 4" was true and
+      // useless: it never changed, so the only moving text on a screen somebody
+      // waits at was one line near the bottom.
+      eyebrow={messages.status.printingStages[stage]}
       title={messages.status.printingTitle}
       description={messages.status.printingDescription}
-      detail={messages.status.printingStages[stage]}
       stage={stage}
+      progress={fraction}
     />
   );
 }
@@ -593,27 +596,41 @@ function TerminalProgress({
   title,
   description,
   detail,
-  stage
+  stage,
+  progress
 }: {
   eyebrow: string;
   title: string;
   description: string;
-  detail: string;
+  detail?: string;
   stage?: PrintStage;
+  /**
+   * How full the bar is, 0 to 1. Absent leaves the indeterminate animation,
+   * which is the right answer for a screen with nothing to measure.
+   */
+  progress?: number;
 }) {
+  const determinate = typeof progress === "number";
   return (
     <div className="terminal-state" aria-live="polite">
       {stage ? <StageArt stage={stage} /> : <div className="spinner" aria-hidden="true" />}
-      <p className="eyebrow">{eyebrow}</p>
-      <h1>{title}</h1>
+      {/* Keyed so each stage's text fades in as its own element rather than the
+          previous sentence mutating in place. */}
+      <p className="eyebrow eyebrow--stage" key={stage ?? "static"}>
+        {eyebrow}
+      </p>
+      <h1 className={determinate ? "terminal-state__headline" : undefined}>{title}</h1>
       <p>{description}</p>
-      {/* Keyed so each stage's text fades in as its own element rather than
-          the previous sentence mutating in place. */}
-      <span className="progress-detail progress-detail--stage" key={stage ?? "static"}>
-        {detail}
-      </span>
-      <div className="progress-bar" aria-hidden="true">
-        <span />
+      {detail ? <span className="progress-detail">{detail}</span> : null}
+      <div
+        className={determinate ? "progress-bar progress-bar--measured" : "progress-bar"}
+        aria-hidden="true"
+      >
+        <span
+          {...(determinate
+            ? { style: { width: `${String(Math.round(Math.min(1, Math.max(0, progress)) * 100))}%` } }
+            : {})}
+        />
       </div>
     </div>
   );

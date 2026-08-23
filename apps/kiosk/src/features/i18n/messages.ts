@@ -190,10 +190,8 @@ export interface MessageCatalog {
     paymentTitle: string;
     paymentDescription: string;
     paymentDetail: string;
-    printingEyebrow: string;
     printingTitle: string;
     printingDescription: string;
-    printingDetail: string;
     /**
      * What the machine is doing right now, in the customer's words. The screen
      * shows exactly one of these at a time and never runs ahead of what the
@@ -487,10 +485,8 @@ const english: MessageCatalog = {
     paymentTitle: "Processing payment",
     paymentDescription: "Please wait. Do not close or leave this screen.",
     paymentDetail: "No real charge is made in this prototype.",
-    printingEyebrow: "Step 4 of 4",
-    printingTitle: "Printing your document",
-    printingDescription: "Your payment was approved. Please wait for every sheet.",
-    printingDetail: "Preparing · Sending · Printing",
+    printingTitle: "Please wait until all papers come out",
+    printingDescription: "Your document is printing. Your payment was approved.",
     printingStages: {
       PREPARING_FILES: "Preparing your files",
       CHECKING_PRINTER: "Checking the printer",
@@ -778,10 +774,8 @@ const russian: MessageCatalog = {
     paymentTitle: "Обрабатываем платёж",
     paymentDescription: "Пожалуйста, подождите и не покидайте этот экран.",
     paymentDetail: "В прототипе реальные деньги не списываются.",
-    printingEyebrow: "Шаг 4 из 4",
-    printingTitle: "Печатаем документ",
-    printingDescription: "Оплата подтверждена. Дождитесь выхода всех листов.",
-    printingDetail: "Подготовка · Отправка · Печать",
+    printingTitle: "Дождитесь, пока выйдут все листы",
+    printingDescription: "Документ печатается. Оплата подтверждена.",
     printingStages: {
       PREPARING_FILES: "Готовим ваши файлы",
       CHECKING_PRINTER: "Проверяем принтер",
@@ -1064,10 +1058,8 @@ const armenian: MessageCatalog = {
     paymentTitle: "Վճարումը կատարվում է",
     paymentDescription: "Սպասեք և մի փակեք այս էկրանը։",
     paymentDetail: "Փորձնական տարբերակում իրական գումար չի գանձվում։",
-    printingEyebrow: "Քայլ 4 / 4",
-    printingTitle: "Փաստաթուղթը տպվում է",
-    printingDescription: "Վճարումը հաստատվել է։ Սպասեք, մինչև բոլոր թերթերը դուրս գան։",
-    printingDetail: "Նախապատրաստում · Ուղարկում · Տպում",
+    printingTitle: "Սպասեք, մինչև բոլոր թերթերը դուրս գան",
+    printingDescription: "Փաստաթուղթը տպվում է։ Վճարումը հաստատվել է։",
     printingStages: {
       PREPARING_FILES: "Պատրաստում ենք ձեր ֆայլերը",
       CHECKING_PRINTER: "Ստուգում ենք տպիչը",

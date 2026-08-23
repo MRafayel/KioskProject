@@ -2215,3 +2215,33 @@ p {
   background: rgb(196 62 62 / 12%);
   color: #8c2f2f;
 }
+
+/* A measured bar replaces the indeterminate loop only on the printing screen,
+   where there is something real to measure against. The transition is what
+   turns a 250ms sample into continuous movement; without it the bar steps. */
+.progress-bar--measured span {
+  width: 0;
+  animation: none;
+  transition: width 400ms ease-out;
+}
+
+/* The printing screen leads with a sentence rather than a label, so its heading
+   carries more words than the other terminal states and wants less weight to
+   stay readable at arm's length. */
+.terminal-state__headline {
+  max-width: 18ch;
+  font-size: clamp(1.6rem, 3.4vw, 2.3rem);
+}
+
+/* The eyebrow on that screen is the one moving line, so it fades in as each
+   stage replaces the last instead of mutating in place. */
+.eyebrow--stage {
+  animation: stage-fade 320ms ease-out;
+}
+
+@keyframes stage-fade {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
