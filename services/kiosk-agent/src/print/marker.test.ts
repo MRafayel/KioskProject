@@ -157,7 +157,8 @@ describe("waiting for the engine rather than the spooler", () => {
       },
       pollIntervalMs: 1,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result).toEqual({ kind: "SUFFICIENT", observed: 2, expected: 2 });
   });
@@ -179,7 +180,8 @@ describe("waiting for the engine rather than the spooler", () => {
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result).toMatchObject({ kind: "SHORTFALL", observed: 4, expected: 5 });
     // One reading to see it had started, one to see it had stopped.
@@ -203,7 +205,8 @@ describe("waiting for the engine rather than the spooler", () => {
       },
       pollIntervalMs: 1,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result.kind).toBe("SUFFICIENT");
   });
@@ -220,7 +223,8 @@ describe("waiting for the engine rather than the spooler", () => {
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 4
+      startupReadsBeforeStopped: 4,
+      silentReadsBeforeUnknown: 10
     });
     expect(result).toMatchObject({ kind: "SHORTFALL", observed: 0, expected: 5 });
   });
@@ -237,7 +241,8 @@ describe("waiting for the engine rather than the spooler", () => {
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result.kind).toBe("SUFFICIENT");
   });
@@ -257,9 +262,71 @@ describe("waiting for the engine rather than the spooler", () => {
       },
       pollIntervalMs: 10,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result).toEqual({ kind: "UNKNOWN", reason: "NO_FINAL_READING" });
+  });
+
+  it("stops asking a printer that has gone quiet instead of waiting out the job", async () => {
+    // The 23 August stall. A printer that answered the baseline and then stopped
+    // answering used to be polled for the whole remaining deadline — five
+    // minutes of a customer watching a progress bar, and long enough for the
+    // control plane to reclaim the command and refuse the result. Silence still
+    // decides nothing; it just stops costing the job its own deadline.
+    let clock = 0;
+    let reads = 0;
+    const result = await observeMarkerCompletion({
+      before: marker(100),
+      job: JOB,
+      read: () => {
+        reads += 1;
+        return Promise.resolve(null);
+      },
+      deadlineAt: 300_000,
+      now: () => clock,
+      delay: () => {
+        clock += 3_000;
+        return Promise.resolve();
+      },
+      pollIntervalMs: 3_000,
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
+    });
+    expect(result).toEqual({ kind: "UNKNOWN", reason: "TELEMETRY_SILENT" });
+    expect(reads).toBe(10);
+    // Well short of the deadline it used to burn through.
+    expect(clock).toBeLessThan(60_000);
+  });
+
+  it("does not cut the watch short for a few dropped readings mid-job", async () => {
+    // Only sustained silence ends it. A printer too busy marking to answer two
+    // or three times must not lose the comparison that proves its pages came
+    // out, so any reading that lands resets the allowance.
+    const readings: (number | null)[] = [
+      100, null, null, 101, null, null, 102, null, 103, null, null, 104, 105
+    ];
+    let index = 0;
+    const result = await observeMarkerCompletion({
+      before: marker(100),
+      job: JOB,
+      read: () => {
+        const reading = readings[Math.min(index, readings.length - 1)] ?? null;
+        return Promise.resolve(reading === null ? null : snapshot(reading));
+      },
+      deadlineAt: 300_000,
+      now: () => 0,
+      delay: () => {
+        index += 1;
+        return Promise.resolve();
+      },
+      pollIntervalMs: 1,
+      stillReadsBeforeStopped: 3,
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 3
+    });
+    expect(result).toEqual({ kind: "SUFFICIENT", observed: 5, expected: 5 });
   });
 
   it("leaves a still-printing job alone at the deadline", async () => {
@@ -279,7 +346,8 @@ describe("waiting for the engine rather than the spooler", () => {
       },
       pollIntervalMs: 10,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result).toEqual({ kind: "UNKNOWN", reason: "STILL_ADVANCING" });
   });
@@ -298,7 +366,8 @@ describe("waiting for the engine rather than the spooler", () => {
       delay: () => Promise.resolve(),
       pollIntervalMs: 1,
       stillReadsBeforeStopped: 3,
-      startupReadsBeforeStopped: 10
+      startupReadsBeforeStopped: 10,
+      silentReadsBeforeUnknown: 10
     });
     expect(result).toEqual({ kind: "UNKNOWN", reason: "NO_BASELINE" });
     expect(reads).toBe(0);
@@ -433,6 +502,7 @@ async function observe(counts: number[]): Promise<MarkerEvidence> {
     },
     pollIntervalMs: 10,
     stillReadsBeforeStopped: 3,
-    startupReadsBeforeStopped: 10
+    startupReadsBeforeStopped: 10,
+    silentReadsBeforeUnknown: 10
   });
 }

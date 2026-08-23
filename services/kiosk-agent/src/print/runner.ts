@@ -58,6 +58,26 @@ const MARKER_STILL_READS_BEFORE_STOPPED = 3;
  */
 const MARKER_STARTUP_READS_BEFORE_STOPPED = 10;
 /**
+ * Consecutive unreadable readings before the watch gives up on the printer.
+ *
+ * Ten of them is thirty seconds of a device that will not answer at all, which
+ * is long enough to ride out a printer too busy marking to service SNMP and
+ * short enough that a telemetry outage costs a customer half a minute rather
+ * than the job's entire deadline. The verdict is `UNKNOWN` either way, so this
+ * decides only how long the kiosk waits to learn nothing.
+ */
+const MARKER_SILENT_READS_BEFORE_UNKNOWN = 10;
+/**
+ * How much of the job's deadline is kept back for reporting the result.
+ *
+ * The watch may legitimately run until the engine stops, and on a large job that
+ * is most of the time the job has. Running it right up to the deadline means
+ * arriving at a verdict at the exact moment the control plane settles the job
+ * without one — so the last few seconds are reserved for the report round trip,
+ * which is a single POST bounded by `REQUEST_TIMEOUT_MS`.
+ */
+const MARKER_REPORT_MARGIN_MS = 15_000;
+/**
  * Reasons that mean no measurement was ever taken, as opposed to one that was
  * taken and came out inconclusive. The first kind is the normal state of a kiosk
  * without a telemetry link and is not worth recording; the second is a printer
@@ -336,6 +356,13 @@ export class PrintCommandRunner {
     const markerBefore = await this.readMarker();
 
     let status: PrintOperationStatus;
+    let evidence: MarkerEvidence;
+    // How long was spent watching the engine rather than the queue. Separated
+    // out because the two are the difference between a slow printer and a stuck
+    // agent, and on 23 August only their sum was recorded — which made a job
+    // that spent three minutes waiting on a silent printer look exactly like one
+    // that spent three minutes printing.
+    let markerWatchMs: number;
     const startedAt = Date.now();
     // The device is about to be given the work, and it may hold it for longer
     // than one lease. Renewal starts before the handover rather than after it,
@@ -353,32 +380,51 @@ export class PrintCommandRunner {
       "handing print operation to the device"
     );
     try {
-      status = await this.options.adapter.submit({
-        operationId: command.operationId,
-        manifest: { ...command.manifest, documents: command.manifest.documents },
-        deviceScenario: command.simulatedOutcome,
-        artifacts: documents.map((document) => ({
-          documentId: document.documentId,
-          position: document.position,
-          path: document.path,
-          sha256: document.sha256,
-          sizeBytes: document.sizeBytes
-        }))
-      });
-      status = await this.awaitDeviceOutcome(command, status);
-    } catch (error) {
-      status = await this.resolveAdapterFailure(command, error);
+      try {
+        status = await this.options.adapter.submit({
+          operationId: command.operationId,
+          manifest: { ...command.manifest, documents: command.manifest.documents },
+          deviceScenario: command.simulatedOutcome,
+          artifacts: documents.map((document) => ({
+            documentId: document.documentId,
+            position: document.position,
+            path: document.path,
+            sha256: document.sha256,
+            sizeBytes: document.sizeBytes
+          }))
+        });
+        status = await this.awaitDeviceOutcome(command, status);
+      } catch (error) {
+        status = await this.resolveAdapterFailure(command, error);
+      } finally {
+        // The local copy of a customer's document lives no longer than the
+        // print. It is discarded as soon as the device is done with it, which
+        // is well before the counter has finished being watched below.
+        await this.spool.discard(command.operationId).catch(() => undefined);
+      }
+
+      // What the printer's own counter says about what just happened. This can
+      // only ever take a success away — see `marker.ts` for why that asymmetry
+      // is the entire safety property.
+      const watchStartedAt = Date.now();
+      evidence = await this.confirmAgainstMarker(command, status, markerBefore);
+      markerWatchMs = Date.now() - watchStartedAt;
     } finally {
+      // The lease covers the counter watch as well as the handover, and it has
+      // to: the watch exists precisely because the engine is *still marking
+      // paper* when the print host returns. Releasing the lease at that moment
+      // told the control plane the agent had let go of a job it was in the
+      // middle of, and on 23 August it duly reclaimed one — `LEASE_EXPIRED`
+      // three minutes into a ten-side duplex job that printed perfectly, after
+      // which the agent's result was refused for a stale claim token and the
+      // job never settled at all.
+      //
+      // Holding it here cannot strand a command: the control plane clamps every
+      // renewal to the job's own deadline, so the lease can outlive neither the
+      // job nor an agent that stops renewing it.
       stopLeaseRenewal();
-      // The local copy of a customer's document lives no longer than the print.
-      await this.spool.discard(command.operationId).catch(() => undefined);
     }
 
-    // What the printer's own counter says about what just happened. This can
-    // only ever take a success away — see `marker.ts` for why that asymmetry is
-    // the entire safety property — and it runs after the lease renewal has
-    // stopped, so a slow settle cannot hold a command open.
-    const evidence = await this.confirmAgainstMarker(command, status, markerBefore);
     status = applyMarkerEvidence(status, evidence);
 
     this.options.logger.info(
@@ -391,6 +437,7 @@ export class PrintCommandRunner {
         warningCode: status.warningCode,
         sheetsProduced: status.sheetsProduced,
         marker: describeMarkerEvidence(evidence),
+        markerWatchMs,
         elapsedMs: Date.now() - startedAt
       },
       "device finished with print operation"
@@ -557,14 +604,16 @@ export class PrintCommandRunner {
         physicalSheets: command.manifest.physicalSheets
       },
       read: () => telemetry.readNow().catch(() => null),
-      // Past the job's own deadline the work is no longer worth waiting for,
-      // and the control plane may already have taken the command back.
-      deadlineAt: Number.isFinite(deadline) ? deadline : Date.now(),
+      // Short of the job's own deadline, not up to it. Past that point the work
+      // is no longer worth waiting for, and a verdict reached with no time left
+      // to report it is the same as no verdict at all.
+      deadlineAt: Number.isFinite(deadline) ? deadline - MARKER_REPORT_MARGIN_MS : Date.now(),
       now: () => Date.now(),
       delay,
       pollIntervalMs: this.options.markerPollIntervalMilliseconds ?? MARKER_POLL_INTERVAL_MS,
       stillReadsBeforeStopped: MARKER_STILL_READS_BEFORE_STOPPED,
-      startupReadsBeforeStopped: MARKER_STARTUP_READS_BEFORE_STOPPED
+      startupReadsBeforeStopped: MARKER_STARTUP_READS_BEFORE_STOPPED,
+      silentReadsBeforeUnknown: MARKER_SILENT_READS_BEFORE_UNKNOWN
     });
   }
 

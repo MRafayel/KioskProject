@@ -841,6 +841,105 @@ describe("PrintCommandRunner against the printer's own page counter", () => {
     // One read only: the baseline, taken before the device was asked.
     expect(reads).toBeLessThanOrEqual(1);
   });
+
+  it("keeps renewing the lease while it is still watching the counter", async () => {
+    // The 23 August stall, and the reason it was so hard to see: everything
+    // about the print worked. A ten-side duplex job came out perfectly, the
+    // print host reported it completed, and then the agent sat watching the
+    // engine's counter for three minutes with the lease already released —
+    // because the renewal timer was stopped the moment the *host* returned,
+    // which is not the moment the *printer* stops. The control plane duly
+    // reclaimed a command nobody had abandoned, refused the result when it
+    // finally arrived, and left the kiosk polling a job that never settled.
+    //
+    // The watch is exactly the window in which the engine is still marking
+    // paper, so it is exactly the window the lease has to cover.
+    const transport = buildTransport([buildCommand()]);
+    let reads = 0;
+    const renewalsAfterReads: number[] = [];
+    const observedFetch = ((input: string | URL, init?: RequestInit) => {
+      if (new URL(input).pathname.endsWith("/progress")) {
+        const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as {
+          state?: string;
+        };
+        if (body.state === "PRINTING") renewalsAfterReads.push(reads);
+      }
+      return transport.fetch(input, init);
+    }) as typeof fetch;
+
+    // Submission is instantaneous and the counter takes its time, so every
+    // renewal below necessarily belongs to the watch rather than the handover.
+    const counts = [100, 100, 100, 100, 100, 101, 102];
+    const telemetry: MarkerTelemetry = {
+      readNow: () => {
+        const lifeCount = counts[Math.min(reads, counts.length - 1)] ?? 0;
+        reads += 1;
+        return Promise.resolve({
+          readAt: new Date(),
+          serialNumber: "SERIAL",
+          engine: "PRINTING" as const,
+          faults: [],
+          marker: { lifeCount, unit: "IMPRESSIONS" as const },
+          inputs: null,
+          supplies: null
+        });
+      }
+    };
+
+    await buildRunner(stubAdapter(() => completed()), observedFetch, {
+      telemetry,
+      leaseRenewalMilliseconds: 20,
+      markerPollIntervalMilliseconds: 25
+    }).runOnce();
+
+    // A renewal that happened after the counter had already been read several
+    // times is one that happened mid-watch. Without it the lease runs out and
+    // the result below is refused as stale.
+    expect(renewalsAfterReads.some((readsSoFar) => readsSoFar >= 3)).toBe(true);
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED"
+    });
+  });
+
+  it("gives up the watch in time to report rather than reaching a verdict too late", async () => {
+    // A verdict nobody can report is the same as no verdict at all: the control
+    // plane settles the job at its deadline and the agent's result arrives to a
+    // command that no longer exists. So the watch stops short of the deadline,
+    // leaving the report round trip its own time.
+    const transport = buildTransport([
+      buildCommand({ deadlineAt: new Date(Date.now() + 5_000).toISOString() })
+    ]);
+    let reads = 0;
+    const telemetry: MarkerTelemetry = {
+      readNow: () => {
+        reads += 1;
+        return Promise.resolve({
+          readAt: new Date(),
+          serialNumber: "SERIAL",
+          engine: "PRINTING" as const,
+          faults: [],
+          marker: { lifeCount: 100, unit: "IMPRESSIONS" as const },
+          inputs: null,
+          supplies: null
+        });
+      }
+    };
+
+    await buildRunner(stubAdapter(() => completed()), transport.fetch as typeof fetch, {
+      telemetry,
+      markerPollIntervalMilliseconds: 25
+    }).runOnce();
+
+    // The baseline and nothing more: there was no time left to spend watching.
+    expect(reads).toBe(1);
+    // And the result still reaches the control plane, which is the whole point.
+    expect(transport.results()).toHaveLength(1);
+    expect(transport.results()[0]?.body).toMatchObject({
+      state: "COMPLETED",
+      confidence: "CONFIRMED"
+    });
+  });
 });
 
 /** A printer whose counter walks a fixed sequence, one step per reading. */

@@ -195,7 +195,11 @@ export function stageCeiling(printJob: PrintJobSnapshot | null): PrintStage {
  *
  * `settled` collapses the walk: once the control plane has given its real
  * answer there is nothing left to narrate, so the screen goes straight there
- * instead of playing out stages for a job that already finished.
+ * instead of playing out stages for a job that already finished. It collapses
+ * forwards only. A job that settles into anything other than a confirmed
+ * success has no ceiling above `PREPARING_FILES`, and jumping to it would empty
+ * a nearly full bar in the instant before the screen changes — a customer whose
+ * pages are in the tray watching the machine appear to undo them.
  */
 export function nextPresentation(
   current: StagePresentation,
@@ -204,8 +208,8 @@ export function nextPresentation(
   now: number
 ): StagePresentation {
   if (current.stage === ceiling) return current;
-  if (settled) return { stage: ceiling, enteredAt: now };
   if (stageIndex(current.stage) > stageIndex(ceiling)) return current;
+  if (settled) return { stage: ceiling, enteredAt: now };
   if (now - current.enteredAt < MINIMUM_HOLD_MS[current.stage]) return current;
   // Unreachable while a ceiling exists — the last stage is always a ceiling —
   // but staying put is the safe answer if one ever does not.

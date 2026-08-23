@@ -624,3 +624,76 @@ A failed poll leaves the screen open on purpose. The gate still runs on session
 creation, so an optimistic wrong answer costs only the refusal the customer would
 have had anyway, while a pessimistic wrong answer closes a working kiosk because
 its own agent was briefly slow.
+
+## The counter watch outliving its lease (23 Aug 2026)
+
+Job `01a02e55`, ten sides on five sheets, duplex. Every page came out. The kiosk
+never left the printing screen.
+
+The database has the whole story in six rows:
+
+| UTC+4 | Event | Job status |
+|---|---|---|
+| 15:15:50.052 | `CREATED` | `QUEUED` |
+| 15:15:50.172 | `DISPATCHED` | `DISPATCHED` |
+| 15:15:50.390 | `CLAIMED` | `DISPATCHED` |
+| 15:15:50.670 | `PROGRESS` (preparing) | `DISPATCHED` |
+| 15:15:54.222 | `SUBMITTED` | `PRINTING` |
+| 15:19:15.235 | **`LEASE_EXPIRED`** | `DISPATCHED` |
+
+There is no seventh row. No `COMPLETED`, no `FAILED`, no result of any kind —
+the agent's report was refused, because by the time it arrived the claim token it
+carried was three minutes stale. `agent_commands` shows the other half: status
+back to `PENDING`, `claim_token` and `lease_expires_at` cleared,
+`redeliverable: true`.
+
+`PRINT_COMMAND_LEASE_SECONDS=120`, so renewal runs every 40s. The last one landed
+at ~15:17:14 and the one due at ~15:17:54 never fired — which dates the release
+of the lease to the moment the print host returned, not the moment the printer
+stopped.
+
+That is precisely what the code did. `stopLeaseRenewal()` sat in the `finally` of
+the submission block, and `confirmAgainstMarker` ran after it. The counter watch
+exists *because* retirement is not completion: it covers the window in which the
+engine is still marking paper. Releasing the lease at its start told the control
+plane the agent had let go of a job it was in the middle of.
+
+Two things made that window long enough to matter here. The watch was bounded
+only by the job's own five-minute deadline, and an unreadable printer did not
+count towards any stopping condition — deliberately, since silence is not
+evidence of a shortfall. But silence is a reason to stop *asking*: no number of
+further requests to a printer that has stopped answering will produce a
+comparison. `printers.telemetry_at` froze at 15:16:31, seconds after the engine
+started marking, and never moved again.
+
+### What changed
+
+- The lease renewal now covers the counter watch. It cannot strand a command:
+  `renewedLeaseExpiry` clamps every renewal to `min(now + lease, expiresAt)`, so
+  the lease outlives neither the job nor an agent that stops renewing it.
+- Ten consecutive unreadable readings end the watch at
+  `UNKNOWN`/`TELEMETRY_SILENT`. Any successful reading resets the count, so
+  dropped packets mid-job cannot cut short the comparison that proves a job's
+  pages came out. `UNKNOWN` changes no result — this decides only how long the
+  kiosk waits to learn nothing, and it was the job's entire deadline.
+- The watch stops 15s short of the deadline. A verdict reached with no time left
+  to report it is the same as no verdict at all.
+- `markerWatchMs` is logged separately from `elapsedMs`. Only their sum was
+  recorded before, which made a job that spent three minutes waiting on a silent
+  printer look exactly like one that spent three minutes printing.
+
+### Unchanged
+
+The evidence rules. A shortfall is still `observed < expected` on the unit the
+device reports, still downgrades to `COMPLETED`/`UNCONFIRMED` with
+`sheetsProduced: null`, and still settles to `RECOVERY_REQUIRED` with no refund
+owed. `noPaper` after the final impression of a duplex job is still not a
+shortfall; expected 2 / observed 1 still is. Nothing here can raise confidence.
+
+Duplicate printing is guarded twice over and neither guard is touched: an expired
+command can never be claimed (`expiresAt: { gt: now }`), and a redelivered one
+asks the device what it already holds instead of resubmitting.
+
+`01a02e55` itself cannot reprint. Its command expired at 15:20:50, so the overdue
+sweep settles the job to `RECOVERY_REQUIRED` — which is the correct answer for a
+job whose outcome nobody recorded, even though this one is sitting in the tray.

@@ -147,6 +147,15 @@ describe("nextPresentation", () => {
     expect(next.enteredAt).toBe(500);
   });
 
+  it("does not empty the bar when a job settles into something other than success", () => {
+    // A recovery or a failure has no ceiling above the first stage, so
+    // collapsing to it would run a nearly full bar back to nothing in the
+    // instant before the screen changes. The customer's pages may well be in
+    // the tray; the machine must not appear to take them back.
+    const current = at("PRINTING", 0);
+    expect(nextPresentation(current, "PREPARING_FILES", true, 500).stage).toBe("PRINTING");
+  });
+
   it("holds the finishing stage long enough to be read", () => {
     const current = at("FINISHING", 0);
     expect(MINIMUM_HOLD_MS.FINISHING).toBeGreaterThanOrEqual(500);

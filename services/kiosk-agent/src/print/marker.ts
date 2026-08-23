@@ -73,6 +73,8 @@ export type MarkerUnknownReason =
   | "COUNTER_REGRESSED"
   /** The engine was still marking when the job's deadline arrived. */
   | "STILL_ADVANCING"
+  /** The printer stopped answering, so no further reading was ever going to come. */
+  | "TELEMETRY_SILENT"
   /** The result claimed no success, so there was nothing for the counter to take away. */
   | "NOT_A_SUCCESS_CLAIM";
 
@@ -206,6 +208,19 @@ export interface MarkerObservation {
    * begun is judging it on nothing.
    */
   readonly startupReadsBeforeStopped: number;
+  /**
+   * How many consecutive unreadable readings end the watch.
+   *
+   * Silence is still not evidence — this returns `UNKNOWN`, which changes no
+   * result — but it is a reason to stop asking. A printer that has gone quiet
+   * will not produce a comparison by being asked a hundred more times, and every
+   * one of those attempts is a customer standing in front of a progress bar
+   * while the agent's lease on the job ticks away.
+   *
+   * Only consecutive silence counts and any successful reading resets it, so a
+   * few dropped packets in the middle of a job cannot cut the watch short.
+   */
+  readonly silentReadsBeforeUnknown: number;
 }
 
 /**
@@ -222,6 +237,14 @@ export interface MarkerObservation {
  * towards the engine having stopped, and a watch that never managed a single
  * reading returns `UNKNOWN` rather than a shortfall — otherwise unplugging the
  * telemetry cable would fail every job on the machine.
+ *
+ * It is, however, a reason to stop waiting. Sustained silence ends the watch at
+ * `UNKNOWN`, which changes no result and returns the job to exactly what the
+ * device host reported. The distinction matters because it is the whole of the
+ * difference between a safe verdict and a stuck kiosk: on 23 August a job whose
+ * printer went quiet mid-print sat here for the rest of its five-minute deadline,
+ * long enough for the control plane to reclaim the command and refuse the result
+ * that eventually arrived.
  */
 export async function observeMarkerCompletion(input: MarkerObservation): Promise<MarkerEvidence> {
   const { before, job } = input;
@@ -233,12 +256,24 @@ export async function observeMarkerCompletion(input: MarkerObservation): Promise
   let latest: MarkerCounter | null = null;
   let highest = before.lifeCount;
   let stillReads = 0;
+  let silentReads = 0;
 
   while (input.now() < input.deadlineAt) {
     const snapshot = await input.read();
     const marker = snapshot?.marker ?? null;
 
-    if (marker) {
+    if (!marker) {
+      // Still not evidence about the job — and still not a reason to keep
+      // asking. A printer that has stopped answering has nothing more to tell
+      // us, and the job's own deadline is far too long to spend finding that
+      // out: on the certified hardware that is minutes of a customer watching a
+      // progress bar for a reading that was never going to arrive.
+      silentReads += 1;
+      if (silentReads >= input.silentReadsBeforeUnknown) {
+        return { kind: "UNKNOWN", reason: "TELEMETRY_SILENT" };
+      }
+    } else {
+      silentReads = 0;
       latest = marker;
       const evidence = readMarkerEvidence({ before, after: marker, job });
       // Enough marks, or a comparison that cannot be trusted. Either way there
