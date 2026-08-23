@@ -1130,8 +1130,10 @@ describe("kiosk prototype journey", () => {
     // The control plane has only said QUEUED, so the screen may say no more
     // than that the files are being prepared.
     const preparingMessage = screen.getByText("Preparing your files");
+    const preparingPill = preparingMessage.closest(".print-stage-pill");
     expect(preparingMessage).toBeVisible();
-    expect(preparingMessage.querySelector(".pulse")).toBeInTheDocument();
+    expect(preparingPill).not.toBeNull();
+    expect(preparingPill?.querySelector(".pulse")).toBeInTheDocument();
     expect(document.querySelector(".progress-bar")).not.toBeInTheDocument();
 
     // First poll: the job reports PRINTING, which unlocks the device stages.
@@ -1259,11 +1261,13 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    expect(screen.getByText("Finishing your print")).toBeVisible();
+    const successOverlay = document.querySelector(".print-success-overlay");
+    expect(successOverlay).not.toBeNull();
     expect(document.querySelector(".success-motion")).toBeInTheDocument();
-    expect(
-      screen.getByText("Finishing your print").querySelector(".pulse")
-    ).not.toBeInTheDocument();
+    expect(successOverlay?.children).toHaveLength(1);
+    expect(screen.queryByText("Finishing your print")).not.toBeInTheDocument();
+    expect(screen.queryByText("Please wait until all papers come out")).not.toBeInTheDocument();
+    expect(document.querySelector(".print-stage-pill")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Your documents are ready" })
     ).not.toBeInTheDocument();
@@ -1271,7 +1275,17 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_499);
     });
-    expect(screen.getByText("Finishing your print")).toBeVisible();
+    expect(document.querySelector(".print-success-overlay")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    // The full motion has finished; its separate two-second pause starts now.
+    expect(document.querySelector(".print-success-overlay")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(document.querySelector(".print-success-overlay")).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
@@ -1280,6 +1294,17 @@ describe("kiosk prototype journey", () => {
     // The receipt counts the sheets the device reported, never sheets this
     // screen worked out for itself.
     expect(screen.getByText("Collect all 3 sheets from the output area below.")).toBeVisible();
+
+    // The Completed page receives its own complete five seconds. None of the
+    // animation or post-animation pause has spent this clock.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_999);
+    });
+    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
   });
 
   it("plays the success motion for an already-observed confirmed completion", async () => {
@@ -1303,7 +1328,7 @@ describe("kiosk prototype journey", () => {
     ).not.toBeInTheDocument();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(3_500);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
   });
@@ -1383,7 +1408,7 @@ describe("kiosk prototype journey", () => {
     });
     expect(document.querySelector(".success-motion")).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(3_500);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
   });
@@ -1454,7 +1479,7 @@ describe("kiosk prototype journey", () => {
     expect(printReadRequests).toBe(6);
     expect(document.querySelector(".success-motion")).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(3_500);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
     expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);

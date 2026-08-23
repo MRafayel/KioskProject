@@ -27,6 +27,11 @@ export const PRINT_STAGES = [
 
 export type PrintStage = (typeof PRINT_STAGES)[number];
 
+/** The ring and check finish together after this presentation-only interval. */
+export const SUCCESS_MOTION_MS = 1_500;
+/** The completed motion stays alone on screen for two more seconds. */
+export const SUCCESS_POST_MOTION_HOLD_MS = 2_000;
+
 /**
  * The shortest time a stage may stay on screen.
  *
@@ -42,11 +47,8 @@ export const MINIMUM_HOLD_MS: Record<PrintStage, number> = {
   PREPARING_PAGES: 2_000,
   SENDING_PAGES: 2_600,
   PRINTING: 900,
-  FINISHING: 1_500
+  FINISHING: SUCCESS_MOTION_MS + SUCCESS_POST_MOTION_HOLD_MS
 };
-
-/** How long the confirmed-success motion plays before the receipt replaces it. */
-export const FINISHING_HOLD_MS = MINIMUM_HOLD_MS.FINISHING;
 
 export interface StagePresentation {
   stage: PrintStage;

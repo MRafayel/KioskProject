@@ -6,6 +6,8 @@ import {
   MINIMUM_HOLD_MS,
   nextPresentation,
   PRINT_STAGES,
+  SUCCESS_MOTION_MS,
+  SUCCESS_POST_MOTION_HOLD_MS,
   stageCeiling,
   stageIndex,
   type PrintStage,
@@ -153,7 +155,9 @@ describe("nextPresentation", () => {
 
   it("holds the finishing stage long enough for the success motion", () => {
     const current = at("FINISHING", 0);
-    expect(MINIMUM_HOLD_MS.FINISHING).toBeGreaterThanOrEqual(1_300);
+    expect(SUCCESS_MOTION_MS).toBe(1_500);
+    expect(SUCCESS_POST_MOTION_HOLD_MS).toBe(2_000);
+    expect(MINIMUM_HOLD_MS.FINISHING).toBe(SUCCESS_MOTION_MS + SUCCESS_POST_MOTION_HOLD_MS);
     // Nothing follows it, so it stays put whatever the clock does.
     expect(nextPresentation(current, "FINISHING", true, 10_000).stage).toBe("FINISHING");
   });

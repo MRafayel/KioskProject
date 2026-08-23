@@ -23,7 +23,8 @@ import {
   requestSimulatedOutcome
 } from "../features/session/paymentService.js";
 import {
-  FINISHING_HOLD_MS,
+  SUCCESS_MOTION_MS,
+  SUCCESS_POST_MOTION_HOLD_MS,
   usePrintStage,
   type PrintStage
 } from "../features/session/printProgress.js";
@@ -44,6 +45,7 @@ const PRINT_POLL_INTERVAL_MS = 1_500;
 const PAYMENT_READ_FAILURE_LIMIT = 5;
 const PRINT_READ_FAILURE_LIMIT = 5;
 const COMPLETE_SCREEN_HOLD_MS = 5_000;
+type ActivePrintStage = Exclude<PrintStage, "FINISHING">;
 
 /**
  * Watches one payment the control plane already created.
@@ -174,9 +176,27 @@ export function PrintingScreen() {
   const observedPrintJobSuccessful = observedPrintJob
     ? isPrintJobSuccessful(observedPrintJob)
     : false;
+  const showSuccessMotion = observedPrintJobId !== null && observedPrintJobSuccessful;
   // Presentation only. It reads the job this screen already polls and cannot
   // reach the device, so it can neither delay a print nor change its outcome.
   const stage = usePrintStage(observedPrintJob);
+
+  useEffect(() => {
+    if (!showSuccessMotion) return;
+    let pauseTimer: number | undefined;
+    // This clock starts only when the animation-only state has mounted. Once
+    // the motion completes, a separate two-second pause begins. The Completed
+    // page is not mounted yet, so none of its five-second lifetime is consumed.
+    const motionTimer = window.setTimeout(() => {
+      pauseTimer = window.setTimeout(() => {
+        void navigate("/complete", { replace: true });
+      }, SUCCESS_POST_MOTION_HOLD_MS);
+    }, SUCCESS_MOTION_MS);
+    return () => {
+      window.clearTimeout(motionTimer);
+      if (pauseTimer !== undefined) window.clearTimeout(pauseTimer);
+    };
+  }, [navigate, showSuccessMotion]);
 
   useEffect(() => {
     if (!sessionId || !paymentId) return;
@@ -190,20 +210,11 @@ export function PrintingScreen() {
       void navigate(path, { replace: true });
     };
 
-    const showConfirmedCompletion = () => {
-      // The job is already authoritatively complete. This short hold exists
-      // only so the success motion can finish before the receipt appears.
-      timer = window.setTimeout(() => leave("/complete"), FINISHING_HOLD_MS);
-    };
-
     const observe = (printJob: PrintJobSnapshot): boolean => {
       if (!active) return true;
       dispatch({ type: "PRINT_OBSERVED", printJob });
       if (!isPrintJobSettled(printJob)) return false;
-      if (isPrintJobSuccessful(printJob)) {
-        showConfirmedCompletion();
-        return true;
-      }
+      if (isPrintJobSuccessful(printJob)) return true;
       leave("/failure/printer");
       return true;
     };
@@ -244,11 +255,7 @@ export function PrintingScreen() {
     // idempotency key retained by startKioskPrintJob.
     if (observedPrintJobId) {
       if (observedPrintJobSettled) {
-        if (observedPrintJobSuccessful) {
-          showConfirmedCompletion();
-        } else {
-          leave("/failure/printer");
-        }
+        if (!observedPrintJobSuccessful) leave("/failure/printer");
       } else {
         poll(observedPrintJobId);
       }
@@ -289,16 +296,20 @@ export function PrintingScreen() {
   // Printing is only ever watched, never invented: without a capture the
   // control plane applied to this session, this screen has nothing to show.
   if (!paymentId) return <KioskRedirect to="/checkout" />;
+  if (showSuccessMotion) {
+    return <PrintSuccessMotion label={messages.status.printingStages.FINISHING} />;
+  }
+  const activeStage: ActivePrintStage = stage === "FINISHING" ? "PRINTING" : stage;
 
   return (
     <TerminalProgress
       // The rotating stage now carries the eyebrow. "Step 4 of 4" was true and
       // useless: it never changed, so the only moving text on a screen somebody
       // waits at was one line near the bottom.
-      eyebrow={messages.status.printingStages[stage]}
+      eyebrow={messages.status.printingStages[activeStage]}
       title={messages.status.printingTitle}
       description={messages.status.printingDescription}
-      stage={stage}
+      stage={activeStage}
     />
   );
 }
@@ -553,17 +564,18 @@ export function CompleteScreen() {
  * `aria-hidden`, because the stage is announced as text by the live region
  * around it, and the whole set stops moving under `prefers-reduced-motion`.
  */
-function StageArt({ stage }: { stage: PrintStage }) {
-  if (stage === "FINISHING") {
-    return (
-      <div className="stage-art stage-art--done" aria-hidden="true">
-        <div className="success-motion">
-          <span className="success-motion__ring" />
-          <span className="success-motion__check" />
-        </div>
+function PrintSuccessMotion({ label }: { label: string }) {
+  return (
+    <div className="print-success-overlay" role="status" aria-label={label} aria-live="polite">
+      <div className="success-motion" aria-hidden="true">
+        <span className="success-motion__ring" />
+        <span className="success-motion__check" />
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+function StageArt({ stage }: { stage: ActivePrintStage }) {
   if (stage === "PREPARING_FILES") {
     return (
       <div className="stage-art stage-art--files" aria-hidden="true">
@@ -609,18 +621,21 @@ function TerminalProgress({
   title: string;
   description: string;
   detail?: string;
-  stage?: PrintStage;
+  stage?: ActivePrintStage;
 }) {
-  const activeStage = stage !== undefined && stage !== "FINISHING";
   return (
     <div className="terminal-state" aria-live="polite">
       {stage ? <StageArt stage={stage} /> : <div className="spinner" aria-hidden="true" />}
       {/* Keyed so each stage's text fades in as its own element rather than the
           previous sentence mutating in place. */}
-      <p className={stage ? "eyebrow eyebrow--stage" : "eyebrow"} key={stage ?? "static"}>
-        {activeStage ? <span className="pulse" aria-hidden="true" /> : null}
-        {eyebrow}
-      </p>
+      {stage ? (
+        <p className="status-pill status-pill--waiting print-stage-pill" key={stage} role="status">
+          <span className="pulse" aria-hidden="true" />
+          <span>{eyebrow}</span>
+        </p>
+      ) : (
+        <p className="eyebrow">{eyebrow}</p>
+      )}
       <h1 className={stage ? "terminal-state__headline" : undefined}>{title}</h1>
       <p>{description}</p>
       {detail ? <span className="progress-detail">{detail}</span> : null}
