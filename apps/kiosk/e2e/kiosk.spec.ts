@@ -181,6 +181,8 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
     timeout: 15_000
   });
   await expect(page.getByRole("timer")).toHaveCount(0);
+  await expect(page.locator(".progress-bar")).toHaveCount(0);
+  await expect(page.locator(".success-motion")).toBeVisible({ timeout: 15_000 });
 
   // Printing is a request naming the capture, and the receipt appears only
   // once the control plane reports a confirmed completion.

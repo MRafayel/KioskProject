@@ -42,123 +42,15 @@ export const MINIMUM_HOLD_MS: Record<PrintStage, number> = {
   PREPARING_PAGES: 2_000,
   SENDING_PAGES: 2_600,
   PRINTING: 900,
-  FINISHING: 900
+  FINISHING: 1_500
 };
 
-/** How long a confirmed completion is shown before the receipt replaces it. */
+/** How long the confirmed-success motion plays before the receipt replaces it. */
 export const FINISHING_HOLD_MS = MINIMUM_HOLD_MS.FINISHING;
 
 export interface StagePresentation {
   stage: PrintStage;
   enteredAt: number;
-}
-
-/**
- * How far the bar may travel on presentation pacing alone.
- *
- * Everything up to here is the backend preparing, rendering and submitting —
- * work the customer cannot see and the screen cannot measure. The bar is allowed
- * to narrate that because being wrong about it costs nothing: no claim is being
- * made about paper.
- */
-export const PREPARATION_CEILING = 0.68;
-
-/**
- * How far it may travel while paper is coming out, and no further.
- *
- * The last three percent belong to the control plane. A bar that reaches the end
- * before the device has confirmed anything is making the same promise the whole
- * telemetry effort exists to stop the kiosk making — so it asymptotes here and
- * waits, however long the printer takes.
- */
-export const PRINTING_CEILING = 0.97;
-
-/**
- * Measured on the reference printer: about three seconds an impression, and flat
- * across page counts. It paces the physical segment so a fifty-page job crawls
- * and a one-page job does not, which is the difference between a bar that looks
- * like the machine and one that looks like a timer.
- */
-export const MS_PER_SIDE = 3_100;
-
-/** A job with no side count still needs a pace. One sheet is the common case. */
-const ASSUMED_SIDES = 1;
-
-/** Where each preparation stage starts, as a share of `PREPARATION_CEILING`. */
-const PREPARATION_STAGES = PRINT_STAGES.slice(0, stageIndexOf("PRINTING"));
-const PREPARATION_TOTAL_MS = PREPARATION_STAGES.reduce(
-  (total, stage) => total + MINIMUM_HOLD_MS[stage],
-  0
-);
-
-function stageIndexOf(stage: PrintStage): number {
-  return PRINT_STAGES.indexOf(stage);
-}
-
-function preparationSpan(stage: PrintStage): { start: number; end: number } {
-  let elapsed = 0;
-  for (const candidate of PREPARATION_STAGES) {
-    const share = MINIMUM_HOLD_MS[candidate] / PREPARATION_TOTAL_MS;
-    if (candidate === stage) {
-      const start = (elapsed / PREPARATION_TOTAL_MS) * PREPARATION_CEILING;
-      return { start, end: start + share * PREPARATION_CEILING };
-    }
-    elapsed += MINIMUM_HOLD_MS[candidate];
-  }
-  return { start: PREPARATION_CEILING, end: PREPARATION_CEILING };
-}
-
-/**
- * Approach a target without ever arriving.
- *
- * Every segment of this bar eases rather than marches, for the same reason: the
- * durations behind it are estimates, and an estimate that runs out leaves a
- * linear bar sitting dead at a round number. This one keeps moving, slower and
- * slower, which reads as "still working" rather than "stuck" — and it can never
- * overshoot into a claim the backend has not made.
- */
-function approach(start: number, end: number, elapsedMs: number, expectedMs: number): number {
-  if (expectedMs <= 0) return end;
-  return start + (end - start) * (1 - Math.exp(-Math.max(0, elapsedMs) / expectedMs));
-}
-
-/**
- * How full the bar is, from nothing this screen can influence.
- *
- * Strictly observational, in both directions: it reads the job the screen is
- * already polling and the stage the presentation has already reached, and
- * nothing it returns is sent anywhere. A wrong answer here makes a bar look odd;
- * it cannot delay a print, change an outcome, or reach a printer.
- *
- * The physical segment is paced from the job's own side count rather than from
- * the printer's page counter. Reading the counter live would mean reporting it
- * from inside the marker watch, which runs *after* the agent releases its
- * command lease — so the only channel available there is one whose semantics
- * exist to prevent duplicate printing. A progress bar is not worth entangling
- * with that, and the side count paces the segment about as well.
- */
-export function printProgressFraction(input: {
-  readonly stage: PrintStage;
-  readonly stageElapsedMs: number;
-  readonly printedSides: number | null;
-  readonly confirmed: boolean;
-}): number {
-  // Only a completion the device confirmed fills the bar. Nothing else may.
-  if (input.confirmed) return 1;
-  if (input.stage === "FINISHING") return 1;
-
-  if (input.stage === "PRINTING") {
-    const sides = input.printedSides && input.printedSides > 0 ? input.printedSides : ASSUMED_SIDES;
-    return approach(
-      PREPARATION_CEILING,
-      PRINTING_CEILING,
-      input.stageElapsedMs,
-      sides * MS_PER_SIDE
-    );
-  }
-
-  const span = preparationSpan(input.stage);
-  return approach(span.start, span.end, input.stageElapsedMs, MINIMUM_HOLD_MS[input.stage]);
 }
 
 export function stageIndex(stage: PrintStage): number {
@@ -169,8 +61,8 @@ export function stageIndex(stage: PrintStage): number {
  * The furthest stage the control plane's own answer justifies showing.
  *
  * This is the honesty boundary. The presentation may walk up to the ceiling on
- * its own clock, and may never pass it, so no timer can carry the screen into
- * claiming an outcome the device has not reported.
+ * its own clock and may never pass it, so no rotating message can claim an
+ * outcome the device has not reported.
  *
  * `PRINTING` is a ceiling rather than a step: everything from checking the
  * printer to waiting for the spooler happens inside that one backend state, and
@@ -197,9 +89,8 @@ export function stageCeiling(printJob: PrintJobSnapshot | null): PrintStage {
  * answer there is nothing left to narrate, so the screen goes straight there
  * instead of playing out stages for a job that already finished. It collapses
  * forwards only. A job that settles into anything other than a confirmed
- * success has no ceiling above `PREPARING_FILES`, and jumping to it would empty
- * a nearly full bar in the instant before the screen changes — a customer whose
- * pages are in the tray watching the machine appear to undo them.
+ * success has no ceiling above `PREPARING_FILES`, so the current message stays
+ * stable during the brief transition to the existing failure or recovery flow.
  */
 export function nextPresentation(
   current: StagePresentation,
@@ -229,15 +120,6 @@ export function holdRemaining(current: StagePresentation, now: number): number {
  * delay a print: the pipeline runs at its own speed and this only decides which
  * sentence is on screen while it does.
  */
-/**
- * How often the bar is redrawn while a stage is held.
- *
- * Slow enough to be nothing on kiosk hardware that is simultaneously rasterising
- * a PDF, fast enough that the movement reads as continuous rather than as a
- * sequence of jumps.
- */
-const PROGRESS_TICK_MS = 250;
-
 export function usePrintStage(printJob: PrintJobSnapshot | null): PrintStage {
   const [presentation, setPresentation] = useState<StagePresentation>(() => ({
     stage: "PREPARING_FILES",
@@ -273,46 +155,4 @@ export function usePrintStage(printJob: PrintJobSnapshot | null): PrintStage {
   }, [presentation, printJob, status, confidence, wake]);
 
   return presentation.stage;
-}
-
-/**
- * The stage, and how full the bar is with it.
- *
- * Wraps `usePrintStage` rather than replacing it, so the sequencing rules — the
- * ceiling, the minimum holds, the refusal to rewind — stay in one place and this
- * only adds a number derived from them.
- */
-export function usePrintProgress(printJob: PrintJobSnapshot | null): {
-  stage: PrintStage;
-  fraction: number;
-} {
-  const stage = usePrintStage(printJob);
-  const [enteredAt, setEnteredAt] = useState(() => Date.now());
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    // A new stage restarts the easing, so each segment fills across its own
-    // span rather than inheriting the previous one's elapsed time.
-    const at = Date.now();
-    setEnteredAt(at);
-    setNow(at);
-  }, [stage]);
-
-  const confirmed = printJob?.status === "COMPLETED" && printJob.resultConfidence === "CONFIRMED";
-
-  useEffect(() => {
-    if (confirmed) return;
-    const timer = window.setInterval(() => setNow(Date.now()), PROGRESS_TICK_MS);
-    return () => window.clearInterval(timer);
-  }, [confirmed]);
-
-  return {
-    stage,
-    fraction: printProgressFraction({
-      stage,
-      stageElapsedMs: now - enteredAt,
-      printedSides: printJob?.printedSides ?? null,
-      confirmed
-    })
-  };
 }

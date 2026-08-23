@@ -5,10 +5,6 @@ import type { PrintJobSnapshot } from "@printing-kiosk/contracts";
 import {
   MINIMUM_HOLD_MS,
   nextPresentation,
-  printProgressFraction,
-  PREPARATION_CEILING,
-  PRINTING_CEILING,
-  MS_PER_SIDE,
   PRINT_STAGES,
   stageCeiling,
   stageIndex,
@@ -147,18 +143,17 @@ describe("nextPresentation", () => {
     expect(next.enteredAt).toBe(500);
   });
 
-  it("does not empty the bar when a job settles into something other than success", () => {
-    // A recovery or a failure has no ceiling above the first stage, so
-    // collapsing to it would run a nearly full bar back to nothing in the
-    // instant before the screen changes. The customer's pages may well be in
-    // the tray; the machine must not appear to take them back.
+  it("does not rewind the message when a job settles without success", () => {
+    // A recovery or failure has no ceiling above the first stage. Keep the
+    // current message stable during the route transition instead of briefly
+    // narrating an earlier part of the pipeline.
     const current = at("PRINTING", 0);
     expect(nextPresentation(current, "PREPARING_FILES", true, 500).stage).toBe("PRINTING");
   });
 
-  it("holds the finishing stage long enough to be read", () => {
+  it("holds the finishing stage long enough for the success motion", () => {
     const current = at("FINISHING", 0);
-    expect(MINIMUM_HOLD_MS.FINISHING).toBeGreaterThanOrEqual(500);
+    expect(MINIMUM_HOLD_MS.FINISHING).toBeGreaterThanOrEqual(1_300);
     // Nothing follows it, so it stays put whatever the clock does.
     expect(nextPresentation(current, "FINISHING", true, 10_000).stage).toBe("FINISHING");
   });
@@ -191,125 +186,5 @@ describe("stage ordering", () => {
     // Measured on the reference printer: ~10s between the agent handing over
     // the work and the spooler retiring the last job.
     expect(walk).toBeLessThan(10_000);
-  });
-});
-
-/**
- * The bar, which is allowed to guess and never allowed to promise.
- *
- * Two rules carry the whole thing. It may narrate the backend's preparation
- * freely, because being wrong about work nobody can see costs nothing. It may
- * not fill, because a full bar is a claim that paper came out — the exact claim
- * the telemetry work exists to stop the kiosk making on its own authority.
- */
-describe("how full the bar is", () => {
-  const at = (stage: Parameters<typeof printProgressFraction>[0]["stage"], stageElapsedMs: number) =>
-    printProgressFraction({ stage, stageElapsedMs, printedSides: 2, confirmed: false });
-
-  it("starts empty and moves straight away", () => {
-    expect(at("PREPARING_FILES", 0)).toBe(0);
-    expect(at("PREPARING_FILES", 300)).toBeGreaterThan(0);
-  });
-
-  it("never runs backwards across the preparation stages", () => {
-    let previous = 0;
-    for (const stage of ["PREPARING_FILES", "CHECKING_PRINTER", "PREPARING_PAGES", "SENDING_PAGES"] as const) {
-      for (const elapsed of [0, 500, 1_500, 30_000]) {
-        const fraction = at(stage, elapsed);
-        expect(fraction).toBeGreaterThanOrEqual(previous);
-        previous = fraction;
-      }
-    }
-  });
-
-  it("stops at the preparation ceiling however long the backend takes", () => {
-    // A stage that overruns its estimate keeps easing towards its own end and
-    // can never borrow from the segment that belongs to paper.
-    expect(at("SENDING_PAGES", 10 * 60_000)).toBeLessThanOrEqual(PREPARATION_CEILING);
-    expect(at("SENDING_PAGES", 10 * 60_000)).toBeCloseTo(PREPARATION_CEILING, 2);
-  });
-
-  it("hands over to the physical segment at that ceiling", () => {
-    expect(at("PRINTING", 0)).toBeCloseTo(PREPARATION_CEILING, 5);
-  });
-
-  it("paces the physical segment by the job's own size", () => {
-    // Half a page in, a one-page job is further along than a fifty-page job.
-    const short = printProgressFraction({
-      stage: "PRINTING",
-      stageElapsedMs: MS_PER_SIDE,
-      printedSides: 1,
-      confirmed: false
-    });
-    const long = printProgressFraction({
-      stage: "PRINTING",
-      stageElapsedMs: MS_PER_SIDE,
-      printedSides: 50,
-      confirmed: false
-    });
-    expect(short).toBeGreaterThan(long);
-  });
-
-  it("never reaches the end before the device has confirmed anything", () => {
-    // The rule the whole telemetry effort exists for, in one assertion: no
-    // amount of waiting fills this bar. It parks visibly short of the end and
-    // stays there — an hour in, the easing has flattened onto the ceiling, and
-    // the ceiling is still not a completion.
-    for (const elapsed of [MS_PER_SIDE, 60_000, 60 * 60_000]) {
-      const fraction = printProgressFraction({
-        stage: "PRINTING",
-        stageElapsedMs: elapsed,
-        printedSides: 2,
-        confirmed: false
-      });
-      expect(fraction).toBeLessThanOrEqual(PRINTING_CEILING);
-      expect(fraction).toBeLessThan(1);
-    }
-  });
-
-  it("keeps moving while it waits, rather than sitting dead", () => {
-    const early = at("PRINTING", 30_000);
-    const later = at("PRINTING", 90_000);
-    expect(later).toBeGreaterThan(early);
-  });
-
-  it("fills only on a confirmed completion", () => {
-    expect(
-      printProgressFraction({
-        stage: "PRINTING",
-        stageElapsedMs: 0,
-        printedSides: 2,
-        confirmed: true
-      })
-    ).toBe(1);
-    expect(at("FINISHING", 0)).toBe(1);
-  });
-
-  it("paces a job that never said how big it was", () => {
-    // A missing side count is a pacing question, not a correctness one: the bar
-    // still moves and still cannot fill.
-    const fraction = printProgressFraction({
-      stage: "PRINTING",
-      stageElapsedMs: 5_000,
-      printedSides: null,
-      confirmed: false
-    });
-    expect(fraction).toBeGreaterThan(PREPARATION_CEILING);
-    expect(fraction).toBeLessThan(PRINTING_CEILING);
-  });
-
-  it("stays inside 0 and 1 for anything it is handed", () => {
-    for (const elapsed of [-5_000, 0, 1, 10 ** 9]) {
-      for (const sides of [null, 0, -3, 1, 10_000]) {
-        const fraction = printProgressFraction({
-          stage: "PRINTING",
-          stageElapsedMs: elapsed,
-          printedSides: sides,
-          confirmed: false
-        });
-        expect(fraction).toBeGreaterThanOrEqual(0);
-        expect(fraction).toBeLessThanOrEqual(1);
-      }
-    }
   });
 });
