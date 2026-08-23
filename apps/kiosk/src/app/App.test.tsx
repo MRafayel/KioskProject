@@ -1141,12 +1141,16 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(screen.getByText("Checking the printer")).toBeVisible();
+    expect(screen.getByText("Preparing your files")).toHaveClass(
+      "print-stage-pill__message--outgoing"
+    );
 
     // Still inside its minimum hold: a stage must not be replaced part-read.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_300);
     });
     expect(screen.getByText("Checking the printer")).toBeVisible();
+    expect(screen.queryByText("Preparing your files")).not.toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
@@ -1261,10 +1265,13 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    const successOverlay = document.querySelector(".print-success-overlay");
-    expect(successOverlay).not.toBeNull();
+    const successPage = document.querySelector(".print-success-page");
+    expect(successPage).not.toBeNull();
+    expect(successPage?.parentElement).toHaveAttribute("id", "main-content");
     expect(document.querySelector(".success-motion")).toBeInTheDocument();
-    expect(successOverlay?.children).toHaveLength(1);
+    expect(successPage?.children).toHaveLength(1);
+    expect(document.querySelector(".topbar")).toBeVisible();
+    expect(document.querySelector(".session-footer")).toBeVisible();
     expect(screen.queryByText("Finishing your print")).not.toBeInTheDocument();
     expect(screen.queryByText("Please wait until all papers come out")).not.toBeInTheDocument();
     expect(document.querySelector(".print-stage-pill")).not.toBeInTheDocument();
@@ -1275,17 +1282,17 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_499);
     });
-    expect(document.querySelector(".print-success-overlay")).toBeInTheDocument();
+    expect(document.querySelector(".print-success-page")).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    // The full motion has finished; its separate two-second pause starts now.
-    expect(document.querySelector(".print-success-overlay")).toBeInTheDocument();
+    // The full motion has finished; its separate 1.3-second pause starts now.
+    expect(document.querySelector(".print-success-page")).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_999);
+      await vi.advanceTimersByTimeAsync(1_299);
     });
-    expect(document.querySelector(".print-success-overlay")).toBeInTheDocument();
+    expect(document.querySelector(".print-success-page")).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
@@ -1328,7 +1335,7 @@ describe("kiosk prototype journey", () => {
     ).not.toBeInTheDocument();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_500);
+      await vi.advanceTimersByTimeAsync(2_800);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
   });
@@ -1408,7 +1415,7 @@ describe("kiosk prototype journey", () => {
     });
     expect(document.querySelector(".success-motion")).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_500);
+      await vi.advanceTimersByTimeAsync(2_800);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
   });
@@ -1479,7 +1486,7 @@ describe("kiosk prototype journey", () => {
     expect(printReadRequests).toBe(6);
     expect(document.querySelector(".success-motion")).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(3_500);
+      await vi.advanceTimersByTimeAsync(2_800);
     });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
     expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);

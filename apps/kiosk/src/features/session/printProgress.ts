@@ -29,8 +29,8 @@ export type PrintStage = (typeof PRINT_STAGES)[number];
 
 /** The ring and check finish together after this presentation-only interval. */
 export const SUCCESS_MOTION_MS = 1_500;
-/** The completed motion stays alone on screen for two more seconds. */
-export const SUCCESS_POST_MOTION_HOLD_MS = 2_000;
+/** The completed motion stays alone in the content area for 1.3 more seconds. */
+export const SUCCESS_POST_MOTION_HOLD_MS = 1_300;
 
 /**
  * The shortest time a stage may stay on screen.

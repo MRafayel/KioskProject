@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PaymentSnapshot, PrintJobSnapshot } from "@printing-kiosk/contracts";
 
@@ -185,7 +185,7 @@ export function PrintingScreen() {
     if (!showSuccessMotion) return;
     let pauseTimer: number | undefined;
     // This clock starts only when the animation-only state has mounted. Once
-    // the motion completes, a separate two-second pause begins. The Completed
+    // the motion completes, a separate 1.3-second pause begins. The Completed
     // page is not mounted yet, so none of its five-second lifetime is consumed.
     const motionTimer = window.setTimeout(() => {
       pauseTimer = window.setTimeout(() => {
@@ -566,12 +566,66 @@ export function CompleteScreen() {
  */
 function PrintSuccessMotion({ label }: { label: string }) {
   return (
-    <div className="print-success-overlay" role="status" aria-label={label} aria-live="polite">
+    <div className="print-success-page" role="status" aria-label={label} aria-live="polite">
       <div className="success-motion" aria-hidden="true">
         <span className="success-motion__ring" />
         <span className="success-motion__check" />
       </div>
     </div>
+  );
+}
+
+const PRINT_MESSAGE_TRANSITION_MS = 220;
+
+function PrintStagePill({ stage, message }: { stage: ActivePrintStage; message: string }) {
+  const currentRef = useRef({ stage, message });
+  const [transition, setTransition] = useState<{
+    current: { stage: ActivePrintStage; message: string };
+    previous: { stage: ActivePrintStage; message: string } | null;
+  }>({ current: currentRef.current, previous: null });
+
+  useEffect(() => {
+    const previous = currentRef.current;
+    if (previous.stage === stage && previous.message === message) return;
+
+    const current = { stage, message };
+    currentRef.current = current;
+    setTransition({ current, previous });
+
+    const timer = window.setTimeout(() => {
+      setTransition(({ current: latest }) => ({ current: latest, previous: null }));
+    }, PRINT_MESSAGE_TRANSITION_MS);
+    return () => window.clearTimeout(timer);
+  }, [message, stage]);
+
+  return (
+    <p
+      className="status-pill status-pill--waiting print-stage-pill"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span className="pulse" aria-hidden="true" />
+      <span className="print-stage-pill__messages">
+        {transition.previous ? (
+          <span
+            className="print-stage-pill__message print-stage-pill__message--outgoing"
+            aria-hidden="true"
+          >
+            {transition.previous.message}
+          </span>
+        ) : null}
+        <span
+          className={
+            transition.previous
+              ? "print-stage-pill__message print-stage-pill__message--incoming"
+              : "print-stage-pill__message"
+          }
+        >
+          {transition.current.message}
+        </span>
+      </span>
+    </p>
   );
 }
 
@@ -626,13 +680,8 @@ function TerminalProgress({
   return (
     <div className="terminal-state" aria-live="polite">
       {stage ? <StageArt stage={stage} /> : <div className="spinner" aria-hidden="true" />}
-      {/* Keyed so each stage's text fades in as its own element rather than the
-          previous sentence mutating in place. */}
       {stage ? (
-        <p className="status-pill status-pill--waiting print-stage-pill" key={stage} role="status">
-          <span className="pulse" aria-hidden="true" />
-          <span>{eyebrow}</span>
-        </p>
+        <PrintStagePill stage={stage} message={eyebrow} />
       ) : (
         <p className="eyebrow">{eyebrow}</p>
       )}

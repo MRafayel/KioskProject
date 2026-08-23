@@ -1806,13 +1806,12 @@ p {
   initial-value: 0deg;
 }
 
-.print-success-overlay {
-  position: fixed;
-  z-index: 100;
+.print-success-page {
   display: grid;
+  width: 100%;
+  min-height: 100%;
+  align-self: stretch;
   place-items: center;
-  background: var(--surface);
-  inset: 0;
 }
 
 .success-motion {
@@ -1880,26 +1879,53 @@ p {
 .print-stage-pill {
   display: flex;
   width: fit-content;
-  max-width: min(440px, 88vw);
-  min-height: 42px;
-  margin: 0 auto 1rem;
-  padding: 0.55rem 0.95rem;
+  max-width: min(400px, 86vw);
+  min-height: 34px;
+  margin: 0 auto 0.85rem;
+  padding: 0.35rem 0.7rem;
   justify-content: center;
-  box-shadow: 0 6px 18px rgb(6 105 183 / 8%);
-  animation: stage-fade 320ms ease-out;
+  gap: 0.4rem;
+  box-shadow: 0 4px 14px rgb(6 105 183 / 7%);
+  font-size: 0.78rem;
 }
 
 .print-stage-pill .pulse {
-  width: 10px;
-  height: 10px;
-  outline: 2px solid rgb(6 105 183 / 16%);
-  animation-duration: 1.4s;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  outline: 1px solid rgb(6 105 183 / 18%);
+  animation-duration: 1.5s;
 }
 
-@keyframes stage-fade {
+.print-stage-pill__messages {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+}
+
+.print-stage-pill__message {
+  grid-area: 1 / 1;
+}
+
+.print-stage-pill__message--incoming {
+  animation: print-message-in 220ms ease-out both;
+}
+
+.print-stage-pill__message--outgoing {
+  animation: print-message-out 220ms ease-in both;
+}
+
+@keyframes print-message-in {
   from {
     opacity: 0;
-    transform: translateY(-2px);
+    transform: translateY(3px);
+  }
+}
+
+@keyframes print-message-out {
+  to {
+    opacity: 0;
+    transform: translateY(-3px);
   }
 }
 
