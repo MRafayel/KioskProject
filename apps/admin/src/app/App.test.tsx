@@ -39,8 +39,12 @@ beforeEach(() => {
   );
   vi.spyOn(adminApi, "completeStepUp").mockResolvedValue(identity(true));
   vi.spyOn(adminApi, "revokeAuthenticator").mockResolvedValue(undefined);
-  vi.spyOn(adminApi, "beginSignIn").mockResolvedValue(ceremony("sign-in"));
-  vi.spyOn(adminApi, "completeSignIn").mockResolvedValue(identity());
+  vi.spyOn(adminApi, "login").mockResolvedValue({
+    state: "AUTHENTICATED",
+    identity: identity()
+  });
+  vi.spyOn(adminApi, "completeLoginWebAuthn").mockResolvedValue(identity());
+  vi.spyOn(adminApi, "ownSessions").mockResolvedValue({ items: [] });
   vi.spyOn(adminApi, "beginBreakGlassEnrolment").mockResolvedValue(ceremony("recovery"));
   vi.spyOn(adminApi, "completeBreakGlassEnrolment").mockResolvedValue({
     authenticatorId: keyId(8)
@@ -54,11 +58,11 @@ afterEach(() => {
 });
 
 /**
- * The security keys panel is one section among several now. Every test that
+ * The keys panel is one part of the Security section now. Every test that
  * manages a key has to get there first, exactly as an operator does.
  */
 async function openSecurityKeys(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "Security keys" }));
+  await user.click(await screen.findByRole("button", { name: "Security" }));
 }
 
 describe("admin Phase 1 workflows", () => {
@@ -89,7 +93,7 @@ describe("admin Phase 1 workflows", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Your session may still be active");
     expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Use security key" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
 
   it("returns to sign-in when a child request discovers an expired session", async () => {
@@ -97,7 +101,7 @@ describe("admin Phase 1 workflows", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: "Use security key" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Overview", level: 1 })).not.toBeInTheDocument();
   });
 
@@ -259,7 +263,7 @@ describe("admin Phase 1 workflows", () => {
     const recoveryCode = "R".repeat(43);
 
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: "Recover access" }));
+    await user.click(await screen.findByRole("button", { name: "Recover a lost security key" }));
     await user.type(screen.getByLabelText("Sealed recovery code"), recoveryCode);
     await user.type(screen.getByLabelText("Name this replacement key"), "Safe replacement");
     await user.click(
@@ -279,45 +283,100 @@ describe("admin Phase 1 workflows", () => {
 
     resolveBegin?.(ceremony("recovery"));
 
-    expect(
-      await screen.findByText(/Use a different sealed code and a different key/)
-    ).toBeVisible();
+    expect(await screen.findByText(/Replace the consumed recovery envelope/)).toBeVisible();
     expect(adminApi.completeBreakGlassEnrolment).toHaveBeenCalledWith(
       ceremony("recovery").ceremonyId,
       registrationCredential,
       "Safe replacement"
     );
-    expect(screen.getByRole("button", { name: "Use security key" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeVisible();
   });
 
   it("coalesces same-tick duplicate sign-in requests", async () => {
     vi.mocked(adminApi.me).mockRejectedValue(authenticationRequired());
-    let resolveBegin: ((value: ReturnType<typeof ceremony>) => void) | undefined;
-    vi.mocked(adminApi.beginSignIn).mockReturnValue(
+    let resolveLogin:
+      ((value: { state: "AUTHENTICATED"; identity: AdminIdentityResponse }) => void) | undefined;
+    vi.mocked(adminApi.login).mockReturnValue(
       new Promise((resolve) => {
-        resolveBegin = resolve;
+        resolveLogin = resolve;
       })
     );
+    const user = userEvent.setup();
 
     render(<App />);
-    const signIn = await screen.findByRole("button", { name: "Use security key" });
+    await user.type(await screen.findByLabelText("Username"), "ada");
+    await user.type(screen.getByLabelText("Password"), "a-long-enough-password");
+    const signIn = screen.getByRole("button", { name: "Sign in" });
     fireEvent.click(signIn);
     fireEvent.click(signIn);
 
-    expect(adminApi.beginSignIn).toHaveBeenCalledOnce();
-    resolveBegin?.(ceremony("sign-in"));
+    expect(adminApi.login).toHaveBeenCalledOnce();
+    resolveLogin?.({ state: "AUTHENTICATED", identity: identity() });
     expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+  });
+
+  it("finishes a privileged sign-in with the security key the password earned", async () => {
+    vi.mocked(adminApi.me).mockRejectedValue(authenticationRequired());
+    vi.mocked(adminApi.login).mockResolvedValue({
+      state: "WEBAUTHN_REQUIRED",
+      ceremonyId: ceremony("sign-in").ceremonyId,
+      options: { challenge: "sign-in-challenge" }
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+    await user.type(await screen.findByLabelText("Username"), "ada");
+    await user.type(screen.getByLabelText("Password"), "a-long-enough-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+    expect(adminApi.completeLoginWebAuthn).toHaveBeenCalledWith(
+      ceremony("sign-in").ceremonyId,
+      authenticationCredential
+    );
+  });
+
+  it("locks rather than signs out when the idle window has passed, and reopens the same session", async () => {
+    // The whole point of the rework: a lock screen keeps the person's place,
+    // and one reauthentication puts them back where they were.
+    vi.mocked(adminApi.me).mockResolvedValue({
+      state: "LOCKED",
+      displayName: "Ada Admin",
+      strongAuthMethod: "WEBAUTHN"
+    });
+    vi.spyOn(adminApi, "beginUnlock").mockResolvedValue(
+      accountBoundCeremony("unlock", identity().adminUserId)
+    );
+    vi.spyOn(adminApi, "completeUnlock").mockResolvedValue(identity());
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Session locked" })).toBeVisible();
+    // Not the sign-in screen: the session still stands.
+    expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Unlock with security key" }));
+
+    expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
+    expect(adminApi.completeUnlock).toHaveBeenCalledWith(
+      accountBoundCeremony("unlock", identity().adminUserId).ceremonyId,
+      authenticationCredential
+    );
   });
 });
 
 function identity(steppedUp = false): AdminIdentityResponse {
   const now = Date.now();
   return {
+    state: "ACTIVE",
     adminUserId: "01900000-0000-7000-8000-000000000101",
+    username: "ada",
     displayName: "Ada Admin",
     role: "ADMIN",
-    capabilities: ["dashboard.read", "authenticator.manage.self"],
+    capabilities: ["dashboard.read", "authenticator.manage.self", "account.sessions.read"],
     kioskScopes: [],
+    strongAuthMethod: "WEBAUTHN",
     session: {
       idleExpiresAt: new Date(now + 15 * 60_000).toISOString(),
       hardExpiresAt: new Date(now + 4 * 60 * 60_000).toISOString(),
@@ -419,10 +478,10 @@ describe("admin Phase 2 operational sections", () => {
   });
 
   it("draws the people section from the looser capability and its controls from the stricter", async () => {
-    // The Phase 4B authorization split, as the screen expresses it. A Technical
-    // Admin holds `authenticator.manage.operator` and not `operator.manage`, so
-    // it can reach the section, can issue an enrolment code, and is not offered
-    // a suspension. The server refuses all three regardless — the integration
+    // The authorization split, as the screen expresses it. A Technical Admin
+    // holds `invitation.manage` and not `operator.manage`, so it can reach the
+    // section, can hand out a new invitation code, and is not offered a
+    // suspension. The server refuses all three regardless — the integration
     // suite covers that; this covers the door not opening onto a refusal.
     vi.spyOn(observabilityApi, "people").mockResolvedValue(people());
     vi.mocked(adminApi.me).mockResolvedValue({
@@ -431,8 +490,11 @@ describe("admin Phase 2 operational sections", () => {
       capabilities: [
         "dashboard.read",
         "authenticator.manage.self",
+        "account.sessions.read",
         "operator.read",
-        "authenticator.manage.operator"
+        "authenticator.manage.operator",
+        "invitation.manage",
+        "recovery.manage"
       ]
     });
     const user = userEvent.setup();
@@ -441,7 +503,7 @@ describe("admin Phase 2 operational sections", () => {
     await user.click(await screen.findByRole("button", { name: "People" }));
 
     expect(await screen.findByText("Sam Operator")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Issue an enrolment code" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "New invitation code" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Change status" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kiosks" })).not.toBeInTheDocument();
   });
@@ -510,6 +572,7 @@ function people() {
     items: [
       {
         adminUserId: "01900000-0000-7000-8000-0000000002a1",
+        username: "sam",
         displayName: "Sam Operator",
         role: "OPERATOR" as const,
         status: "PROVISIONING" as const,
@@ -518,13 +581,14 @@ function people() {
         suspendedAt: null,
         disabledAt: null,
         lastLoginAt: null,
+        passwordSet: false,
         usableAuthenticators: 0,
-        minimumAuthenticators: 2,
+        minimumAuthenticators: 0,
         authenticators: [],
         activeSessions: 0,
         kioskIds: [],
-        liveEnrollmentTickets: 0,
-        enrollmentTicketExpiresAt: null
+        pendingInvitationExpiresAt: null,
+        pendingPasswordResetExpiresAt: null
       }
     ],
     kiosks: [{ id: "kiosk-central-01", name: "Central" }]
@@ -534,7 +598,7 @@ function people() {
 function authenticatorListing(): AdminAuthenticatorsResponse {
   return {
     usableCount: 3,
-    minimumRequired: 2,
+    minimumRequired: 1,
     items: [
       {
         id: keyId(1),

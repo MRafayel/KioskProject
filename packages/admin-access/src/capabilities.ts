@@ -146,14 +146,37 @@ export const ADMIN_CAPABILITIES = [
   /** Enrolling and revoking one's own authenticators. */
   "authenticator.manage.self",
   /**
-   * An Operator's authenticators: issuing the ticket that lets them enrol their
-   * first one, and retiring one afterwards.
+   * An Operator's authenticators: retiring one that is lost or suspect.
    *
    * It cannot enrol a key on somebody else's behalf, because WebAuthn will not
-   * let it: enrolment needs the person and their device. What it can do is
-   * authorise one enrolment ceremony on one named account.
+   * let it: enrolment needs the person and their device.
    */
-  "authenticator.manage.operator"
+  "authenticator.manage.operator",
+
+  /** Reading one's own sessions: where am I signed in, since when, from what. */
+  "account.sessions.read",
+  /** Ending one's own sessions — this one, another one, or all the others. */
+  "account.sessions.revoke",
+  /** Changing one's own password. Never anybody else's — that is recovery. */
+  "account.password.change",
+  /**
+   * Reading the invitation ledger: who has been invited, by whom, and whether
+   * the code is still live. A read, kept apart from `invitation.manage` so the
+   * screen that lists invitations never demands the ceremony that creates one.
+   */
+  "invitation.read",
+  /**
+   * Creating and revoking invitations — the only way an account comes to
+   * exist from the panel. Which roles the holder may invite is a separate
+   * matrix in `authentication.ts`; this capability only opens the surface.
+   */
+  "invitation.manage",
+  /**
+   * Issuing and revoking password-reset links for other accounts. Which roles
+   * the holder may reset is the matrix in `authentication.ts`; the issuer never
+   * sees or chooses the password that results.
+   */
+  "recovery.manage"
 ] as const;
 
 export type AdminCapability = (typeof ADMIN_CAPABILITIES)[number];
@@ -189,7 +212,10 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "error.read",
     "incident.acknowledge",
     "audit.read.self",
-    "authenticator.manage.self"
+    "authenticator.manage.self",
+    "account.sessions.read",
+    "account.sessions.revoke",
+    "account.password.change"
   ],
 
   /**
@@ -229,7 +255,13 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "operator.read",
     "operator.manage",
     "authenticator.manage.self",
-    "authenticator.manage.operator"
+    "authenticator.manage.operator",
+    "account.sessions.read",
+    "account.sessions.revoke",
+    "account.password.change",
+    "invitation.read",
+    "invitation.manage",
+    "recovery.manage"
   ],
 
   /**
@@ -301,7 +333,13 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "change.read",
     "operator.read",
     "authenticator.manage.self",
-    "authenticator.manage.operator"
+    "authenticator.manage.operator",
+    "account.sessions.read",
+    "account.sessions.revoke",
+    "account.password.change",
+    "invitation.read",
+    "invitation.manage",
+    "recovery.manage"
   ]
 };
 
@@ -388,7 +426,26 @@ const CAPABILITY_RISK: Readonly<Record<AdminCapability, ActionRisk>> = {
   "operator.read": "R0",
   "operator.manage": "R2",
   "authenticator.manage.self": "R2",
-  "authenticator.manage.operator": "R2"
+  "authenticator.manage.operator": "R2",
+
+  "account.sessions.read": "R0",
+  // Ending one's own session is protective: it narrows access rather than
+  // widening it, and demanding a fresh assertion before somebody can revoke a
+  // session they believe is stolen would guard the burglar against the owner.
+  "account.sessions.revoke": "R1",
+  // The knowledge factor rotates only with a fresh strong reauthentication in
+  // front of it. A stolen live session must not be able to change the password
+  // out from under the person it was stolen from.
+  "account.password.change": "R2",
+  // A read, and therefore R0: the ledger screen must never demand a key just
+  // to be looked at. The codes themselves are not here to read — only digests
+  // exist after issuance.
+  "invitation.read": "R0",
+  // Creating an account and issuing a reset are the two acts on this surface
+  // that can end in somebody new holding credentials. Both take the same
+  // ceremony as moving money.
+  "invitation.manage": "R2",
+  "recovery.manage": "R2"
 };
 
 export function riskOfCapability(capability: AdminCapability): ActionRisk {

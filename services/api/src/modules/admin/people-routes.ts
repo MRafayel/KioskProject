@@ -4,8 +4,6 @@ import { z } from "zod";
 import {
   changeAdminStatusBodySchema,
   changeAdminStatusResponseSchema,
-  enrollmentTicketResponseSchema,
-  issueEnrollmentTicketBodySchema,
   kioskAssignmentBodySchema,
   kioskAssignmentResponseSchema,
   revokeAdminSessionsBodySchema,
@@ -19,24 +17,27 @@ import { adminNamespacedRateKey, createAdminAccountThrottle, sendNoStore } from 
 import type { AdminPeopleService } from "./people.js";
 
 /**
- * Everything the control plane can change about a person.
+ * Everything the control plane can change about a person through the people
+ * pool. (Creating a person is an invitation, which is the identity service's
+ * act in `routes.ts` — it runs on the application connection, because it mints
+ * a credential digest this connection deliberately cannot write.)
  *
- * Five routes, on their own pool as their own database role, for the reason the
- * money route is on its own: this is the first surface that changes a row
- * somebody's access depends on, and a separation that amounts to two handlers in
- * one file is not one.
+ * Four routes, on their own pool as their own database role, for the reason
+ * the money route is on its own: this is the first surface that changes a row
+ * somebody's access depends on, and a separation that amounts to two handlers
+ * in one file is not one.
  *
  * They split across two capabilities, and the split is the phase's authorization
  * decision rather than a filing one:
  *
  *   `operator.manage`               status, kiosk assignment, ending sessions
- *   `authenticator.manage.operator` retiring a key, issuing an enrolment ticket
+ *   `authenticator.manage.operator` retiring a key
  *
- * An Admin holds both. A Technical Admin holds only the second, so it can get an
- * Operator onto a key at three in the morning and still cannot decide whether
- * that Operator may work, or where. Neither capability can change anybody's
- * role: no route here accepts one, and the connection they run on has no grant
- * on that column.
+ * An Admin holds both. A Technical Admin holds only the second, so it can
+ * retire a compromised Operator key at three in the morning and still cannot
+ * decide whether that Operator may work, or where. Neither capability can
+ * change anybody's role: no route here accepts one, and the connection they
+ * run on has no grant on that column.
  *
  * Every route is R2, so every one of them needs a fresh WebAuthn assertion.
  * There is no R1 people action — the cheapest thing on this page still ends
@@ -175,9 +176,9 @@ export function registerAdminPeopleRoutes(
   /**
    * Retire one of an Operator's security keys.
    *
-   * Refused when it would take an active account below its minimum. There is no
-   * password to fall back on in this system, so a revocation that leaves nothing
-   * behind is a lockout rather than a cleanup.
+   * An Operator's keys are optional extras beside their password, so retiring
+   * the last one is a cleanup rather than a lockout; the shared minimum-count
+   * rule simply has nothing to refuse at zero for this role.
    */
   app.post(
     "/v1/admin/people/:adminUserId/authenticators/:authenticatorId/revoke",
@@ -207,45 +208,6 @@ export function registerAdminPeopleRoutes(
         request.id
       );
       return sendNoStore(reply, revokeOperatorAuthenticatorResponseSchema.parse(result));
-    }
-  );
-
-  /**
-   * Authorise one enrolment ceremony for an Operator who has no key yet.
-   *
-   * The response carries the code, once. It is not stored in readable form, not
-   * logged, and not written into the audit event — so an Admin who loses it
-   * issues another rather than looking it up. `sendNoStore` is doing real work
-   * here rather than being applied by habit: this is the only response in the
-   * control plane that contains a credential.
-   */
-  app.post(
-    "/v1/admin/people/:adminUserId/enrollment-ticket",
-    peopleRoute,
-    async (request, reply) => {
-      const admin = await authorizeAdmin(
-        request,
-        dependencies,
-        "authenticator.manage.operator",
-        (refused) =>
-          dependencies.people.recordForbiddenAttempt(
-            refused,
-            "authenticator.manage.operator",
-            "admin.people.enrollment.issue",
-            request.id
-          )
-      );
-      await throttleAccount(request, admin.sessionId);
-
-      const params = personParams.parse(request.params);
-      const body = issueEnrollmentTicketBodySchema.parse(request.body ?? {});
-      const ticket = await dependencies.people.issueEnrollmentTicket(
-        admin,
-        params.adminUserId,
-        body,
-        request.id
-      );
-      return sendNoStore(reply, enrollmentTicketResponseSchema.parse(ticket));
     }
   );
 }

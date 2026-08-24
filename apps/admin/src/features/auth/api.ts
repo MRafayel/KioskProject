@@ -1,7 +1,19 @@
 import {
   adminAuthenticatorsResponseSchema,
   adminIdentityResponseSchema,
-  type AdminBoundWebAuthnOptionsResponse
+  adminInvitationsResponseSchema,
+  adminMeResponseSchema,
+  adminOwnSessionsResponseSchema,
+  changePasswordResponseSchema,
+  completePasswordResetResponseSchema,
+  createInvitationResponseSchema,
+  invitationPreviewResponseSchema,
+  invitationProgressResponseSchema,
+  issuePasswordResetResponseSchema,
+  passwordLoginResponseSchema,
+  revokeOwnSessionsResponseSchema,
+  type AdminBoundWebAuthnOptionsResponse,
+  type AdminRole
 } from "@printing-kiosk/admin-access";
 
 /**
@@ -9,8 +21,8 @@ import {
  *
  * Two things matter here. Every mutating request carries the CSRF token from
  * the readable half of the double-submit cookie, and every response is checked
- * for the two refusals the UI must handle differently from an ordinary error:
- * "sign in again" and "touch your key again".
+ * for the three refusals the UI must handle differently from an ordinary
+ * error: "sign in again", "unlock your session", and "prove it is you again".
  *
  * The client never decides what the operator may do. It reads the capability
  * list to choose what to render, and the server refuses anything it should not
@@ -35,7 +47,12 @@ export class AdminApiError extends Error {
     return this.status === 401 && this.code === "ADMIN_AUTHENTICATION_REQUIRED";
   }
 
-  /** The action needs a fresh assertion before it will be accepted. */
+  /** The session is locked, not gone. The UI shows the lock screen. */
+  public get requiresUnlock(): boolean {
+    return this.status === 401 && this.code === "ADMIN_SESSION_LOCKED";
+  }
+
+  /** The action needs a fresh strong reauthentication before it is accepted. */
   public get requiresStepUp(): boolean {
     return this.status === 401 && this.code === "ADMIN_STEP_UP_REQUIRED";
   }
@@ -197,22 +214,38 @@ export interface CeremonyResponse {
 export const adminApi = {
   // Identity is parsed rather than cast wherever it arrives. Role, capability
   // list and session windows all come from here, and every visibility decision
-  // this app makes is downstream of them.
-  me: () => adminRequestParsed(adminIdentityResponseSchema, "GET", "/v1/admin/me"),
+  // this app makes is downstream of them. `/me` answers for a locked session
+  // too, which is what lets a reopened browser draw the lock screen instead of
+  // the sign-in form.
+  me: () => adminRequestParsed(adminMeResponseSchema, "GET", "/v1/admin/me"),
   health: () => call<{ role: string; timestamp: string }>("GET", "/v1/admin/health"),
   logout: () => call<void>("POST", "/v1/admin/auth/logout"),
 
-  beginSignIn: () => call<CeremonyResponse>("POST", "/v1/admin/auth/authentication/options"),
-  completeSignIn: (ceremonyId: string, credential: unknown) =>
-    adminRequestParsed(
-      adminIdentityResponseSchema,
-      "POST",
-      "/v1/admin/auth/authentication/verify",
-      {
-        ceremonyId,
-        credential
-      }
-    ),
+  // Login is a password first for everybody; the response says whether a
+  // security key is still owed.
+  login: (username: string, password: string) =>
+    adminRequestParsed(passwordLoginResponseSchema, "POST", "/v1/admin/auth/login", {
+      username,
+      password
+    }),
+  completeLoginWebAuthn: (ceremonyId: string, credential: unknown) =>
+    adminRequestParsed(adminIdentityResponseSchema, "POST", "/v1/admin/auth/login/webauthn", {
+      ceremonyId,
+      credential
+    }),
+
+  // Unlocking a locked session: one key touch, or the password.
+  beginUnlock: () =>
+    call<AdminBoundWebAuthnOptionsResponse>("POST", "/v1/admin/auth/unlock/options"),
+  completeUnlock: (ceremonyId: string, credential: unknown) =>
+    adminRequestParsed(adminIdentityResponseSchema, "POST", "/v1/admin/auth/unlock/verify", {
+      ceremonyId,
+      credential
+    }),
+  unlockWithPassword: (password: string) =>
+    adminRequestParsed(adminIdentityResponseSchema, "POST", "/v1/admin/auth/unlock/password", {
+      password
+    }),
 
   beginStepUp: () =>
     call<AdminBoundWebAuthnOptionsResponse>("POST", "/v1/admin/auth/step-up/options"),
@@ -223,6 +256,10 @@ export const adminApi = {
     adminRequestParsed(adminIdentityResponseSchema, "POST", "/v1/admin/auth/step-up/verify", {
       ceremonyId,
       credential
+    }),
+  stepUpWithPassword: (password: string) =>
+    adminRequestParsed(adminIdentityResponseSchema, "POST", "/v1/admin/auth/step-up/password", {
+      password
     }),
 
   authenticators: () =>
@@ -243,28 +280,98 @@ export const adminApi = {
       reason
     }),
 
+  // One's own sessions, and the two protective actions on them.
+  ownSessions: () =>
+    adminRequestParsed(adminOwnSessionsResponseSchema, "GET", "/v1/admin/account/sessions"),
+  revokeOwnSession: (sessionId: string) =>
+    call<void>("POST", `/v1/admin/account/sessions/${encodeURIComponent(sessionId)}/revoke`),
+  revokeOtherSessions: () =>
+    adminRequestParsed(
+      revokeOwnSessionsResponseSchema,
+      "POST",
+      "/v1/admin/account/sessions/revoke-others"
+    ),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    adminRequestParsed(changePasswordResponseSchema, "POST", "/v1/admin/account/password", {
+      currentPassword,
+      newPassword
+    }),
+
+  // Invitations — the authorized side.
+  invitations: () =>
+    adminRequestParsed(adminInvitationsResponseSchema, "GET", "/v1/admin/invitations"),
+  createInvitation: (input: {
+    displayName: string;
+    username: string;
+    role: AdminRole;
+    reason: string;
+  }) => adminRequestParsed(createInvitationResponseSchema, "POST", "/v1/admin/invitations", input),
+  revokeInvitation: (invitationId: string) =>
+    call<void>("POST", `/v1/admin/invitations/${encodeURIComponent(invitationId)}/revoke`),
+  reissueInvitation: (adminUserId: string, reason: string) =>
+    call<{ invitationId: string; invitationCode: string; expiresAt: string }>(
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/invitation`,
+      { reason }
+    ),
+
+  // Password recovery — the authorized side.
+  issuePasswordReset: (adminUserId: string, reason: string) =>
+    adminRequestParsed(
+      issuePasswordResetResponseSchema,
+      "POST",
+      `/v1/admin/people/${encodeURIComponent(adminUserId)}/password-reset`,
+      { reason }
+    ),
+  revokePasswordReset: (resetId: string) =>
+    call<void>("POST", `/v1/admin/password-resets/${encodeURIComponent(resetId)}/revoke`),
+
+  // Invitation acceptance — the unauthenticated side.
+  previewInvitation: (code: string) =>
+    adminRequestParsed(
+      invitationPreviewResponseSchema,
+      "POST",
+      "/v1/admin/auth/invitation/preview",
+      {
+        code
+      }
+    ),
+  setInvitationPassword: (code: string, password: string) =>
+    adminRequestParsed(
+      invitationProgressResponseSchema,
+      "POST",
+      "/v1/admin/auth/invitation/password",
+      { code, password }
+    ),
+  beginInvitationEnrolment: (code: string) =>
+    call<CeremonyResponse>("POST", "/v1/admin/auth/invitation/registration/options", { code }),
+  completeInvitationEnrolment: (
+    code: string,
+    ceremonyId: string,
+    credential: unknown,
+    label: string
+  ) =>
+    call<{ authenticatorId: string; activated: boolean }>(
+      "POST",
+      "/v1/admin/auth/invitation/registration/verify",
+      { code, ceremonyId, credential, label }
+    ),
+
+  // Password reset completion — the unauthenticated side.
+  completePasswordReset: (code: string, newPassword: string) =>
+    adminRequestParsed(
+      completePasswordResetResponseSchema,
+      "POST",
+      "/v1/admin/auth/password-reset/complete",
+      { code, newPassword }
+    ),
+
   beginBreakGlassEnrolment: (recoveryCode: string) =>
     call<CeremonyResponse>("POST", "/v1/admin/auth/break-glass/registration/options", {
       recoveryCode
     }),
   completeBreakGlassEnrolment: (ceremonyId: string, credential: unknown, label: string) =>
     call<{ authenticatorId: string }>("POST", "/v1/admin/auth/break-glass/registration/verify", {
-      ceremonyId,
-      credential,
-      label
-    }),
-
-  /**
-   * Redeeming an enrolment ticket. Separate calls from break-glass, matching the
-   * separate routes: the two ceremonies differ in what account they may enrol
-   * onto, and one client function for both would have made that a parameter.
-   */
-  beginTicketEnrolment: (enrollmentCode: string) =>
-    call<CeremonyResponse>("POST", "/v1/admin/auth/enrollment/registration/options", {
-      enrollmentCode
-    }),
-  completeTicketEnrolment: (ceremonyId: string, credential: unknown, label: string) =>
-    call<{ authenticatorId: string }>("POST", "/v1/admin/auth/enrollment/registration/verify", {
       ceremonyId,
       credential,
       label

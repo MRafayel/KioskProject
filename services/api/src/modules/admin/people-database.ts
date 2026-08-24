@@ -72,12 +72,6 @@ export interface AdminPeopleDatabase {
    */
   adminKioskScope: ConditionallyUpdatable<PrismaClient["adminKioskScope"]> &
     Appendable<PrismaClient["adminKioskScope"]>;
-  /**
-   * Authorising one enrolment ceremony. Appendable only — a ticket is marked
-   * consumed by the redemption path on the application connection, which is the
-   * only one that can match a presented code against the stored digest.
-   */
-  adminEnrollmentTicket: Appendable<PrismaClient["adminEnrollmentTicket"]>;
   /** Every people action records itself, including the ones that were refused. */
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
 
@@ -104,7 +98,6 @@ export interface AdminPeopleTransaction {
   adminSession: ConditionallyUpdatable<PrismaClient["adminSession"]>;
   adminKioskScope: ConditionallyUpdatable<PrismaClient["adminKioskScope"]> &
     Appendable<PrismaClient["adminKioskScope"]>;
-  adminEnrollmentTicket: Appendable<PrismaClient["adminEnrollmentTicket"]>;
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
   kiosk: ReadOnly<PrismaClient["kiosk"]>;
 }

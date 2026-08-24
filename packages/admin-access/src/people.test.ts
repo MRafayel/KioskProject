@@ -2,13 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   ADMIN_STATUS_ACTIONS,
-  ENROLLMENT_TICKET_TTL_MILLISECONDS,
   changeAdminStatusBodySchema,
-  enrollmentTicketResponseSchema,
   evaluateStatusTransition,
-  issueEnrollmentTicketBodySchema,
   kioskAssignmentBodySchema,
-  redeemEnrollmentTicketBodySchema,
   revokesSessions
 } from "./people.js";
 
@@ -111,56 +107,5 @@ describe("request bodies", () => {
         reason: "Covering the central branch from Monday."
       }).success
     ).toBe(false);
-  });
-
-  it("takes nothing but a reason when issuing a ticket", () => {
-    // The account is in the path and the code is the server's to generate. A
-    // body that could name either would be a body that could redirect a ticket.
-    expect(
-      issueEnrollmentTicketBodySchema.safeParse({
-        reason: "First day; enrolling their key at the counter.",
-        targetAdminUserId: "6f1f8a3e-5f8f-4b1b-9a3e-1f8a3e5f8f4b"
-      }).success
-    ).toBe(false);
-    expect(
-      issueEnrollmentTicketBodySchema.safeParse({
-        reason: "First day; enrolling their key at the counter."
-      }).success
-    ).toBe(true);
-  });
-
-  it("refuses a redemption code that cannot be one", () => {
-    expect(redeemEnrollmentTicketBodySchema.safeParse({ enrollmentCode: "short" }).success).toBe(
-      false
-    );
-    expect(
-      redeemEnrollmentTicketBodySchema.safeParse({ enrollmentCode: "a".repeat(43) }).success
-    ).toBe(true);
-    expect(
-      redeemEnrollmentTicketBodySchema.safeParse({ enrollmentCode: `${"a".repeat(40)} OR 1=1` })
-        .success
-    ).toBe(false);
-  });
-});
-
-describe("the ticket response", () => {
-  it("cannot claim to have signed anybody in", () => {
-    const base = {
-      ticketId: "6f1f8a3e-5f8f-4b1b-9a3e-1f8a3e5f8f4b",
-      targetAdminUserId: "1f8a3e5f-8f4b-4b9a-8e1f-8a3e5f8f4b1b",
-      targetDisplayName: "Sam",
-      enrollmentCode: "a".repeat(43),
-      expiresAt: "2026-08-11T10:15:00.000Z"
-    };
-    expect(
-      enrollmentTicketResponseSchema.safeParse({ ...base, grantsSession: false }).success
-    ).toBe(true);
-    expect(enrollmentTicketResponseSchema.safeParse({ ...base, grantsSession: true }).success).toBe(
-      false
-    );
-  });
-
-  it("expires in fifteen minutes", () => {
-    expect(ENROLLMENT_TICKET_TTL_MILLISECONDS).toBe(900_000);
   });
 });

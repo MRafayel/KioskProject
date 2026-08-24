@@ -330,6 +330,68 @@ code {
   padding: 0;
 }
 
+/* The sign-in and lock forms. Bounded and left-aligned inside the centred
+   column: a full-width password field on a wide monitor looks like a search
+   box, and this is the one field on the page that must not be mistaken. */
+.signin__form {
+  max-width: 22rem;
+  margin: 1.25rem auto 0;
+  text-align: left;
+}
+
+/* The three ways in that are not a password, given equal weight and kept
+   together so nobody reaches for recovery when they only forgot a password. */
+.signin__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+/* The step-up password prompt. A dialog rather than an inline field because it
+   interrupts an action already in progress, and the person needs to see that
+   the action is waiting on them. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 45%);
+}
+
+.modal {
+  display: grid;
+  gap: 0.6rem;
+  width: min(24rem, 100%);
+  padding: 1.25rem;
+  background: var(--surface-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  text-align: left;
+}
+
+.modal h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.modal p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 /* ---------------------------------------------------------------------------
    Shell
    ------------------------------------------------------------------------- */

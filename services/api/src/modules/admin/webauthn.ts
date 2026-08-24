@@ -22,9 +22,11 @@ import type { WebAuthnCredential } from "@printing-kiosk/admin-access";
  * — a PIN, a biometric — not merely that a key is plugged in. A key left in a
  * laptop is otherwise a bearer token.
  *
- * `residentKey: "required"` makes the credential discoverable, so login needs
- * no username. That removes account enumeration entirely: there is no field an
- * attacker can probe to learn whether an account exists.
+ * `residentKey: "required"` makes the credential discoverable. Login identifies
+ * the account by username and password first, so discoverability is no longer
+ * load-bearing — but every enrolled credential predates that change, and
+ * platform authenticators create resident keys regardless, so asking for
+ * anything else would add a variation without removing a dependency.
  */
 
 export interface WebAuthnRelyingParty {
@@ -40,8 +42,6 @@ export interface RegistrationCeremonyInput {
   displayName: string;
   /** Credentials already enrolled, so an authenticator refuses to double-enrol. */
   existingCredentialIds: readonly string[];
-  /** Technical Admins must present a roaming, non-exportable key. */
-  requireCrossPlatform: boolean;
 }
 
 export async function createRegistrationOptions(input: RegistrationCeremonyInput) {
@@ -58,10 +58,11 @@ export async function createRegistrationOptions(input: RegistrationCeremonyInput
     // Enrolling the same authenticator twice would look like a spare while
     // being a single point of failure.
     excludeCredentials: input.existingCredentialIds.map((id) => ({ id })),
+    // No attachment preference: a hardware key and a platform authenticator
+    // are both acceptable second factors now that a password stands in front.
     authenticatorSelection: {
       residentKey: "required",
-      userVerification: "required",
-      ...(input.requireCrossPlatform ? { authenticatorAttachment: "cross-platform" as const } : {})
+      userVerification: "required"
     },
     supportedAlgorithmIDs: [-7, -257]
   });

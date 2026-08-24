@@ -57,18 +57,22 @@ export interface AdminReadDatabase {
   /**
    * Phase 4B. The people section has to answer "can this person work, and
    * should they", which needs key counts, live session counts, kiosk
-   * assignments and outstanding tickets.
+   * assignments and outstanding invitations or resets.
    *
    * None of that is a credential, and the reader role's column allow-list is
    * what makes that statement true rather than intended: `credential_id`,
-   * `public_key`, `token_digest`, `csrf_digest` and the ticket's own
-   * `secret_digest` are all denied at the grant, so a query here that asked for
-   * one would be refused by PostgreSQL.
+   * `public_key`, `token_digest`, `csrf_digest` and the grants' own
+   * `secret_digest` are all denied at the grant, so a query here that asked
+   * for one would be refused by PostgreSQL.
    */
   adminAuthenticator: ReadOnly<PrismaClient["adminAuthenticator"]>;
   adminSession: ReadOnly<PrismaClient["adminSession"]>;
   adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
-  adminEnrollmentTicket: ReadOnly<PrismaClient["adminEnrollmentTicket"]>;
+  adminInvitation: ReadOnly<PrismaClient["adminInvitation"]>;
+  adminPasswordReset: ReadOnly<PrismaClient["adminPasswordReset"]>;
+  /** Presence only: the reader's grant stops at `admin_user_id`, so "has a
+   * password" is answerable and the digest is not. */
+  adminPassword: ReadOnly<PrismaClient["adminPassword"]>;
   /**
    * Phase 5. Reading the change log is a read like any other, so it runs here
    * rather than on the role that publishes. Giving the connection that changes

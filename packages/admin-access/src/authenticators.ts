@@ -1,29 +1,38 @@
 /**
- * What an admin account's authenticators must look like before it may be used.
+ * What an admin account's credentials must look like before it may be used.
  *
  * This module is pure. The API enforces it at enrolment, at activation and at
- * revocation, and PostgreSQL enforces the same two invariants again with
- * triggers, because losing them would either lock a privileged operator out
- * permanently or leave a weaker credential standing where a hardware key was
- * required.
+ * revocation, and PostgreSQL enforces the activation and keep-a-spare
+ * invariants again with triggers, because losing them would either lock a
+ * privileged operator out or leave an account usable without the factors its
+ * role requires.
  *
- * WebAuthn is the only factor in this system. There is no password, no TOTP, no
- * emailed link and no SMS — deliberately, because any of them would become the
- * cheapest way in and would make the choice of WebAuthn decorative. The cost of
- * that decision is that a lost authenticator has no "reset" path, so the rules
- * below exist to make sure no account ever depends on a single one.
+ * Authentication is a password plus, for privileged roles, a WebAuthn
+ * credential (`authentication.ts` holds that policy). The password is what
+ * makes a lost or reinstalled authenticator a recoverable event rather than a
+ * break-glass ceremony, which is why the minimum key counts here are lower
+ * than they were when WebAuthn stood alone: an account is no longer one
+ * misplaced USB stick away from the sealed-envelope procedure.
  */
 
+import { requiresWebAuthn } from "./authentication.js";
 import { isPrivilegedRole, type AdminRole } from "./capabilities.js";
 
 /**
- * Every privileged account keeps at least this many usable authenticators, so
- * losing one is a replacement rather than an account recovery.
+ * How many usable WebAuthn credentials each role must keep while ACTIVE.
+ *
+ * One for privileged roles: the key is their second factor, so zero would let
+ * a password alone sign them in. It was two when WebAuthn was the only factor
+ * and losing the last key meant losing the account; with a password beneath it
+ * and administrator-assisted recovery beside it, a lost key is now an
+ * inconvenience, and the second mandatory key bought lockouts more often than
+ * it bought safety.
  */
-export const MINIMUM_PRIVILEGED_AUTHENTICATORS = 2;
+export const MINIMUM_PRIVILEGED_AUTHENTICATORS = 1;
 
-/** An Operator still needs a spare; the consequence of losing one is smaller. */
-export const MINIMUM_OPERATOR_AUTHENTICATORS = 2;
+/** Operators authenticate with a password alone; a key is not part of their
+ * sign-in and so none is required. */
+export const MINIMUM_OPERATOR_AUTHENTICATORS = 0;
 
 export function minimumAuthenticators(role: AdminRole): number {
   return isPrivilegedRole(role)
@@ -33,9 +42,10 @@ export function minimumAuthenticators(role: AdminRole): number {
 
 /**
  * An account cannot authenticate until it is ACTIVE, and it cannot become
- * ACTIVE until it satisfies `minimumAuthenticators`. PROVISIONING therefore
- * describes the only window in which an account holds fewer than the minimum,
- * and in that window it can do nothing but finish enrolling.
+ * ACTIVE until it holds a password and `minimumAuthenticators` usable keys.
+ * PROVISIONING therefore describes the only window in which an account is
+ * missing a factor its role requires, and in that window it can do nothing but
+ * finish accepting its invitation.
  */
 export const ADMIN_USER_STATUSES = ["PROVISIONING", "ACTIVE", "SUSPENDED", "DISABLED"] as const;
 
@@ -62,68 +72,56 @@ export interface AuthenticatorProperties {
    * authenticator declined to say.
    */
   attachment: "platform" | "cross-platform" | null;
-  /**
-   * True when the credential is allowed to leave the device it was created on.
-   * A synchronised passkey is only as strong as the cloud account holding it,
-   * which is why a Technical Admin may not use one.
-   */
+  /** True when the credential is allowed to leave the device it was created on. */
   backupEligible: boolean;
   /** True once the credential actually has been synchronised off the device. */
   backedUp: boolean;
 }
 
-export type AuthenticatorRejectionReason =
-  /** A Technical Admin key must not be synchronisable to a vendor cloud. */
-  | "BACKUP_ELIGIBLE_NOT_ALLOWED"
-  /** A Technical Admin key must be a roaming hardware authenticator. */
-  | "CROSS_PLATFORM_REQUIRED";
-
-export type AuthenticatorPolicyResult =
-  { allowed: true } | { allowed: false; reason: AuthenticatorRejectionReason };
+export type AuthenticatorPolicyResult = { allowed: true };
 
 /**
  * Whether this authenticator may be enrolled for this role.
  *
- * Technical Admins hold the proposing half of every serious production change,
- * so their credential must be device-bound: not exportable, not synchronised,
- * and physically separable from the workstation. `backupEligible` is the
- * WebAuthn flag that reports exportability, and it is checked rather than
- * merely requested — a registration ceremony can ask for a resident key on a
- * roaming authenticator and still be answered by a synchronised passkey.
+ * Every role may now use a platform authenticator or a synchronised passkey.
+ * Technical Admins were once restricted to device-bound roaming keys — the
+ * right rule while WebAuthn was the only factor, and the rule that in practice
+ * forced a browser-lifetime virtual authenticator on any machine without a
+ * hardware key, burning a break-glass code per browser restart. With a
+ * password in front of every assertion, the credential is a second factor, and
+ * a platform authenticator that persists is strictly safer than a perfect key
+ * that keeps not existing.
  *
- * Admins and Operators may use a platform authenticator. Their capabilities are
- * bounded by approval requirements and by the absence of any document or
- * credential access, so the stricter hardware rule would cost more in lockouts
- * than it buys.
+ * The function survives the relaxation on purpose: it is the one seam where a
+ * quality rule for a role's keys would return, and the enrolment path still
+ * routes every registration through it.
  */
 export function evaluateAuthenticatorPolicy(
   role: AdminRole,
   properties: AuthenticatorProperties
 ): AuthenticatorPolicyResult {
-  if (role !== "TECHNICAL_ADMIN") return { allowed: true };
-
-  if (properties.backupEligible || properties.backedUp) {
-    return { allowed: false, reason: "BACKUP_ELIGIBLE_NOT_ALLOWED" };
-  }
-  // A null attachment means the authenticator declined to identify itself.
-  // For this role that is not good enough to accept.
-  if (properties.attachment !== "cross-platform") {
-    return { allowed: false, reason: "CROSS_PLATFORM_REQUIRED" };
-  }
+  void role;
+  void properties;
   return { allowed: true };
 }
 
-export type ActivationRejectionReason = "NOT_ENOUGH_AUTHENTICATORS" | "STATUS_NOT_PROVISIONING";
+export type ActivationRejectionReason =
+  "NOT_ENOUGH_AUTHENTICATORS" | "PASSWORD_NOT_SET" | "STATUS_NOT_PROVISIONING";
 
 export type ActivationResult =
   | { allowed: true }
   | { allowed: false; reason: ActivationRejectionReason; required: number; present: number };
 
-/** Whether a provisioning account has enrolled enough to be switched on. */
+/**
+ * Whether a provisioning account has everything its role needs to be switched
+ * on: a password always, and for roles that sign in with a key, at least the
+ * minimum number of them.
+ */
 export function evaluateActivation(
   role: AdminRole,
   status: AdminUserStatus,
-  usableAuthenticators: number
+  usableAuthenticators: number,
+  hasPassword: boolean
 ): ActivationResult {
   const required = minimumAuthenticators(role);
   if (status !== "PROVISIONING") {
@@ -134,7 +132,10 @@ export function evaluateActivation(
       present: usableAuthenticators
     };
   }
-  if (usableAuthenticators < required) {
+  if (!hasPassword) {
+    return { allowed: false, reason: "PASSWORD_NOT_SET", required, present: usableAuthenticators };
+  }
+  if (requiresWebAuthn(role) && usableAuthenticators < required) {
     return {
       allowed: false,
       reason: "NOT_ENOUGH_AUTHENTICATORS",
@@ -148,10 +149,10 @@ export function evaluateActivation(
 /**
  * Whether one authenticator may be revoked.
  *
- * An ACTIVE account may not be taken below its minimum by a revocation: the
- * replacement is enrolled first, and only then is the lost key removed. Doing
- * it the other way round is how an operator ends up locked out of the control
- * plane during the incident they needed it for.
+ * An ACTIVE account may not be taken below its minimum by a revocation: for a
+ * privileged role that means the last usable key stays until a replacement is
+ * enrolled, because removing it would leave a password as the only thing
+ * between the internet and an administrator account.
  *
  * A suspended or disabled account has no session to protect, so its
  * authenticators may be cleaned up freely.

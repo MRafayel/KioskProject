@@ -64,10 +64,29 @@ const environmentSchema = z
       .string()
       .min(32)
       .default("development-only-admin-break-glass-pepper-change-me"),
-    // Admin sessions are short. An unattended browser in a back office is a
-    // realistic threat, and nothing in this plane is worth a long window.
-    ADMIN_SESSION_IDLE_MINUTES: z.coerce.number().int().min(2).max(120).default(15),
-    ADMIN_SESSION_ABSOLUTE_MINUTES: z.coerce.number().int().min(5).max(720).default(240),
+    // Session windows per role. Inactivity locks the session rather than
+    // destroying it — a lock screen and a quick reauthentication, not a
+    // sign-out — so these idle windows can match how the roles actually work: a
+    // whole shift for an Operator, tighter for the roles a stolen unlocked
+    // browser could do real damage as. The absolute window is the one nothing
+    // extends; it exists so no cookie lives forever, not to interrupt a
+    // working day.
+    ADMIN_SESSION_IDLE_MINUTES_OPERATOR: z.coerce.number().int().min(2).max(720).default(360),
+    ADMIN_SESSION_IDLE_MINUTES_ADMIN: z.coerce.number().int().min(2).max(360).default(120),
+    ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN: z.coerce.number().int().min(2).max(240).default(60),
+    ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR: z.coerce.number().int().min(1).max(2_160).default(720),
+    ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN: z.coerce.number().int().min(1).max(1_080).default(336),
+    ADMIN_SESSION_ABSOLUTE_HOURS_TECHNICAL_ADMIN: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(720)
+      .default(168),
+    // One-time grants. An invitation is carried to a colleague and accepted
+    // within days; a reset is read out over a shoulder and used within the
+    // hour.
+    ADMIN_INVITATION_TTL_HOURS: z.coerce.number().int().min(1).max(336).default(72),
+    ADMIN_PASSWORD_RESET_TTL_MINUTES: z.coerce.number().int().min(5).max(1_440).default(60),
     // How long a WebAuthn assertion authorises R2 actions. Short enough that it
     // covers one deliberate task, not a whole shift.
     ADMIN_STEP_UP_TTL_SECONDS: z.coerce.number().int().min(30).max(1_800).default(300),
@@ -681,8 +700,7 @@ const environmentSchema = z
       }
       if (
         environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY.length > 0 &&
-        environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY ===
-          environment.PRINTER_TELEMETRY_SNMP_PRIV_KEY
+        environment.PRINTER_TELEMETRY_SNMP_AUTH_KEY === environment.PRINTER_TELEMETRY_SNMP_PRIV_KEY
       ) {
         context.addIssue({
           code: "custom",
@@ -849,24 +867,35 @@ const environmentSchema = z
       });
     }
 
-    // An admin session that could outlive its absolute window would be ended by
-    // a sweep rather than by policy.
-    if (environment.ADMIN_SESSION_IDLE_MINUTES > environment.ADMIN_SESSION_ABSOLUTE_MINUTES) {
-      context.addIssue({
-        code: "custom",
-        path: ["ADMIN_SESSION_IDLE_MINUTES"],
-        message: "ADMIN_SESSION_IDLE_MINUTES must not exceed ADMIN_SESSION_ABSOLUTE_MINUTES"
-      });
-    }
-
-    // Step-up exists so a sensitive action needs a fresh touch. If it outlived
-    // the session's own idle window it would never be the binding constraint.
-    if (environment.ADMIN_STEP_UP_TTL_SECONDS > environment.ADMIN_SESSION_IDLE_MINUTES * 60) {
-      context.addIssue({
-        code: "custom",
-        path: ["ADMIN_STEP_UP_TTL_SECONDS"],
-        message: "ADMIN_STEP_UP_TTL_SECONDS must not exceed the admin idle session window"
-      });
+    // A session that could outlive its absolute window would be ended by a
+    // sweep rather than by policy — per role, because the windows are.
+    const adminSessionWindows = [
+      ["OPERATOR", "ADMIN_SESSION_IDLE_MINUTES_OPERATOR", "ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR"],
+      ["ADMIN", "ADMIN_SESSION_IDLE_MINUTES_ADMIN", "ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN"],
+      [
+        "TECHNICAL_ADMIN",
+        "ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN",
+        "ADMIN_SESSION_ABSOLUTE_HOURS_TECHNICAL_ADMIN"
+      ]
+    ] as const;
+    for (const [, idleKey, absoluteKey] of adminSessionWindows) {
+      if (environment[idleKey] > environment[absoluteKey] * 60) {
+        context.addIssue({
+          code: "custom",
+          path: [idleKey],
+          message: `${idleKey} must not exceed ${absoluteKey}`
+        });
+      }
+      // Step-up exists so a sensitive action needs a fresh touch. If it
+      // outlived the session's own idle window it would never be the binding
+      // constraint.
+      if (environment.ADMIN_STEP_UP_TTL_SECONDS > environment[idleKey] * 60) {
+        context.addIssue({
+          code: "custom",
+          path: ["ADMIN_STEP_UP_TTL_SECONDS"],
+          message: `ADMIN_STEP_UP_TTL_SECONDS must not exceed the ${idleKey} window`
+        });
+      }
     }
 
     // Every consumer parses this value as a URL. Rejecting it here keeps a typo
@@ -1443,8 +1472,14 @@ const ADMIN_ENVIRONMENT_KEYS = [
   "ADMIN_WEBAUTHN_RP_NAME",
   "ADMIN_SESSION_PEPPER",
   "ADMIN_BREAK_GLASS_PEPPER",
-  "ADMIN_SESSION_IDLE_MINUTES",
-  "ADMIN_SESSION_ABSOLUTE_MINUTES",
+  "ADMIN_SESSION_IDLE_MINUTES_OPERATOR",
+  "ADMIN_SESSION_IDLE_MINUTES_ADMIN",
+  "ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN",
+  "ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR",
+  "ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN",
+  "ADMIN_SESSION_ABSOLUTE_HOURS_TECHNICAL_ADMIN",
+  "ADMIN_INVITATION_TTL_HOURS",
+  "ADMIN_PASSWORD_RESET_TTL_MINUTES",
   "ADMIN_STEP_UP_TTL_SECONDS",
   "ADMIN_CHALLENGE_TTL_SECONDS",
   "ADMIN_BREAK_GLASS_TTL_HOURS",
@@ -1530,8 +1565,14 @@ export function loadNonAdminEnvironment(
     ADMIN_WEBAUTHN_RP_NAME: "Unused outside API",
     ADMIN_SESSION_PEPPER: "not-loaded-outside-api-admin-session-pepper",
     ADMIN_BREAK_GLASS_PEPPER: "not-loaded-outside-api-break-glass-pepper",
-    ADMIN_SESSION_IDLE_MINUTES: "15",
-    ADMIN_SESSION_ABSOLUTE_MINUTES: "240",
+    ADMIN_SESSION_IDLE_MINUTES_OPERATOR: "360",
+    ADMIN_SESSION_IDLE_MINUTES_ADMIN: "120",
+    ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN: "60",
+    ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR: "720",
+    ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN: "336",
+    ADMIN_SESSION_ABSOLUTE_HOURS_TECHNICAL_ADMIN: "168",
+    ADMIN_INVITATION_TTL_HOURS: "72",
+    ADMIN_PASSWORD_RESET_TTL_MINUTES: "60",
     ADMIN_STEP_UP_TTL_SECONDS: "300",
     ADMIN_CHALLENGE_TTL_SECONDS: "180",
     ADMIN_BREAK_GLASS_TTL_HOURS: "2160",

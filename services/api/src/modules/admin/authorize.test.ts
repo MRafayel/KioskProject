@@ -27,6 +27,7 @@ const now = new Date("2026-08-10T12:00:00.000Z");
 function admin(role: AdminRole, lastStepUpAt: Date | null): AuthenticatedAdmin {
   return {
     adminUserId: "00000000-0000-7000-8000-000000000001",
+    username: "test",
     displayName: "Test",
     role,
     sessionId: "00000000-0000-7000-8000-000000000002",
@@ -40,7 +41,8 @@ function admin(role: AdminRole, lastStepUpAt: Date | null): AuthenticatedAdmin {
 function dependencies(resolved: AuthenticatedAdmin | null): AdminAuthorizationDependencies {
   return {
     admin: {
-      resolveSession: () => Promise.resolve(resolved),
+      resolveSession: () =>
+        Promise.resolve(resolved ? { state: "ACTIVE" as const, admin: resolved } : null),
       verifyCsrf: () => Promise.resolve(true)
     } as unknown as AdminService,
     stepUpTtlMilliseconds: STEP_UP_TTL,

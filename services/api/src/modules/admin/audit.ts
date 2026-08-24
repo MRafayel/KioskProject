@@ -90,15 +90,26 @@ const ALLOWED_METADATA_KEYS = new Set([
   // the two would need a join to a row that may itself have moved on.
   //
   // What is deliberately not here: a display name, which is a person's name and
-  // belongs to the account row rather than to a permanent log; and the ticket
-  // code, which is a credential and is never written anywhere in readable form.
+  // belongs to the account row rather than to a permanent log; a username typed
+  // into a failed login, which is attacker-controlled and is one misplaced
+  // keystroke away from being somebody's password; and any one-time code, which
+  // is a credential and is never written anywhere in readable form.
   "targetRole",
   "targetStatus",
   "kioskAssigned",
-  "ticketId",
-  "ticketExpiresAt",
   "revokedSessions",
   "usableAuthenticators",
+  // Authentication. `method` records which factor satisfied a login, unlock or
+  // step-up — PASSWORD or WEBAUTHN — because "signed in" and "signed in with
+  // only a password" are different events for a privileged account.
+  "method",
+  "revokedSessionId",
+  // Invitations and password resets: the grant's identity and window, never
+  // its code.
+  "invitationId",
+  "invitationExpiresAt",
+  "resetId",
+  "resetExpiresAt",
   // Publishing a tariff. The whole tariff is written out — the amounts, not just
   // a digest — because an audit row about the prices that needs a join to a
   // table somebody has since replaced is one nobody can read during the argument
@@ -202,6 +213,10 @@ export function sanitizeMetadata(
  */
 const READABLE_METADATA_KEYS = new Set([
   ...ALLOWED_METADATA_KEYS,
+  // Written by the retired enrollment-ticket flow. Nothing writes these any
+  // more; the rows that carry them are permanent and must stay readable.
+  "ticketId",
+  "ticketExpiresAt",
   // Upload and document processing.
   "fileId",
   "fileCount",

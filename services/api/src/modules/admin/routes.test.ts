@@ -127,16 +127,8 @@ describe("admin session cookies", () => {
     const { app } = await buildAdminApp("http://localhost:5175");
     const response = await app.inject({
       method: "POST",
-      url: "/v1/admin/auth/authentication/verify",
-      payload: {
-        ceremonyId: "00000000-0000-7000-8000-000000000010",
-        credential: {
-          id: "credential-id",
-          rawId: "credential-id",
-          type: "public-key",
-          response: {}
-        }
-      }
+      url: "/v1/admin/auth/login",
+      payload: { username: "test.admin", password: "a-long-enough-password" }
     });
 
     expect(response.statusCode).toBe(200);
@@ -174,8 +166,8 @@ describe("admin session cookies", () => {
 async function buildAdminApp(adminOrigin = ADMIN_ORIGIN) {
   const identity = authenticatedAdmin();
   const admin = {
-    beginAuthentication: vi.fn().mockResolvedValue({ ceremonyId: "unused", options: {} }),
-    completeAuthentication: vi.fn().mockResolvedValue({
+    loginWithPassword: vi.fn().mockResolvedValue({
+      state: "AUTHENTICATED",
       admin: identity,
       cookies: {
         sessionToken: "session-token",
@@ -184,7 +176,7 @@ async function buildAdminApp(adminOrigin = ADMIN_ORIGIN) {
         hardExpiresAt: identity.hardExpiresAt
       }
     }),
-    resolveSession: vi.fn().mockResolvedValue(identity),
+    resolveSession: vi.fn().mockResolvedValue({ state: "ACTIVE", admin: identity }),
     verifyCsrf: vi.fn().mockResolvedValue(true),
     revokeSession: vi.fn().mockResolvedValue(undefined)
   };
@@ -203,6 +195,7 @@ async function buildAdminApp(adminOrigin = ADMIN_ORIGIN) {
 function authenticatedAdmin(): AuthenticatedAdmin {
   return {
     adminUserId: "00000000-0000-7000-8000-000000000001",
+    username: "test.admin",
     displayName: "Test Admin",
     role: "ADMIN",
     sessionId: "00000000-0000-7000-8000-000000000002",

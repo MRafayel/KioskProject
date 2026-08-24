@@ -39,19 +39,22 @@ describe("authentication compare-and-set", () => {
     const database = databaseWithTransaction(transaction, {
       adminWebAuthnChallenge: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        findUnique: vi.fn().mockResolvedValue({ challenge: "challenge" })
+        findUnique: vi
+          .fn()
+          .mockResolvedValue({ challenge: "challenge", adminUserId: ADMIN_USER_ID })
       },
       adminAuthenticator: {
-        findUnique: vi.fn().mockResolvedValue(storedAuthenticator())
+        findFirst: vi.fn().mockResolvedValue(storedAuthenticator())
       },
       auditEvent: { create: auditCreate }
     });
 
     await expect(
-      service(database).completeAuthentication({
+      service(database).completeLoginWebAuthn({
         ceremonyId: "00000000-0000-7000-8000-000000000010",
         credential: credential(),
-        requestId: "request-1"
+        requestId: "request-1",
+        client: { ipAddress: "127.0.0.1", userAgent: "vitest" }
       })
     ).rejects.toMatchObject({ statusCode: 401, code: "ADMIN_AUTHENTICATION_FAILED" });
 
@@ -244,7 +247,11 @@ describe("registration activation serialization", () => {
     const transaction = {
       adminUser: {
         updateMany: ownerLock,
-        findUnique: vi.fn().mockResolvedValue({ role: "ADMIN", status: "PROVISIONING" }),
+        findUnique: vi.fn().mockResolvedValue({
+          role: "ADMIN",
+          status: "PROVISIONING",
+          password: { adminUserId: ADMIN_USER_ID }
+        }),
         update: ownerActivate
       },
       adminAuthenticator: { create: authenticatorCreate, count: credentialCount },
@@ -453,7 +460,9 @@ describe("idempotent revocation", () => {
 
     await expect(
       service(databaseWithTransaction(transaction, {})).revokeSession({
-        admin: authenticatedAdmin(),
+        adminUserId: ADMIN_USER_ID,
+        sessionId: SESSION_ID,
+        role: "ADMIN",
         reason: "USER_LOGOUT",
         requestId: "request-5"
       })
@@ -496,9 +505,21 @@ function service(database: PrismaClient): AdminService {
     relyingParty: { id: "admin.example.test", name: "Admin", origin: "https://admin.example.test" },
     sessionPepper: "session-pepper-at-least-thirty-two-characters",
     breakGlassPepper: "recovery-pepper-at-least-thirty-two-characters",
-    idleTtlMilliseconds: 15 * 60_000,
-    absoluteTtlMilliseconds: 4 * 60 * 60_000,
-    challengeTtlMilliseconds: 3 * 60_000
+    sessionWindows: {
+      idleTtlMilliseconds: {
+        OPERATOR: 6 * 60 * 60_000,
+        ADMIN: 2 * 60 * 60_000,
+        TECHNICAL_ADMIN: 60 * 60_000
+      },
+      absoluteTtlMilliseconds: {
+        OPERATOR: 30 * 24 * 60 * 60_000,
+        ADMIN: 14 * 24 * 60 * 60_000,
+        TECHNICAL_ADMIN: 7 * 24 * 60 * 60_000
+      }
+    },
+    challengeTtlMilliseconds: 3 * 60_000,
+    invitationTtlMilliseconds: 72 * 60 * 60_000,
+    passwordResetTtlMilliseconds: 60 * 60_000
   });
 }
 
@@ -523,7 +544,12 @@ function storedAuthenticator() {
     signCount: 5,
     transports: [],
     revokedAt: null,
-    adminUser: { status: "ACTIVE", role: "ADMIN", displayName: "Test Admin" }
+    adminUser: {
+      status: "ACTIVE",
+      role: "ADMIN",
+      displayName: "Test Admin",
+      username: "test.admin"
+    }
   };
 }
 
@@ -539,6 +565,7 @@ function credential() {
 function authenticatedAdmin(): AuthenticatedAdmin {
   return {
     adminUserId: ADMIN_USER_ID,
+    username: "test.admin",
     displayName: "Test Admin",
     role: "ADMIN",
     sessionId: SESSION_ID,

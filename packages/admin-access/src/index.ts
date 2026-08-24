@@ -15,6 +15,23 @@ export {
 } from "./capabilities.js";
 
 export {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  USERNAME_MAX_LENGTH,
+  USERNAME_MIN_LENGTH,
+  invitableRoles,
+  mayInviteRole,
+  mayResetPassword,
+  oneTimeCodeSchema,
+  passwordSchema,
+  requiresWebAuthn,
+  strongAuthMethodForRole,
+  usernameSchema,
+  webAuthnPolicyMatchesPrivilege,
+  type StrongAuthMethod
+} from "./authentication.js";
+
+export {
   ADMIN_USER_STATUSES,
   MINIMUM_OPERATOR_AUTHENTICATORS,
   MINIMUM_PRIVILEGED_AUTHENTICATORS,
@@ -28,8 +45,7 @@ export {
   type ActivationResult,
   type AdminUserStatus,
   type AuthenticatorPolicyResult,
-  type AuthenticatorProperties,
-  type AuthenticatorRejectionReason
+  type AuthenticatorProperties
 } from "./authenticators.js";
 
 export {
@@ -38,8 +54,8 @@ export {
   hasFreshStepUp,
   nextIdleExpiry,
   type AdminSessionWindow,
-  type SessionRejectionReason,
-  type SessionValidity
+  type SessionEvaluation,
+  type SessionRejectionReason
 } from "./sessions.js";
 
 export {
@@ -49,10 +65,33 @@ export {
   adminCapabilitySchema,
   adminHealthResponseSchema,
   adminIdentityResponseSchema,
+  adminInvitationSchema,
+  adminInvitationsResponseSchema,
+  adminLockedIdentityResponseSchema,
+  adminMeResponseSchema,
+  adminOwnSessionSchema,
+  adminOwnSessionsResponseSchema,
   adminRoleSchema,
   beginBreakGlassBodySchema,
   ceremonyIdSchema,
+  changePasswordBodySchema,
+  changePasswordResponseSchema,
+  completePasswordResetBodySchema,
+  completePasswordResetResponseSchema,
+  createInvitationBodySchema,
+  createInvitationResponseSchema,
+  invitationCodeBodySchema,
+  invitationPasswordBodySchema,
+  invitationPreviewResponseSchema,
+  invitationProgressResponseSchema,
+  invitationRegistrationBodySchema,
+  issuePasswordResetBodySchema,
+  issuePasswordResetResponseSchema,
+  passwordLoginBodySchema,
+  passwordLoginResponseSchema,
+  passwordProofBodySchema,
   revokeAuthenticatorBodySchema,
+  revokeOwnSessionsResponseSchema,
   verifyAuthenticationBodySchema,
   verifyRegistrationBodySchema,
   webAuthnCredentialSchema,
@@ -60,6 +99,17 @@ export {
   type AdminAuthenticatorsResponse,
   type AdminBoundWebAuthnOptionsResponse,
   type AdminIdentityResponse,
+  type AdminInvitation,
+  type AdminInvitationsResponse,
+  type AdminLockedIdentityResponse,
+  type AdminMeResponse,
+  type AdminOwnSession,
+  type AdminOwnSessionsResponse,
+  type CreateInvitationResponse,
+  type InvitationPreviewResponse,
+  type InvitationProgressResponse,
+  type IssuePasswordResetResponse,
+  type PasswordLoginResponse,
   type WebAuthnCredential,
   type WebAuthnOptionsResponse
 } from "./contracts.js";
@@ -213,18 +263,13 @@ export {
 
 export {
   ADMIN_STATUS_ACTIONS,
-  ENROLLMENT_TICKET_TTL_MILLISECONDS,
   adminPeopleResponseSchema,
   adminPersonSchema,
   changeAdminStatusBodySchema,
   changeAdminStatusResponseSchema,
-  enrollmentCodeSchema,
-  enrollmentTicketResponseSchema,
   evaluateStatusTransition,
-  issueEnrollmentTicketBodySchema,
   kioskAssignmentBodySchema,
   kioskAssignmentResponseSchema,
-  redeemEnrollmentTicketBodySchema,
   revokeAdminSessionsBodySchema,
   revokeAdminSessionsResponseSchema,
   revokeOperatorAuthenticatorBodySchema,
@@ -235,11 +280,8 @@ export {
   type AdminStatusAction,
   type ChangeAdminStatusBody,
   type ChangeAdminStatusResponse,
-  type EnrollmentTicketResponse,
-  type IssueEnrollmentTicketBody,
   type KioskAssignmentBody,
   type KioskAssignmentResponse,
-  type RedeemEnrollmentTicketBody,
   type RevokeAdminSessionsBody,
   type RevokeAdminSessionsResponse,
   type RevokeOperatorAuthenticatorBody,

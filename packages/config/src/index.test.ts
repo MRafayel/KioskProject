@@ -634,9 +634,9 @@ describe("loadEnvironment", () => {
     it("refuses an address that could route off the premises", () => {
       // A typo that turns a point-to-point link into authenticated SNMP sent to
       // a stranger is exactly the mistake worth catching at startup.
-      expect(() =>
-        loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: "8.8.8.8" })
-      ).toThrow("PRINTER_TELEMETRY_HOST");
+      expect(() => loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: "8.8.8.8" })).toThrow(
+        "PRINTER_TELEMETRY_HOST"
+      );
       expect(() =>
         loadEnvironment({ ...telemetry, PRINTER_TELEMETRY_HOST: "192.168.253.999" })
       ).toThrow("PRINTER_TELEMETRY_HOST");
@@ -970,22 +970,42 @@ describe("admin WebAuthn relying party", () => {
     ).toBe("127.0.0.1");
   });
 
-  it("keeps the step-up window inside the idle session window", () => {
+  it("keeps the step-up window inside every role's idle window", () => {
+    // The Technical Admin window is the shortest, so it is the one a too-long
+    // step-up TTL collides with first.
     expect(() =>
       loadEnvironment({
-        ADMIN_SESSION_IDLE_MINUTES: "5",
+        ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN: "5",
         ADMIN_STEP_UP_TTL_SECONDS: "600"
       })
     ).toThrow();
   });
 
-  it("keeps the idle window inside the absolute window", () => {
+  it("keeps each role's idle window inside its absolute window", () => {
     expect(() =>
       loadEnvironment({
-        ADMIN_SESSION_IDLE_MINUTES: "120",
-        ADMIN_SESSION_ABSOLUTE_MINUTES: "60"
+        ADMIN_SESSION_IDLE_MINUTES_ADMIN: "120",
+        ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN: "1"
       })
     ).toThrow();
+    expect(() =>
+      loadEnvironment({
+        ADMIN_SESSION_IDLE_MINUTES_OPERATOR: "600",
+        ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR: "9"
+      })
+    ).toThrow();
+  });
+
+  it("locks long before it ever signs anybody out: defaults per role", () => {
+    const environment = loadEnvironment({});
+    expect(environment.ADMIN_SESSION_IDLE_MINUTES_OPERATOR).toBe(360);
+    expect(environment.ADMIN_SESSION_IDLE_MINUTES_ADMIN).toBe(120);
+    expect(environment.ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN).toBe(60);
+    expect(environment.ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR).toBe(720);
+    expect(environment.ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN).toBe(336);
+    expect(environment.ADMIN_SESSION_ABSOLUTE_HOURS_TECHNICAL_ADMIN).toBe(168);
+    expect(environment.ADMIN_INVITATION_TTL_HOURS).toBe(72);
+    expect(environment.ADMIN_PASSWORD_RESET_TTL_MINUTES).toBe(60);
   });
 });
 
@@ -1064,9 +1084,9 @@ describe("a machine installed as a service", () => {
    * calls itself, so the refusal cannot be gated on NODE_ENV.
    */
   it("refuses the simulated printer even outside production", () => {
-    expect(() =>
-      loadEnvironment({ ...serviceEnvironment, PRINTER_ADAPTER: "mock" })
-    ).toThrow(/must drive a real device when installed as a service/u);
+    expect(() => loadEnvironment({ ...serviceEnvironment, PRINTER_ADAPTER: "mock" })).toThrow(
+      /must drive a real device when installed as a service/u
+    );
   });
 
   it("refuses the switches that let a build pretend", () => {

@@ -161,10 +161,16 @@ export const FORBIDDEN_TABLES = Object.freeze({
   admin_sessions: "Session and CSRF digests.",
   admin_webauthn_challenges: "In-flight ceremony state.",
   admin_break_glass_credentials: "Recovery credential digests.",
-  admin_enrollment_tickets:
-    "Authorising somebody's first enrolment is authenticator.manage.operator, on the people role. A connection that records what an operator saw at a tray must not be able to mint an identity.",
+  admin_passwords:
+    "Password digests. A connection that records what an operator saw at a tray must not be able to read or replace what signs anybody in.",
+  admin_invitations:
+    "Invitation digests. Minting an identity is the identity service's act on the application connection.",
+  admin_password_resets: "Reset digests. Same boundary as invitations.",
   admin_change_executions:
     "Changing the tariff belongs to the pricing role and to nothing else. A connection that records what an operator saw at a tray has no business in it.",
+  kiosk_agents:
+    "The device plane's agent registry. Hardware management is not reachable from any admin connection.",
+  printers: "The device plane's printer registry. Same boundary as kiosk_agents.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

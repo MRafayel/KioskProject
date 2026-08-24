@@ -897,10 +897,10 @@ model AuditEvent {
 
 /// A person who may use the control plane.
 ///
-/// There is no password column and there never will be one: WebAuthn is the
-/// only factor, so there is no shared secret here to phish, reuse or leak. The
-/// display name is for an operator to recognise a colleague; nothing in this
-/// row identifies a customer.
+/// The username identifies; the password (its Argon2id digest lives in
+/// `admin_passwords`) is the base factor for everybody; WebAuthn is layered on
+/// top for privileged roles. The display name is for an operator to recognise a
+/// colleague; nothing in this row identifies a customer.
 ///
 /// An account holds exactly one role. Multiple roles would raise a question
 /// about how their capabilities combine, and the answer would eventually be
@@ -910,6 +910,8 @@ model AdminUser {
   /// The WebAuthn user handle. Random, opaque and stable: never an email
   /// address, so a stolen authenticator database reveals no identities.
   userHandle   Bytes    @unique @map("user_handle")
+  /// The sign-in name. Lowercase, short, safe to say over a phone.
+  username     String   @unique @db.VarChar(32)
   displayName  String   @map("display_name") @db.VarChar(120)
   role         String   @db.VarChar(24)
   status       String   @default("PROVISIONING") @db.VarChar(24)
@@ -925,8 +927,11 @@ model AdminUser {
   kioskScopes    AdminKioskScope[]
   challenges     AdminWebAuthnChallenge[]
   breakGlass     AdminBreakGlassCredential[]
-  enrollmentTickets AdminEnrollmentTicket[] @relation("AdminEnrollmentTicketTarget")
-  issuedEnrollmentTickets AdminEnrollmentTicket[] @relation("AdminEnrollmentTicketIssuer")
+  password       AdminPassword?
+  invitations    AdminInvitation[] @relation("AdminInvitationTarget")
+  issuedInvitations AdminInvitation[] @relation("AdminInvitationIssuer")
+  passwordResets AdminPasswordReset[] @relation("AdminPasswordResetTarget")
+  issuedPasswordResets AdminPasswordReset[] @relation("AdminPasswordResetIssuer")
   recoveryResolutions PrintJobRecoveryResolution[]
   recoveryCorrections PrintJobRecoveryCorrection[]
   refundAuthorizations RefundAuthorization[]
@@ -935,6 +940,83 @@ model AdminUser {
 
   @@index([status, role])
   @@map("admin_users")
+}
+
+/// The knowledge factor, one row per account.
+///
+/// The digest is a self-describing PHC string — `$argon2id$v=19$m=...` — so the
+/// parameters travel with the hash and can be strengthened later without
+/// re-hashing anything until the person next signs in. The password itself is
+/// unrecoverable from here by construction; there is nothing else in the row.
+///
+/// Kept out of `admin_users` deliberately: the people-writer role holds
+/// column-level UPDATE on that table, and a password digest must never be a
+/// column an account-management connection can reach.
+model AdminPassword {
+  adminUserId String   @id @map("admin_user_id") @db.Uuid
+  digest      String   @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@map("admin_passwords")
+}
+
+/// One invitation: the only way an account comes to exist from the panel, and
+/// the way the CLI hands over a bootstrap account.
+///
+/// The account row is created with the invitation, already carrying its role,
+/// so acceptance decides nothing — it only proves the code and supplies the
+/// factors. Only a digest of the code is stored. Unlike break-glass, the
+/// invitation is consumed when the account activates rather than when the
+/// first ceremony begins: a fumbled key enrolment costs a retry, not a
+/// reissue.
+model AdminInvitation {
+  id              String    @id @db.Uuid
+  adminUserId     String    @map("admin_user_id") @db.Uuid
+  /// Who authorised it. Null when it came from the CLI bootstrap.
+  issuedByAdminId String?   @map("issued_by_admin_id") @db.Uuid
+  secretDigest    String    @unique @map("secret_digest") @db.VarChar(64)
+  reason          String    @db.VarChar(280)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  expiresAt       DateTime  @map("expires_at")
+  /// Set when the invited account activates.
+  consumedAt      DateTime? @map("consumed_at")
+  revokedAt       DateTime? @map("revoked_at")
+
+  adminUser AdminUser  @relation("AdminInvitationTarget", fields: [adminUserId], references: [id], onDelete: Restrict)
+  issuedBy  AdminUser? @relation("AdminInvitationIssuer", fields: [issuedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([adminUserId, consumedAt])
+  @@index([expiresAt])
+  @@map("admin_invitations")
+}
+
+/// One administrator-assisted password reset.
+///
+/// The issuer never sees or chooses the password that results; they carry a
+/// short-lived single-use code to the person, and completing it revokes every
+/// session the account had. Only a digest of the code is stored. Another
+/// delivery mechanism later (Telegram, email) changes who carries the code,
+/// not this table.
+model AdminPasswordReset {
+  id              String    @id @db.Uuid
+  adminUserId     String    @map("admin_user_id") @db.Uuid
+  /// Who authorised it. Null when it came from the CLI.
+  issuedByAdminId String?   @map("issued_by_admin_id") @db.Uuid
+  secretDigest    String    @unique @map("secret_digest") @db.VarChar(64)
+  reason          String    @db.VarChar(280)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  expiresAt       DateTime  @map("expires_at")
+  consumedAt      DateTime? @map("consumed_at")
+  revokedAt       DateTime? @map("revoked_at")
+
+  adminUser AdminUser  @relation("AdminPasswordResetTarget", fields: [adminUserId], references: [id], onDelete: Restrict)
+  issuedBy  AdminUser? @relation("AdminPasswordResetIssuer", fields: [issuedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([adminUserId, consumedAt])
+  @@index([expiresAt])
+  @@map("admin_password_resets")
 }
 
 /// One enrolled FIDO2 credential.
@@ -987,16 +1069,24 @@ model AdminSession {
   /// cannot satisfy the double-submit check here.
   csrfDigest    String    @map("csrf_digest") @db.VarChar(64)
   createdAt     DateTime  @default(now()) @map("created_at")
-  /// Rolls forward while the session is used.
+  /// Rolls forward while the session is used. Passing it locks the session —
+  /// a reauthentication reopens it — and only the absolute limit ends it.
   idleExpiresAt DateTime  @map("idle_expires_at")
   /// Never extends.
   hardExpiresAt DateTime  @map("hard_expires_at")
   lastSeenAt    DateTime? @map("last_seen_at")
-  /// When this session last completed a WebAuthn assertion. R2 actions require
-  /// this to be recent; a stolen cookie alone can never satisfy it.
+  /// When this session last completed a strong reauthentication — a WebAuthn
+  /// assertion, or the password for roles that hold nothing stronger. R2
+  /// actions require this to be recent; a stolen cookie alone can never
+  /// satisfy it.
   lastStepUpAt  DateTime? @map("last_step_up_at")
   revokedAt     DateTime? @map("revoked_at")
   revokedReason String?   @map("revoked_reason") @db.VarChar(48)
+  /// Where the session was created and last seen from, and what it called
+  /// itself. Informational context for the person reviewing their own
+  /// sessions; never treated as proof of device identity.
+  ipAddress     String?   @map("ip_address") @db.VarChar(64)
+  userAgent     String?   @map("user_agent") @db.VarChar(280)
   adminUser     AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
 
   @@index([adminUserId, revokedAt])
@@ -1011,7 +1101,8 @@ model AdminSession {
 /// ceremony safe is the signature, not the secrecy of the challenge.
 model AdminWebAuthnChallenge {
   id          String     @id @db.Uuid
-  /// REGISTRATION | AUTHENTICATION | STEP_UP | BREAK_GLASS_REGISTRATION
+  /// REGISTRATION | AUTHENTICATION | STEP_UP | UNLOCK |
+  /// BREAK_GLASS_REGISTRATION | INVITATION_REGISTRATION
   purpose     String     @db.VarChar(32)
   challenge   String     @db.VarChar(400)
   /// Null for a discoverable-credential login, where the account is not known
@@ -1073,41 +1164,6 @@ model AdminKioskScope {
   @@index([kioskId])
   @@index([adminUserId, revokedAt])
   @@map("admin_kiosk_scopes")
-}
-
-/// Authorisation for exactly one enrolment ceremony on one account.
-///
-/// An Operator with no security key cannot sign in, and no Admin can enrol one
-/// for them: WebAuthn needs the person and their device in the same place. This
-/// is the sentence that gets them started — "the next enrolment on this account,
-/// within the next fifteen minutes, is authorised" — and it is nothing more than
-/// that. It issues no session, carries no capability, and cannot perform an
-/// operational action.
-///
-/// It is not a second break-glass. Break-glass is a sealed offline artifact for
-/// an account that has lost every key it had. A ticket may only name an Operator
-/// account still PROVISIONING with no usable authenticator, which a database
-/// trigger checks, so it cannot add a key to somebody's working identity.
-///
-/// Only the digest is stored, so reading this table yields nothing redeemable.
-model AdminEnrollmentTicket {
-  id              String    @id @db.Uuid
-  adminUserId     String    @map("admin_user_id") @db.Uuid
-  /// Who authorised it. Never the same account as the target.
-  issuedByAdminId String    @map("issued_by_admin_id") @db.Uuid
-  secretDigest    String    @unique @map("secret_digest") @db.VarChar(64)
-  reason          String    @db.VarChar(280)
-  createdAt       DateTime  @default(now()) @map("created_at")
-  expiresAt       DateTime  @map("expires_at")
-  /// Set when the ticket authorises a ceremony, not when the ceremony succeeds.
-  consumedAt      DateTime? @map("consumed_at")
-
-  adminUser AdminUser @relation("AdminEnrollmentTicketTarget", fields: [adminUserId], references: [id], onDelete: Restrict)
-  issuedBy  AdminUser @relation("AdminEnrollmentTicketIssuer", fields: [issuedByAdminId], references: [id], onDelete: Restrict)
-
-  @@index([adminUserId, consumedAt])
-  @@index([expiresAt])
-  @@map("admin_enrollment_tickets")
 }
 
 /// One published tariff, and who published it.

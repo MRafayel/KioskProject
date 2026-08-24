@@ -6,58 +6,88 @@ import {
   adminBoundWebAuthnOptionsResponseSchema,
   adminHealthResponseSchema,
   adminIdentityResponseSchema,
+  adminInvitationsResponseSchema,
+  adminLockedIdentityResponseSchema,
+  adminOwnSessionsResponseSchema,
   beginBreakGlassBodySchema,
   capabilitiesForRole,
+  changePasswordBodySchema,
+  changePasswordResponseSchema,
+  completePasswordResetBodySchema,
+  completePasswordResetResponseSchema,
+  createInvitationBodySchema,
+  createInvitationResponseSchema,
   hasFreshStepUp,
-  redeemEnrollmentTicketBodySchema,
+  invitationCodeBodySchema,
+  invitationPasswordBodySchema,
+  invitationPreviewResponseSchema,
+  invitationProgressResponseSchema,
+  invitationRegistrationBodySchema,
+  issuePasswordResetBodySchema,
+  issuePasswordResetResponseSchema,
+  passwordLoginBodySchema,
+  passwordLoginResponseSchema,
+  passwordProofBodySchema,
   revokeAuthenticatorBodySchema,
+  revokeOwnSessionsResponseSchema,
+  strongAuthMethodForRole,
   verifyAuthenticationBodySchema,
   verifyRegistrationBodySchema,
   webAuthnOptionsResponseSchema
 } from "@printing-kiosk/admin-access";
 
 import { ApiError } from "../sessions/errors.js";
-import { adminRateKey, sendNoStore } from "./http.js";
+import { adminNamespacedRateKey, adminRateKey, sendNoStore } from "./http.js";
 import {
   ADMIN_CSRF_COOKIE,
   ADMIN_SESSION_COOKIE,
   authorizeAdmin,
+  clientContext,
+  describeAdminSession,
+  requireAdminPresence,
   requireAdminSession,
   type AdminAuthorizationDependencies
 } from "./authorize.js";
 import type { AdminService, AdminSessionCookiePair, AuthenticatedAdmin } from "./service.js";
 
 /**
- * The admin control plane's HTTP surface for Phase 1.
+ * The admin control plane's identity surface.
  *
- * Everything here is about identity: proving it, re-proving it, and managing
- * the keys that prove it. No route in this file reads a session, document,
- * payment or print row — that is Phase 2, and keeping the split sharp means the
- * authorization foundation can be reviewed on its own.
+ * Everything here is about who somebody is: proving it (a password for
+ * everybody, a key on top for privileged roles), re-proving it at unlock and
+ * step-up, managing sessions, passwords and keys, and the two code-authorised
+ * ways in — invitations and password resets — plus sealed break-glass
+ * recovery. No route in this file reads a customer session, document, payment
+ * or print row.
  *
- * There is deliberately no route to enumerate accounts, no route that accepts a
- * username, and no route that reports whether an account exists.
+ * There is deliberately no route that reports whether an account exists: every
+ * login, invitation and reset failure is one generic refusal.
  */
 
 const authenticatorParamsSchema = z.object({ authenticatorId: z.string().uuid() });
+const sessionParamsSchema = z.object({ sessionId: z.string().uuid() });
+const invitationParamsSchema = z.object({ invitationId: z.string().uuid() });
+const resetParamsSchema = z.object({ resetId: z.string().uuid() });
+const personParamsSchema = z.object({ adminUserId: z.string().uuid() });
+const reasonBodySchema = z.object({ reason: z.string().trim().min(3).max(280) }).strict();
 
 /** Ceremonies are cheap to start and expensive to brute-force; still, bound them. */
 const CEREMONY_RATE = { max: 30, timeWindow: "1 minute" } as const;
 const VERIFY_RATE = { max: 20, timeWindow: "1 minute" } as const;
 /**
- * Recovery is rare and alarming, but initial provisioning needs two one-use
- * ceremonies per account. Thirty per hour supports a ten-admin rollout (and
- * retries) even when a reverse proxy makes everyone share one source address;
- * the sealed code itself has 256 bits and is not made guessable by this bound.
+ * Password guessing gets a tighter bucket than ceremony traffic: a login
+ * attempt is a human typing, and ten a minute from one address is already
+ * somebody having a very bad day. The real defence is Argon2id and 256-bit
+ * codes; this bound just makes the log quieter.
+ */
+const LOGIN_RATE = { max: 10, timeWindow: "1 minute" } as const;
+/**
+ * Recovery is rare and alarming; provisioning is routine. Both consume 256-bit
+ * codes, which no rate below makes guessable — these bounds exist so the
+ * endpoints are not a place to grind.
  */
 const BREAK_GLASS_RATE = { max: 30, timeWindow: "1 hour" } as const;
-/**
- * Onboarding is more routine than recovery, and a redemption attempt costs the
- * attacker a 256-bit guess either way. This is loose enough that a new colleague
- * fumbling the code at a counter is not locked out for an hour, and tight enough
- * that the endpoint is not a place to grind.
- */
-const ENROLLMENT_RATE = { max: 60, timeWindow: "1 hour" } as const;
+const ONE_TIME_CODE_RATE = { max: 60, timeWindow: "1 hour" } as const;
 
 export interface AdminRouteDependencies extends AdminAuthorizationDependencies {
   admin: AdminService;
@@ -106,27 +136,61 @@ export function registerAdminRoutes(
   });
 
   // -------------------------------------------------------------------------
-  // Authentication
+  // Login
   // -------------------------------------------------------------------------
 
   app.post(
-    "/v1/admin/auth/authentication/options",
-    { config: { rateLimit: { ...CEREMONY_RATE, keyGenerator: adminRateKey } } },
-    async (_request, reply) => {
-      const ceremony = await dependencies.admin.beginAuthentication();
-      return sendNoStore(reply, webAuthnOptionsResponseSchema.parse(ceremony));
+    "/v1/admin/auth/login",
+    {
+      config: {
+        rateLimit: { ...LOGIN_RATE, keyGenerator: adminNamespacedRateKey("login") }
+      }
+    },
+    async (request, reply) => {
+      const body = passwordLoginBodySchema.parse(request.body ?? {});
+      const result = await dependencies.admin.loginWithPassword({
+        username: body.username,
+        password: body.password,
+        requestId: request.id,
+        client: clientContext(request)
+      });
+
+      if (result.state === "WEBAUTHN_REQUIRED") {
+        return sendNoStore(
+          reply,
+          passwordLoginResponseSchema.parse({
+            state: "WEBAUTHN_REQUIRED",
+            ceremonyId: result.ceremonyId,
+            options: result.options
+          })
+        );
+      }
+
+      setSessionCookies(reply, result.cookies);
+      return sendNoStore(
+        reply,
+        passwordLoginResponseSchema.parse({
+          state: "AUTHENTICATED",
+          identity: identityResponse(
+            result.admin,
+            dependencies.stepUpTtlMilliseconds,
+            dependencies.clock.now()
+          )
+        })
+      );
     }
   );
 
   app.post(
-    "/v1/admin/auth/authentication/verify",
+    "/v1/admin/auth/login/webauthn",
     { config: { rateLimit: { ...VERIFY_RATE, keyGenerator: adminRateKey } } },
     async (request, reply) => {
       const body = verifyAuthenticationBodySchema.parse(request.body ?? {});
-      const { admin, cookies } = await dependencies.admin.completeAuthentication({
+      const { admin, cookies } = await dependencies.admin.completeLoginWebAuthn({
         ceremonyId: body.ceremonyId,
         credential: body.credential,
-        requestId: request.id
+        requestId: request.id,
+        client: clientContext(request)
       });
 
       setSessionCookies(reply, cookies);
@@ -138,15 +202,95 @@ export function registerAdminRoutes(
   );
 
   app.post("/v1/admin/auth/logout", async (request, reply) => {
-    const admin = await requireAdminSession(request, dependencies);
+    // A locked session may log out: walking away and then choosing "not me,
+    // sign out" must not require reauthenticating first.
+    const presence = await requireAdminPresence(request, dependencies);
+    const subject =
+      presence.state === "ACTIVE"
+        ? {
+            adminUserId: presence.admin.adminUserId,
+            sessionId: presence.admin.sessionId,
+            role: presence.admin.role
+          }
+        : {
+            adminUserId: presence.locked.adminUserId,
+            sessionId: presence.locked.sessionId,
+            role: presence.locked.role
+          };
     await dependencies.admin.revokeSession({
-      admin,
+      ...subject,
       reason: "USER_LOGOUT",
       requestId: request.id
     });
     clearSessionCookies(reply);
     return reply.header("cache-control", "no-store").code(204).send();
   });
+
+  // -------------------------------------------------------------------------
+  // Unlock
+  // -------------------------------------------------------------------------
+
+  app.post(
+    "/v1/admin/auth/unlock/options",
+    { config: { rateLimit: { ...CEREMONY_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const presence = await requireAdminPresence(request, dependencies);
+      if (presence.state !== "LOCKED") {
+        throw new ApiError(409, "ADMIN_SESSION_NOT_LOCKED", "This session is not locked.");
+      }
+      const ceremony = await dependencies.admin.beginUnlock(presence.locked);
+      return sendNoStore(
+        reply,
+        adminBoundWebAuthnOptionsResponseSchema.parse({
+          ...ceremony,
+          adminUserId: presence.locked.adminUserId
+        })
+      );
+    }
+  );
+
+  app.post(
+    "/v1/admin/auth/unlock/verify",
+    { config: { rateLimit: { ...VERIFY_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const presence = await requireAdminPresence(request, dependencies);
+      if (presence.state !== "LOCKED") {
+        throw new ApiError(409, "ADMIN_SESSION_NOT_LOCKED", "This session is not locked.");
+      }
+      const body = verifyAuthenticationBodySchema.parse(request.body ?? {});
+      const admin = await dependencies.admin.completeUnlock({
+        locked: presence.locked,
+        ceremonyId: body.ceremonyId,
+        credential: body.credential,
+        requestId: request.id
+      });
+      return sendNoStore(
+        reply,
+        identityResponse(admin, dependencies.stepUpTtlMilliseconds, dependencies.clock.now())
+      );
+    }
+  );
+
+  app.post(
+    "/v1/admin/auth/unlock/password",
+    { config: { rateLimit: { ...LOGIN_RATE, keyGenerator: adminNamespacedRateKey("unlock") } } },
+    async (request, reply) => {
+      const presence = await requireAdminPresence(request, dependencies);
+      if (presence.state !== "LOCKED") {
+        throw new ApiError(409, "ADMIN_SESSION_NOT_LOCKED", "This session is not locked.");
+      }
+      const body = passwordProofBodySchema.parse(request.body ?? {});
+      const admin = await dependencies.admin.unlockWithPassword({
+        locked: presence.locked,
+        password: body.password,
+        requestId: request.id
+      });
+      return sendNoStore(
+        reply,
+        identityResponse(admin, dependencies.stepUpTtlMilliseconds, dependencies.clock.now())
+      );
+    }
+  );
 
   // -------------------------------------------------------------------------
   // Step-up
@@ -192,15 +336,55 @@ export function registerAdminRoutes(
     }
   );
 
+  app.post(
+    "/v1/admin/auth/step-up/password",
+    { config: { rateLimit: { ...LOGIN_RATE, keyGenerator: adminNamespacedRateKey("step-up") } } },
+    async (request, reply) => {
+      const admin = await requireAdminSession(request, dependencies);
+      const body = passwordProofBodySchema.parse(request.body ?? {});
+      const steppedUpAt = await dependencies.admin.stepUpWithPassword({
+        admin,
+        password: body.password,
+        requestId: request.id
+      });
+
+      return sendNoStore(
+        reply,
+        identityResponse(
+          { ...admin, lastStepUpAt: steppedUpAt },
+          dependencies.stepUpTtlMilliseconds,
+          dependencies.clock.now()
+        )
+      );
+    }
+  );
+
   // -------------------------------------------------------------------------
   // Identity
   // -------------------------------------------------------------------------
 
   app.get("/v1/admin/me", async (request, reply) => {
-    const admin = await requireAdminSession(request, dependencies);
+    const resolution = await describeAdminSession(request, dependencies);
+    if (!resolution) {
+      throw new ApiError(401, "ADMIN_AUTHENTICATION_REQUIRED", "Sign in to continue.");
+    }
+    if (resolution.state === "LOCKED") {
+      return sendNoStore(
+        reply,
+        adminLockedIdentityResponseSchema.parse({
+          state: "LOCKED",
+          displayName: resolution.locked.displayName,
+          strongAuthMethod: strongAuthMethodForRole(resolution.locked.role)
+        })
+      );
+    }
     return sendNoStore(
       reply,
-      identityResponse(admin, dependencies.stepUpTtlMilliseconds, dependencies.clock.now())
+      identityResponse(
+        resolution.admin,
+        dependencies.stepUpTtlMilliseconds,
+        dependencies.clock.now()
+      )
     );
   });
 
@@ -219,6 +403,68 @@ export function registerAdminRoutes(
         role: admin.role
       })
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // One's own sessions and password
+  // -------------------------------------------------------------------------
+
+  app.get("/v1/admin/account/sessions", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "account.sessions.read");
+    const sessions = await dependencies.admin.listOwnSessions(admin);
+    return sendNoStore(
+      reply,
+      adminOwnSessionsResponseSchema.parse({
+        items: sessions.map((session) => ({
+          sessionId: session.sessionId,
+          createdAt: session.createdAt.toISOString(),
+          lastSeenAt: session.lastSeenAt?.toISOString() ?? null,
+          state: session.state,
+          ipAddress: session.ipAddress,
+          userAgent: session.userAgent,
+          current: session.current
+        }))
+      })
+    );
+  });
+
+  app.post("/v1/admin/account/sessions/:sessionId/revoke", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "account.sessions.revoke");
+    const params = sessionParamsSchema.parse(request.params);
+    if (params.sessionId === admin.sessionId) {
+      throw new ApiError(
+        409,
+        "ADMIN_SESSION_IS_CURRENT",
+        "This is the session you are using. Log out instead."
+      );
+    }
+    await dependencies.admin.revokeOwnSession({
+      admin,
+      sessionId: params.sessionId,
+      requestId: request.id
+    });
+    return reply.header("cache-control", "no-store").code(204).send();
+  });
+
+  app.post("/v1/admin/account/sessions/revoke-others", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "account.sessions.revoke");
+    const result = await dependencies.admin.revokeOtherSessions({
+      admin,
+      requestId: request.id
+    });
+    return sendNoStore(reply, revokeOwnSessionsResponseSchema.parse(result));
+  });
+
+  app.post("/v1/admin/account/password", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "account.password.change");
+    const body = changePasswordBodySchema.parse(request.body ?? {});
+    const result = await dependencies.admin.changeOwnPassword({
+      admin,
+      currentPassword: body.currentPassword,
+      newPassword: body.newPassword,
+      requestId: request.id
+    });
+    return sendNoStore(reply, changePasswordResponseSchema.parse(result));
   });
 
   // -------------------------------------------------------------------------
@@ -249,8 +495,8 @@ export function registerAdminRoutes(
     "/v1/admin/authenticators/registration/options",
     { config: { rateLimit: { ...CEREMONY_RATE, keyGenerator: adminRateKey } } },
     async (request, reply) => {
-      // Enrolling onto your own account. Managing someone else's is a separate
-      // capability and arrives with Operator administration in Phase 4.
+      // Enrolling onto your own account. Retiring somebody else's is the
+      // people module's separate capability.
       const admin = await authorizeAdmin(request, dependencies, "authenticator.manage.self");
       const ceremony = await dependencies.admin.beginRegistration(admin.adminUserId);
       return sendNoStore(
@@ -295,6 +541,234 @@ export function registerAdminRoutes(
     });
     return reply.header("cache-control", "no-store").code(204).send();
   });
+
+  // -------------------------------------------------------------------------
+  // Invitations — the authorized side
+  // -------------------------------------------------------------------------
+
+  app.post("/v1/admin/invitations", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "invitation.manage");
+    const body = createInvitationBodySchema.parse(request.body ?? {});
+    const invitation = await dependencies.admin.createInvitation({
+      actor: admin,
+      username: body.username,
+      displayName: body.displayName,
+      role: body.role,
+      reason: body.reason,
+      requestId: request.id
+    });
+    return sendNoStore(
+      reply,
+      createInvitationResponseSchema.parse({
+        invitationId: invitation.invitationId,
+        adminUserId: invitation.adminUserId,
+        username: body.username,
+        role: body.role,
+        invitationCode: invitation.invitationCode,
+        expiresAt: invitation.expiresAt.toISOString()
+      })
+    );
+  });
+
+  app.get("/v1/admin/invitations", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "invitation.read");
+    const invitations = await dependencies.admin.listInvitations(admin);
+    return sendNoStore(
+      reply,
+      adminInvitationsResponseSchema.parse({
+        items: invitations.map((invitation) => ({
+          invitationId: invitation.invitationId,
+          adminUserId: invitation.adminUserId,
+          username: invitation.username,
+          displayName: invitation.displayName,
+          role: invitation.role,
+          issuedByDisplayName: invitation.issuedByDisplayName,
+          createdAt: invitation.createdAt.toISOString(),
+          expiresAt: invitation.expiresAt.toISOString(),
+          status: invitation.status
+        }))
+      })
+    );
+  });
+
+  app.post("/v1/admin/invitations/:invitationId/revoke", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "invitation.manage");
+    const params = invitationParamsSchema.parse(request.params);
+    await dependencies.admin.revokeInvitation({
+      actor: admin,
+      invitationId: params.invitationId,
+      requestId: request.id
+    });
+    return reply.header("cache-control", "no-store").code(204).send();
+  });
+
+  app.post("/v1/admin/people/:adminUserId/invitation", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "invitation.manage");
+    const params = personParamsSchema.parse(request.params);
+    const body = reasonBodySchema.parse(request.body ?? {});
+    const invitation = await dependencies.admin.reissueInvitation({
+      actor: admin,
+      targetAdminUserId: params.adminUserId,
+      reason: body.reason,
+      requestId: request.id
+    });
+    return sendNoStore(reply, {
+      invitationId: invitation.invitationId,
+      invitationCode: invitation.invitationCode,
+      expiresAt: invitation.expiresAt.toISOString()
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Password recovery — the authorized side
+  // -------------------------------------------------------------------------
+
+  app.post("/v1/admin/people/:adminUserId/password-reset", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "recovery.manage");
+    const params = personParamsSchema.parse(request.params);
+    const body = issuePasswordResetBodySchema.parse(request.body ?? {});
+    const reset = await dependencies.admin.issuePasswordReset({
+      actor: admin,
+      targetAdminUserId: params.adminUserId,
+      reason: body.reason,
+      requestId: request.id
+    });
+    return sendNoStore(
+      reply,
+      issuePasswordResetResponseSchema.parse({
+        resetId: reset.resetId,
+        targetAdminUserId: params.adminUserId,
+        targetDisplayName: reset.targetDisplayName,
+        resetCode: reset.resetCode,
+        expiresAt: reset.expiresAt.toISOString()
+      })
+    );
+  });
+
+  app.post("/v1/admin/password-resets/:resetId/revoke", async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "recovery.manage");
+    const params = resetParamsSchema.parse(request.params);
+    await dependencies.admin.revokePasswordReset({
+      actor: admin,
+      resetId: params.resetId,
+      requestId: request.id
+    });
+    return reply.header("cache-control", "no-store").code(204).send();
+  });
+
+  // -------------------------------------------------------------------------
+  // Invitation acceptance — the unauthenticated side
+  // -------------------------------------------------------------------------
+
+  // Necessarily unauthenticated: the person accepting cannot sign in yet,
+  // which is the entire problem an invitation solves. What bounds each request
+  // is the 256-bit code — single-use in effect (it dies when the account
+  // activates), expiring, revocable, and matched only as a digest.
+
+  app.post(
+    "/v1/admin/auth/invitation/preview",
+    { config: { rateLimit: { ...ONE_TIME_CODE_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = invitationCodeBodySchema.parse(request.body ?? {});
+      const preview = await dependencies.admin.previewInvitation({
+        code: body.code,
+        requestId: request.id
+      });
+      return sendNoStore(reply, invitationPreviewResponseSchema.parse(preview));
+    }
+  );
+
+  app.post(
+    "/v1/admin/auth/invitation/password",
+    { config: { rateLimit: { ...ONE_TIME_CODE_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = invitationPasswordBodySchema.parse(request.body ?? {});
+      const progress = await dependencies.admin.setInvitationPassword({
+        code: body.code,
+        password: body.password,
+        requestId: request.id
+      });
+      return sendNoStore(reply, invitationProgressResponseSchema.parse(progress));
+    }
+  );
+
+  app.post(
+    "/v1/admin/auth/invitation/registration/options",
+    { config: { rateLimit: { ...ONE_TIME_CODE_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = invitationCodeBodySchema.parse(request.body ?? {});
+      const ceremony = await dependencies.admin.beginInvitationRegistration({
+        code: body.code,
+        requestId: request.id
+      });
+      request.log.info(
+        { adminUserId: ceremony.adminUserId, requestId: request.id },
+        "admin invitation key enrolment started"
+      );
+      return sendNoStore(
+        reply,
+        webAuthnOptionsResponseSchema.parse({
+          ceremonyId: ceremony.ceremonyId,
+          options: ceremony.options
+        })
+      );
+    }
+  );
+
+  app.post(
+    "/v1/admin/auth/invitation/registration/verify",
+    { config: { rateLimit: { ...ONE_TIME_CODE_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = invitationRegistrationBodySchema.parse(request.body ?? {});
+      const target = await dependencies.admin.resolveInvitationCeremonyTarget(
+        body.ceremonyId,
+        body.code
+      );
+      if (!target) {
+        throw new ApiError(
+          400,
+          "ADMIN_CEREMONY_EXPIRED",
+          "This request expired. Please try again."
+        );
+      }
+
+      const result = await dependencies.admin.completeRegistration({
+        targetAdminUserId: target,
+        actorAdminUserId: target,
+        ceremonyId: body.ceremonyId,
+        credential: body.credential,
+        label: body.label,
+        requestId: request.id,
+        purpose: "INVITATION_REGISTRATION"
+      });
+
+      // No session here on purpose. Accepting an invitation makes signing in
+      // possible; it is not itself a sign-in.
+      return sendNoStore(reply, {
+        authenticatorId: result.authenticatorId,
+        activated: result.activated
+      });
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Password reset completion — the unauthenticated side
+  // -------------------------------------------------------------------------
+
+  app.post(
+    "/v1/admin/auth/password-reset/complete",
+    { config: { rateLimit: { ...ONE_TIME_CODE_RATE, keyGenerator: adminRateKey } } },
+    async (request, reply) => {
+      const body = completePasswordResetBodySchema.parse(request.body ?? {});
+      const result = await dependencies.admin.completePasswordReset({
+        code: body.code,
+        newPassword: body.newPassword,
+        requestId: request.id
+      });
+      // No session: the person signs in with the password only they now know.
+      return sendNoStore(reply, completePasswordResetResponseSchema.parse(result));
+    }
+  );
 
   // -------------------------------------------------------------------------
   // Break-glass
@@ -360,84 +834,6 @@ export function registerAdminRoutes(
       return sendNoStore(reply, { authenticatorId: result.authenticatorId });
     }
   );
-
-  // -------------------------------------------------------------------------
-  // Enrollment tickets
-  // -------------------------------------------------------------------------
-
-  /**
-   * The way in for somebody who has never had a key.
-   *
-   * Unauthenticated, necessarily: the person redeeming this cannot sign in yet,
-   * which is the entire problem it solves. What bounds it is not a session but
-   * the ticket — single use, fifteen minutes, one named account, and only an
-   * Operator account that is still PROVISIONING with no usable authenticator.
-   *
-   * Deliberately not folded into the break-glass routes above. The two look
-   * alike and differ in the one way that matters: break-glass may enrol onto an
-   * account that has keys already, and this may not. Sharing a route would have
-   * made that difference a branch rather than a boundary, and it would have let
-   * a stolen ticket be presented where a sealed recovery code is expected.
-   */
-  app.post(
-    "/v1/admin/auth/enrollment/registration/options",
-    { config: { rateLimit: { ...ENROLLMENT_RATE, keyGenerator: adminRateKey } } },
-    async (request, reply) => {
-      const body = redeemEnrollmentTicketBodySchema.parse(request.body ?? {});
-      const ceremony = await dependencies.admin.beginEnrollmentTicketRegistration({
-        enrollmentCode: body.enrollmentCode,
-        requestId: request.id
-      });
-
-      // Not an error-level event like break-glass: onboarding a new colleague is
-      // routine, where a consumed recovery credential never is. It is still
-      // worth a line naming the account, because a redemption nobody expected is
-      // the signal that an issued ticket went to the wrong person.
-      request.log.info(
-        { adminUserId: ceremony.adminUserId, requestId: request.id },
-        "admin enrollment ticket redeemed"
-      );
-
-      return sendNoStore(
-        reply,
-        webAuthnOptionsResponseSchema.parse({
-          ceremonyId: ceremony.ceremonyId,
-          options: ceremony.options
-        })
-      );
-    }
-  );
-
-  app.post(
-    "/v1/admin/auth/enrollment/registration/verify",
-    { config: { rateLimit: { ...ENROLLMENT_RATE, keyGenerator: adminRateKey } } },
-    async (request, reply) => {
-      const body = verifyRegistrationBodySchema.parse(request.body ?? {});
-      const target = await dependencies.admin.resolveEnrollmentCeremonyTarget(body.ceremonyId);
-      if (!target) {
-        throw new ApiError(
-          400,
-          "ADMIN_CEREMONY_EXPIRED",
-          "This request expired. Please try again."
-        );
-      }
-
-      const result = await dependencies.admin.completeRegistration({
-        targetAdminUserId: target,
-        actorAdminUserId: target,
-        ceremonyId: body.ceremonyId,
-        credential: body.credential,
-        label: body.label,
-        requestId: request.id,
-        purpose: "ENROLLMENT_TICKET_REGISTRATION"
-      });
-
-      // No session here either. The account now has one key and still needs its
-      // second before it can be activated, so the honest next step is to say so
-      // rather than to sign somebody in halfway through provisioning.
-      return sendNoStore(reply, { authenticatorId: result.authenticatorId });
-    }
-  );
 }
 
 function identityResponse(admin: AuthenticatedAdmin, stepUpTtlMilliseconds: number, now: Date) {
@@ -459,11 +855,14 @@ function identityResponse(admin: AuthenticatedAdmin, stepUpTtlMilliseconds: numb
       : null;
 
   return adminIdentityResponseSchema.parse({
+    state: "ACTIVE",
     adminUserId: admin.adminUserId,
+    username: admin.username,
     displayName: admin.displayName,
     role: admin.role,
     capabilities: capabilitiesForRole(admin.role),
     kioskScopes: admin.kioskScopes,
+    strongAuthMethod: strongAuthMethodForRole(admin.role),
     session: {
       idleExpiresAt: admin.idleExpiresAt.toISOString(),
       hardExpiresAt: admin.hardExpiresAt.toISOString(),
@@ -477,6 +876,12 @@ function setSessionCookies(reply: FastifyReply, cookies: AdminSessionCookiePair)
   // so a compromised sibling subdomain cannot set or read it. It requires
   // Secure and Path=/. Production therefore uses HTTPS; browsers also treat
   // localhost as a trustworthy context for the loopback-only development UI.
+  //
+  // `expires` is the session's absolute limit, so the cookie survives browser
+  // restarts for exactly as long as the server-side session could still be
+  // valid. What the cookie's lifetime does NOT decide is whether the session
+  // is usable: the server's own idle and absolute windows do that on every
+  // request.
   reply.setCookie(ADMIN_SESSION_COOKIE, cookies.sessionToken, {
     httpOnly: true,
     // The Secure attribute is mandatory for the `__Host-` prefix. Browsers

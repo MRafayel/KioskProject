@@ -157,8 +157,14 @@ export const FORBIDDEN_TABLES = Object.freeze({
     "Kiosk scoping is contextual authorization for Operators, and no Operator can authorize a refund.",
   admin_webauthn_challenges: "In-flight ceremony state.",
   admin_break_glass_credentials: "Recovery credential digests.",
-  admin_enrollment_tickets:
-    "Authorising somebody's first enrolment is authenticator.manage.operator, on the people role. The connection that can pay a customer must not be able to mint the identity that asks it to.",
+  admin_passwords:
+    "Password digests. The connection that can pay a customer must not be able to read or replace what signs anybody in.",
+  admin_invitations:
+    "Invitation digests. The connection that can pay a customer must not be able to mint the identity that asks it to.",
+  admin_password_resets: "Reset digests. Same boundary as invitations.",
+  kiosk_agents:
+    "The device plane's agent registry. Hardware management is not reachable from any admin connection.",
+  printers: "The device plane's printer registry. Same boundary as kiosk_agents.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

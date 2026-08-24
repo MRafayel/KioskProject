@@ -1,13 +1,10 @@
 import {
-  ENROLLMENT_TICKET_TTL_MILLISECONDS,
   canRevokeAuthenticator,
   evaluateStatusTransition,
   isAdminUserStatus,
   revokesSessions,
   type AdminCapability,
   type ChangeAdminStatusBody,
-  type EnrollmentTicketResponse,
-  type IssueEnrollmentTicketBody,
   type KioskAssignmentBody,
   type RevokeAdminSessionsBody,
   type RevokeOperatorAuthenticatorBody
@@ -16,7 +13,6 @@ import {
 import type { Clock, RandomSource } from "../sessions/crypto.js";
 import { ApiError } from "../sessions/errors.js";
 import { writeAdminAuditEvent, type AdminAuditMetadataValue } from "./audit.js";
-import { digestEnrollmentTicketSecret } from "./crypto.js";
 import { adminNotFound } from "./http.js";
 import type { AdminPeopleDatabase, AdminPeopleTransaction } from "./people-database.js";
 import type { AuthenticatedAdmin } from "./service.js";
@@ -29,20 +25,19 @@ import type { AuthenticatedAdmin } from "./service.js";
  * and everything shipped before it appends. A separation that amounted to two
  * handlers in one file would not be one.
  *
- * Five things this can do and five it cannot, which between them are the phase:
+ * Four things this can do and four it cannot, which between them are the phase:
  *
  *   suspend, resume or disable an Operator      never change anybody's role
  *   assign a kiosk, or take one back            never delete the record of one
  *   end every session an Operator holds         never extend or issue one
  *   retire an Operator's security key           never enrol one
- *   authorise one first-key enrolment ceremony  never redeem the ticket it made
  *
  * The right-hand column is the interesting one, and none of it rests on this
  * file. `printing_kiosk_admin_people_writer` holds UPDATE on nine named columns
  * and `admin_users.role` is not among them; it holds no INSERT on
- * `admin_authenticators` or `admin_sessions`; it holds no DELETE anywhere; and
- * it cannot read `admin_enrollment_tickets.secret_digest`, so the connection
- * that mints a ticket is structurally incapable of redeeming one.
+ * `admin_authenticators` or `admin_sessions`; and it holds no DELETE anywhere.
+ * Creating an account — an invitation — is the identity service's act on the
+ * application connection, behind its own capability and role matrix.
  *
  * **Every action here targets an Operator account and nothing else.** An Admin
  * cannot suspend another Admin, retire a Technical Admin's key, or end a peer's
@@ -56,9 +51,6 @@ import type { AuthenticatedAdmin } from "./service.js";
 /** How long a people action's transaction may hold the database. */
 const PEOPLE_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000;
 
-/** 256 bits, the same as a break-glass code. Not guessable at any hash rate. */
-const ENROLLMENT_CODE_BYTES = 32;
-
 /** `admin_sessions.revoked_reason` and its authenticator sibling are VARCHAR(48). */
 const REVOCATION_REASON_LIMIT = 48;
 
@@ -66,12 +58,6 @@ export interface AdminPeopleServiceOptions {
   database: AdminPeopleDatabase;
   clock: Clock;
   random: RandomSource;
-  /**
-   * Shared with break-glass deliberately: both are one-time codes authorising
-   * one enrolment ceremony. `digestEnrollmentTicketSecret` domain-separates
-   * them, so neither can be presented to the other's endpoint.
-   */
-  breakGlassPepper: string;
 }
 
 export interface ChangeStatusResult {
@@ -453,150 +439,13 @@ export class AdminPeopleService {
   }
 
   /**
-   * Authorise one enrolment ceremony so a new Operator can get their first key.
-   *
-   * The gap this closes: an account with no authenticator cannot sign in, and
-   * nobody can enrol one on its behalf, because WebAuthn requires the person and
-   * their device in the same place. Somebody therefore has to be able to say
-   * "the next enrolment on this account is authorised", and this is that
-   * sentence — for fifteen minutes, once, on one named account.
-   *
-   * Three properties make it something other than a way to impersonate people,
-   * and none of them is enforced here alone:
-   *
-   *   - **It only names an account that has never had a key.** The trigger
-   *     checks `OPERATOR`, `PROVISIONING` and zero usable authenticators while
-   *     holding the owner row, so it cannot be minted against a working
-   *     identity, and it cannot race an enrolment.
-   *   - **The issuer is not the target.** A check constraint, so this can never
-   *     become a way for its holder to add a key to their own account.
-   *   - **Both halves are audited**, and the panel shows every outstanding
-   *     ticket to anybody who can see the section — a ticket sitting on an
-   *     account is exactly what a second pair of eyes should notice.
-   *
-   * The code is returned once and never stored in readable form. It is not
-   * logged, not written into the audit event, and cannot be re-read: an Admin
-   * who loses it issues another.
-   */
-  public async issueEnrollmentTicket(
-    admin: AuthenticatedAdmin,
-    targetAdminUserId: string,
-    body: IssueEnrollmentTicketBody,
-    requestId: string
-  ): Promise<EnrollmentTicketResponse> {
-    const now = this.options.clock.now();
-    const enrollmentCode = this.options.random.token(ENROLLMENT_CODE_BYTES);
-    const expiresAt = new Date(now.getTime() + ENROLLMENT_TICKET_TTL_MILLISECONDS);
-    const ticketId = this.options.random.uuid(now);
-
-    try {
-      return await this.options.database.$transaction(
-        async (transaction) => {
-          const target = await this.lockOperator(transaction, targetAdminUserId, now, {
-            action: "admin.people.enrollment.issue",
-            reason: body.reason
-          });
-
-          // Checked here so the refusal explains itself; the trigger checks the
-          // same thing again while holding the owner row, which is what makes
-          // it true rather than merely likely.
-          if (target.status !== "PROVISIONING") {
-            throw new RefusedPeopleAction(
-              new ApiError(
-                409,
-                "ADMIN_ACCOUNT_NOT_PROVISIONING",
-                "This account is past enrolment. A lost key is a recovery, not a new ticket."
-              ),
-              {
-                failureCode: "ACCOUNT_NOT_PROVISIONING",
-                reason: body.reason,
-                targetAdminUserId,
-                previousState: target.status
-              }
-            );
-          }
-
-          const usable = await transaction.adminAuthenticator.count({
-            where: { adminUserId: targetAdminUserId, revokedAt: null }
-          });
-          if (usable > 0) {
-            throw new RefusedPeopleAction(
-              new ApiError(
-                409,
-                "ADMIN_ACCOUNT_ALREADY_ENROLLED",
-                "This account already has a security key. It can enrol the rest itself."
-              ),
-              {
-                failureCode: "ALREADY_ENROLLED",
-                reason: body.reason,
-                targetAdminUserId,
-                usableAuthenticators: usable
-              }
-            );
-          }
-
-          await transaction.adminEnrollmentTicket.create({
-            data: {
-              id: ticketId,
-              adminUserId: targetAdminUserId,
-              issuedByAdminId: admin.adminUserId,
-              secretDigest: digestEnrollmentTicketSecret(
-                enrollmentCode,
-                this.options.breakGlassPepper
-              ),
-              reason: body.reason,
-              createdAt: now,
-              expiresAt
-            },
-            // Only what the response needs. The role holds no SELECT on
-            // `secret_digest`, so a `RETURNING *` would fail at the database —
-            // which is the separation working, and no reason to make it fail at
-            // runtime instead of at review.
-            select: { id: true, expiresAt: true }
-          });
-
-          await writeAdminAuditEvent(transaction, {
-            id: this.options.random.uuid(now),
-            occurredAt: now,
-            actorId: admin.adminUserId,
-            action: "admin.people.enrollment.issue",
-            outcome: "SUCCESS",
-            requestId,
-            metadata: {
-              role: admin.role,
-              targetAdminUserId,
-              targetRole: target.role,
-              reason: body.reason,
-              ticketId,
-              ticketExpiresAt: expiresAt.toISOString()
-            }
-          });
-
-          return {
-            ticketId,
-            targetAdminUserId,
-            targetDisplayName: target.displayName,
-            enrollmentCode,
-            expiresAt: expiresAt.toISOString(),
-            grantsSession: false as const
-          };
-        },
-        { timeout: PEOPLE_TRANSACTION_TIMEOUT_MILLISECONDS }
-      );
-    } catch (error) {
-      throw await this.refuse(admin, requestId, now, "admin.people.enrollment.issue", error);
-    }
-  }
-
-  /**
    * Record that somebody without the capability tried a people action.
    *
    * The same argument the money route makes, and the second place in the
    * control plane that makes it: most capability refusals are uninteresting
-   * noise, but an account asking to suspend a colleague or to mint an enrolment
-   * ticket is worth a permanent row whatever else it is. Failures are swallowed
-   * — the request is refused either way, and a 500 would tell a prober they hit
-   * something.
+   * noise, but an account asking to suspend a colleague is worth a permanent
+   * row whatever else it is. Failures are swallowed — the request is refused
+   * either way, and a 500 would tell a prober they hit something.
    */
   public async recordForbiddenAttempt(
     admin: AuthenticatedAdmin,

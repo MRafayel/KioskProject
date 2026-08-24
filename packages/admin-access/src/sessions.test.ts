@@ -17,20 +17,19 @@ function session(overrides: Partial<Parameters<typeof evaluateSession>[0]> = {})
 
 describe("session validity", () => {
   it("accepts a live session", () => {
-    expect(evaluateSession(session(), now)).toEqual({ valid: true });
+    expect(evaluateSession(session(), now)).toEqual({ state: "ACTIVE" });
   });
 
   it("rejects a revoked session immediately", () => {
     expect(evaluateSession(session({ revokedAt: new Date(now.getTime() - 1) }), now)).toEqual({
-      valid: false,
+      state: "INVALID",
       reason: "REVOKED"
     });
   });
 
-  it("rejects an idle-expired session", () => {
+  it("locks — not destroys — an idle-expired session", () => {
     expect(evaluateSession(session({ idleExpiresAt: new Date(now.getTime() - 1) }), now)).toEqual({
-      valid: false,
-      reason: "IDLE_EXPIRED"
+      state: "LOCKED"
     });
   });
 
@@ -43,10 +42,12 @@ describe("session validity", () => {
         }),
         now
       )
-    ).toEqual({ valid: false, reason: "ABSOLUTE_EXPIRED" });
+    ).toEqual({ state: "INVALID", reason: "ABSOLUTE_EXPIRED" });
   });
 
   it("reports the absolute limit when both windows have closed", () => {
+    // A locked session past its hard limit is gone: the unlock ceremony must
+    // not be offered for a session no reauthentication can save.
     expect(
       evaluateSession(
         session({
@@ -55,11 +56,17 @@ describe("session validity", () => {
         }),
         now
       )
-    ).toEqual({ valid: false, reason: "ABSOLUTE_EXPIRED" });
+    ).toEqual({ state: "INVALID", reason: "ABSOLUTE_EXPIRED" });
   });
 
-  it("treats the expiry instant as expired", () => {
-    expect(evaluateSession(session({ idleExpiresAt: now }), now).valid).toBe(false);
+  it("treats the idle expiry instant as locked", () => {
+    expect(evaluateSession(session({ idleExpiresAt: now }), now)).toEqual({ state: "LOCKED" });
+  });
+
+  it("revocation beats the lock: a revoked idle session is invalid", () => {
+    expect(
+      evaluateSession(session({ revokedAt: now, idleExpiresAt: new Date(now.getTime() - 1) }), now)
+    ).toEqual({ state: "INVALID", reason: "REVOKED" });
   });
 });
 
@@ -120,6 +127,16 @@ describe("what a session may perform", () => {
     const revoked = session({ revokedAt: now, lastStepUpAt: now });
     for (const risk of ["R0", "R1", "R2", "R3"] as const) {
       expect(canPerform(revoked, risk, now, STEP_UP_TTL)).toBe(false);
+    }
+  });
+
+  it("refuses everything on a locked session: unlocking is the only way on", () => {
+    const locked = session({
+      idleExpiresAt: new Date(now.getTime() - 1),
+      lastStepUpAt: now
+    });
+    for (const risk of ["R0", "R1", "R2", "R3"] as const) {
+      expect(canPerform(locked, risk, now, STEP_UP_TTL)).toBe(false);
     }
   });
 });

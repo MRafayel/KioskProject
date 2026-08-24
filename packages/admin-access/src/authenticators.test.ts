@@ -38,92 +38,82 @@ describe("account status", () => {
   });
 });
 
-describe("device-bound requirement for Technical Admins", () => {
-  it("accepts a roaming hardware key", () => {
-    expect(evaluateAuthenticatorPolicy("TECHNICAL_ADMIN", hardwareKey)).toEqual({ allowed: true });
-  });
-
-  it("refuses a synchronised passkey", () => {
+describe("authenticator quality policy", () => {
+  it("accepts a platform authenticator for every role, Technical Admin included", () => {
+    // The device-bound rule was retired when the password became the first
+    // factor: a persistent platform authenticator as a second factor beats a
+    // browser-lifetime virtual key that satisfied the letter of the old rule.
     expect(evaluateAuthenticatorPolicy("TECHNICAL_ADMIN", syncedPasskey)).toEqual({
-      allowed: false,
-      reason: "BACKUP_ELIGIBLE_NOT_ALLOWED"
+      allowed: true
     });
-  });
-
-  it("refuses a credential that is merely eligible for backup, even if not yet synced", () => {
-    // Eligibility is what matters: the credential can leave the device later.
-    expect(
-      evaluateAuthenticatorPolicy("TECHNICAL_ADMIN", {
-        attachment: "cross-platform",
-        backupEligible: true,
-        backedUp: false
-      })
-    ).toEqual({ allowed: false, reason: "BACKUP_ELIGIBLE_NOT_ALLOWED" });
-  });
-
-  it("refuses a platform authenticator", () => {
-    expect(
-      evaluateAuthenticatorPolicy("TECHNICAL_ADMIN", {
-        attachment: "platform",
-        backupEligible: false,
-        backedUp: false
-      })
-    ).toEqual({ allowed: false, reason: "CROSS_PLATFORM_REQUIRED" });
-  });
-
-  it("refuses an authenticator that declined to identify its attachment", () => {
-    expect(
-      evaluateAuthenticatorPolicy("TECHNICAL_ADMIN", {
-        attachment: null,
-        backupEligible: false,
-        backedUp: false
-      })
-    ).toEqual({ allowed: false, reason: "CROSS_PLATFORM_REQUIRED" });
-  });
-
-  it("allows Admin and Operator to use a platform authenticator", () => {
     expect(evaluateAuthenticatorPolicy("ADMIN", syncedPasskey)).toEqual({ allowed: true });
     expect(evaluateAuthenticatorPolicy("OPERATOR", syncedPasskey)).toEqual({ allowed: true });
   });
+
+  it("still accepts a roaming hardware key everywhere", () => {
+    expect(evaluateAuthenticatorPolicy("TECHNICAL_ADMIN", hardwareKey)).toEqual({ allowed: true });
+  });
 });
 
-describe("activation requires a spare authenticator", () => {
-  it("requires two for every role", () => {
-    expect(minimumAuthenticators("OPERATOR")).toBe(2);
+describe("activation requires every factor the role signs in with", () => {
+  it("requires one key for privileged roles and none for Operators", () => {
+    expect(minimumAuthenticators("OPERATOR")).toBe(0);
     expect(minimumAuthenticators("ADMIN")).toBe(MINIMUM_PRIVILEGED_AUTHENTICATORS);
     expect(minimumAuthenticators("TECHNICAL_ADMIN")).toBe(MINIMUM_PRIVILEGED_AUTHENTICATORS);
   });
 
-  it("refuses activation with a single authenticator", () => {
-    expect(evaluateActivation("TECHNICAL_ADMIN", "PROVISIONING", 1)).toEqual({
+  it("refuses activation without a password, whatever the keys say", () => {
+    expect(evaluateActivation("TECHNICAL_ADMIN", "PROVISIONING", 2, false)).toEqual({
+      allowed: false,
+      reason: "PASSWORD_NOT_SET",
+      required: 1,
+      present: 2
+    });
+    expect(evaluateActivation("OPERATOR", "PROVISIONING", 0, false).allowed).toBe(false);
+  });
+
+  it("refuses a privileged activation with a password but no key", () => {
+    expect(evaluateActivation("TECHNICAL_ADMIN", "PROVISIONING", 0, true)).toEqual({
       allowed: false,
       reason: "NOT_ENOUGH_AUTHENTICATORS",
-      required: 2,
-      present: 1
+      required: 1,
+      present: 0
     });
   });
 
-  it("allows activation once the minimum is enrolled", () => {
-    expect(evaluateActivation("TECHNICAL_ADMIN", "PROVISIONING", 2)).toEqual({ allowed: true });
+  it("activates a privileged account with a password and one key", () => {
+    expect(evaluateActivation("TECHNICAL_ADMIN", "PROVISIONING", 1, true)).toEqual({
+      allowed: true
+    });
+    expect(evaluateActivation("ADMIN", "PROVISIONING", 1, true)).toEqual({ allowed: true });
+  });
+
+  it("activates an Operator with a password alone", () => {
+    expect(evaluateActivation("OPERATOR", "PROVISIONING", 0, true)).toEqual({ allowed: true });
   });
 
   it("refuses to re-activate an account that is not provisioning", () => {
-    expect(evaluateActivation("ADMIN", "ACTIVE", 5).allowed).toBe(false);
-    expect(evaluateActivation("ADMIN", "DISABLED", 5).allowed).toBe(false);
+    expect(evaluateActivation("ADMIN", "ACTIVE", 5, true).allowed).toBe(false);
+    expect(evaluateActivation("ADMIN", "DISABLED", 5, true).allowed).toBe(false);
   });
 });
 
-describe("revocation cannot lock an operator out", () => {
-  it("refuses a revocation that would take an active account below the minimum", () => {
-    expect(canRevokeAuthenticator("TECHNICAL_ADMIN", "ACTIVE", 2)).toBe(false);
+describe("revocation cannot strip a privileged account of its second factor", () => {
+  it("refuses revoking the last usable key on an active privileged account", () => {
+    expect(canRevokeAuthenticator("TECHNICAL_ADMIN", "ACTIVE", 1)).toBe(false);
+    expect(canRevokeAuthenticator("ADMIN", "ACTIVE", 1)).toBe(false);
   });
 
   it("allows revocation once a replacement has been enrolled", () => {
-    expect(canRevokeAuthenticator("TECHNICAL_ADMIN", "ACTIVE", 3)).toBe(true);
+    expect(canRevokeAuthenticator("TECHNICAL_ADMIN", "ACTIVE", 2)).toBe(true);
+  });
+
+  it("lets an Operator retire their only optional key", () => {
+    expect(canRevokeAuthenticator("OPERATOR", "ACTIVE", 1)).toBe(true);
   });
 
   it("allows cleanup of a suspended or disabled account", () => {
-    expect(canRevokeAuthenticator("ADMIN", "SUSPENDED", 2)).toBe(true);
+    expect(canRevokeAuthenticator("ADMIN", "SUSPENDED", 1)).toBe(true);
     expect(canRevokeAuthenticator("ADMIN", "DISABLED", 1)).toBe(true);
   });
 });

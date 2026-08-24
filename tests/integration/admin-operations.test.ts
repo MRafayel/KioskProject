@@ -19,6 +19,7 @@ import {
   digestAdminCsrfToken,
   digestAdminSessionToken
 } from "../../services/api/src/modules/admin/crypto.js";
+import { hashPassword } from "../../services/api/src/modules/admin/passwords.js";
 import { assertSafeIntegrationEnvironment } from "./safety.js";
 
 /**
@@ -873,14 +874,20 @@ async function seedAdminWithSession(
     data: {
       id: adminUserId,
       userHandle: randomBytes(32),
+      username: `u-${adminUserId.slice(0, 12)}`,
       displayName: `Operations ${role}`,
       role,
       status: "PROVISIONING"
     }
   });
 
-  // Two authenticators, because an active account may not exist with fewer.
-  for (let index = 0; index < 2; index += 1) {
+  // No account may become ACTIVE without a password now.
+  await database.adminPassword.create({
+    data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+  });
+
+  // One authenticator: a privileged account's second factor.
+  for (let index = 0; index < 1; index += 1) {
     await database.adminAuthenticator.create({
       data: {
         id: randomUUID(),
@@ -1222,6 +1229,15 @@ async function cleanUpSeededAdmins(): Promise<void> {
   // An account that recorded an observation cannot be deleted while the
   // observation names it, which is the point of the RESTRICT. The suite's
   // resolutions are removed first, below.
+  // The knowledge factor and the two kinds of one-time grant hold the account
+  // by a RESTRICT foreign key, so they go first.
+  await database.adminPassword.deleteMany({ where: { adminUserId: { in: ids } } });
+  await database.adminInvitation.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
+  await database.adminPasswordReset.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
   await database.adminUser.deleteMany({ where: { id: { in: ids } } });
 }
 

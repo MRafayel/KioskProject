@@ -19,6 +19,7 @@ import {
   digestAdminCsrfToken,
   digestAdminSessionToken
 } from "../../services/api/src/modules/admin/crypto.js";
+import { hashPassword } from "../../services/api/src/modules/admin/passwords.js";
 import { assertSafeIntegrationEnvironment } from "./safety.js";
 
 /**
@@ -803,13 +804,19 @@ async function seedSession(
     data: {
       id: adminUserId,
       userHandle: randomBytes(32),
+      username: `u-${adminUserId.slice(0, 12)}`,
       displayName: `Changes ${role} ${randomBytes(2).toString("hex")}`,
       role,
       status: "PROVISIONING"
     }
   });
 
-  for (let index = 0; index < 2; index += 1) {
+  // No account may become ACTIVE without a password now.
+  await database.adminPassword.create({
+    data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+  });
+
+  for (let index = 0; index < 1; index += 1) {
     await database.adminAuthenticator.create({
       data: {
         id: randomUUID(),
@@ -871,6 +878,15 @@ async function cleanUpSeededAdmins(): Promise<void> {
     data: { status: "SUSPENDED" }
   });
   await database.adminAuthenticator.deleteMany({ where: { adminUserId: { in: ids } } });
+  // The knowledge factor and the two kinds of one-time grant hold the account
+  // by a RESTRICT foreign key, so they go first.
+  await database.adminPassword.deleteMany({ where: { adminUserId: { in: ids } } });
+  await database.adminInvitation.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
+  await database.adminPasswordReset.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
   await database.adminUser.deleteMany({ where: { id: { in: ids } } });
 }
 

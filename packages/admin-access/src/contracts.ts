@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { oneTimeCodeSchema, passwordSchema, usernameSchema } from "./authentication.js";
 import { ADMIN_CAPABILITIES, ADMIN_ROLES } from "./capabilities.js";
 
 /**
@@ -22,12 +23,16 @@ export const adminCapabilitySchema = z.enum(ADMIN_CAPABILITIES);
 export const ceremonyIdSchema = z.string().uuid();
 
 export const adminIdentityResponseSchema = z.object({
+  state: z.literal("ACTIVE"),
   adminUserId: z.string().uuid(),
+  username: usernameSchema,
   displayName: z.string().min(1).max(120),
   role: adminRoleSchema,
   capabilities: z.array(adminCapabilitySchema),
   /** Kiosks this account may act on. Empty means no kiosk-bound action. */
   kioskScopes: z.array(z.string().max(64)),
+  /** How this account proves itself again at unlock and step-up. */
+  strongAuthMethod: z.enum(["WEBAUTHN", "PASSWORD"]),
   session: z.object({
     idleExpiresAt: z.string().datetime(),
     hardExpiresAt: z.string().datetime(),
@@ -35,6 +40,22 @@ export const adminIdentityResponseSchema = z.object({
     stepUpFreshUntil: z.string().datetime().nullable()
   })
 });
+
+/**
+ * What `/me` says to a locked session: enough to draw the lock screen — whose
+ * session, and which reauthentication to offer — and nothing the holder of the
+ * cookie could not already have read while the session was active.
+ */
+export const adminLockedIdentityResponseSchema = z.object({
+  state: z.literal("LOCKED"),
+  displayName: z.string().min(1).max(120),
+  strongAuthMethod: z.enum(["WEBAUTHN", "PASSWORD"])
+});
+
+export const adminMeResponseSchema = z.discriminatedUnion("state", [
+  adminIdentityResponseSchema,
+  adminLockedIdentityResponseSchema
+]);
 
 export const adminAuthenticatorSchema = z.object({
   id: z.string().uuid(),
@@ -48,8 +69,9 @@ export const adminAuthenticatorSchema = z.object({
 
 export const adminAuthenticatorsResponseSchema = z.object({
   items: z.array(adminAuthenticatorSchema),
-  /** How many usable authenticators this account must keep. */
-  minimumRequired: z.number().int().positive(),
+  /** How many usable authenticators this account must keep. Zero for roles
+   * that sign in with a password alone. */
+  minimumRequired: z.number().int().nonnegative(),
   usableCount: z.number().int().nonnegative()
 });
 
@@ -120,7 +142,202 @@ export const adminHealthResponseSchema = z.object({
   role: adminRoleSchema
 });
 
+// ---------------------------------------------------------------------------
+// Login, unlock and step-up
+// ---------------------------------------------------------------------------
+
+export const passwordLoginBodySchema = z
+  .object({ username: usernameSchema, password: passwordSchema })
+  .strict();
+
+/**
+ * What a correct password earns depends on the role: an Operator is signed in,
+ * a privileged role is handed a WebAuthn ceremony to finish. The ceremony
+ * exists only because the password verified, which is what binds the assertion
+ * that follows to the knowledge factor that preceded it.
+ */
+export const passwordLoginResponseSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("AUTHENTICATED"), identity: adminIdentityResponseSchema }),
+  z.object({
+    state: z.literal("WEBAUTHN_REQUIRED"),
+    ceremonyId: ceremonyIdSchema,
+    options: z.record(z.string(), z.unknown())
+  })
+]);
+
+/** Reopening a locked session, or refreshing step-up, with the password. */
+export const passwordProofBodySchema = z.object({ password: passwordSchema }).strict();
+
+// ---------------------------------------------------------------------------
+// One's own sessions
+// ---------------------------------------------------------------------------
+
+/**
+ * One of the caller's sessions. The address and user agent are informational
+ * context for "is this mine" — they are recorded observations, never identity:
+ * nothing anywhere treats them as proof of which device this is.
+ */
+export const adminOwnSessionSchema = z.object({
+  sessionId: z.string().uuid(),
+  createdAt: z.string().datetime(),
+  lastSeenAt: z.string().datetime().nullable(),
+  state: z.enum(["ACTIVE", "LOCKED"]),
+  ipAddress: z.string().max(64).nullable(),
+  userAgent: z.string().max(280).nullable(),
+  /** True for the session that asked. The page marks it and refuses to offer
+   * revoking it as "another" session. */
+  current: z.boolean()
+});
+
+export const adminOwnSessionsResponseSchema = z.object({
+  items: z.array(adminOwnSessionSchema)
+});
+
+export const revokeOwnSessionsResponseSchema = z.object({
+  revokedSessions: z.number().int().nonnegative()
+});
+
+// ---------------------------------------------------------------------------
+// Passwords
+// ---------------------------------------------------------------------------
+
+export const changePasswordBodySchema = z
+  .object({
+    /** Proof of knowledge, demanded even inside a fresh step-up: a borrowed
+     * live session must never be enough to rotate the knowledge factor. */
+    currentPassword: passwordSchema,
+    newPassword: passwordSchema
+  })
+  .strict();
+
+export const changePasswordResponseSchema = z.object({
+  /** Every other session ends when the password changes. This one continues. */
+  revokedSessions: z.number().int().nonnegative()
+});
+
+// ---------------------------------------------------------------------------
+// Invitations
+// ---------------------------------------------------------------------------
+
+export const createInvitationBodySchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(120),
+    username: usernameSchema,
+    role: adminRoleSchema,
+    /** Recorded in the audit event: who is this person, why an account. */
+    reason: z.string().trim().min(3).max(280)
+  })
+  .strict();
+
+/**
+ * The one and only time the invitation code leaves the server readable. The
+ * database keeps a digest, so this response cannot be re-read or recovered —
+ * the panel shows it once, and losing it means revoking and reissuing.
+ */
+export const createInvitationResponseSchema = z.object({
+  invitationId: z.string().uuid(),
+  adminUserId: z.string().uuid(),
+  username: usernameSchema,
+  role: adminRoleSchema,
+  invitationCode: oneTimeCodeSchema,
+  expiresAt: z.string().datetime()
+});
+
+export const adminInvitationSchema = z.object({
+  invitationId: z.string().uuid(),
+  adminUserId: z.string().uuid(),
+  username: usernameSchema,
+  displayName: z.string().max(120),
+  role: adminRoleSchema,
+  issuedByDisplayName: z.string().max(120).nullable(),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+  /** PENDING until the account activates, then ACCEPTED; or REVOKED/EXPIRED. */
+  status: z.enum(["PENDING", "ACCEPTED", "REVOKED", "EXPIRED"])
+});
+
+export const adminInvitationsResponseSchema = z.object({
+  items: z.array(adminInvitationSchema)
+});
+
+export const invitationCodeBodySchema = z.object({ code: oneTimeCodeSchema }).strict();
+
+/**
+ * What the acceptance page needs to draw itself: whose account this is and
+ * which steps remain. Returned only against a live invitation code, so it
+ * discloses nothing to anybody the inviter did not hand the code to.
+ */
+export const invitationPreviewResponseSchema = z.object({
+  displayName: z.string().max(120),
+  username: usernameSchema,
+  role: adminRoleSchema,
+  passwordSet: z.boolean(),
+  webAuthnRequired: z.boolean(),
+  usableAuthenticators: z.number().int().nonnegative()
+});
+
+export const invitationPasswordBodySchema = z
+  .object({ code: oneTimeCodeSchema, password: passwordSchema })
+  .strict();
+
+/**
+ * Acceptance reports where the account stands, so the page can either move to
+ * key enrolment or tell the person they are done and can sign in.
+ */
+export const invitationProgressResponseSchema = z.object({
+  activated: z.boolean(),
+  passwordSet: z.boolean(),
+  webAuthnRequired: z.boolean(),
+  usableAuthenticators: z.number().int().nonnegative()
+});
+
+export const invitationRegistrationBodySchema = z
+  .object({
+    code: oneTimeCodeSchema,
+    ceremonyId: ceremonyIdSchema,
+    credential: webAuthnCredentialSchema,
+    label: z.string().trim().min(1).max(80)
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Administrator-assisted password recovery
+// ---------------------------------------------------------------------------
+
+export const issuePasswordResetBodySchema = z
+  .object({ reason: z.string().trim().min(3).max(280) })
+  .strict();
+
+/** Shown once to the issuing administrator, stored only as a digest. */
+export const issuePasswordResetResponseSchema = z.object({
+  resetId: z.string().uuid(),
+  targetAdminUserId: z.string().uuid(),
+  targetDisplayName: z.string().max(120),
+  resetCode: oneTimeCodeSchema,
+  expiresAt: z.string().datetime()
+});
+
+export const completePasswordResetBodySchema = z
+  .object({ code: oneTimeCodeSchema, newPassword: passwordSchema })
+  .strict();
+
+/** Completing a reset ends every session the account had. */
+export const completePasswordResetResponseSchema = z.object({
+  revokedSessions: z.number().int().nonnegative()
+});
+
 export type AdminIdentityResponse = z.infer<typeof adminIdentityResponseSchema>;
+export type AdminLockedIdentityResponse = z.infer<typeof adminLockedIdentityResponseSchema>;
+export type AdminMeResponse = z.infer<typeof adminMeResponseSchema>;
+export type PasswordLoginResponse = z.infer<typeof passwordLoginResponseSchema>;
+export type AdminOwnSession = z.infer<typeof adminOwnSessionSchema>;
+export type AdminOwnSessionsResponse = z.infer<typeof adminOwnSessionsResponseSchema>;
+export type AdminInvitation = z.infer<typeof adminInvitationSchema>;
+export type AdminInvitationsResponse = z.infer<typeof adminInvitationsResponseSchema>;
+export type CreateInvitationResponse = z.infer<typeof createInvitationResponseSchema>;
+export type InvitationPreviewResponse = z.infer<typeof invitationPreviewResponseSchema>;
+export type InvitationProgressResponse = z.infer<typeof invitationProgressResponseSchema>;
+export type IssuePasswordResetResponse = z.infer<typeof issuePasswordResetResponseSchema>;
 export type AdminAuthenticatorsResponse = z.infer<typeof adminAuthenticatorsResponseSchema>;
 export type AdminBoundWebAuthnOptionsResponse = z.infer<
   typeof adminBoundWebAuthnOptionsResponseSchema

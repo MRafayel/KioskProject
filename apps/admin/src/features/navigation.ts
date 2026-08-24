@@ -60,7 +60,10 @@ export const SECTION_CAPABILITY: Readonly<Record<AdminSectionId, AdminCapability
   // `authenticator.manage.operator`: that capability is R2, so gating a screen
   // on it made opening the section demand a security key.
   people: "operator.read",
-  "security-keys": "authenticator.manage.self"
+  // The Security section is mostly reads — your sessions, your keys — so it is
+  // gated on the R0 read every role holds, for the same reason People moved to
+  // `operator.read` in Phase 6: opening a screen must never demand a ceremony.
+  "security-keys": "account.sessions.read"
 };
 
 /**

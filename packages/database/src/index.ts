@@ -355,8 +355,9 @@ export function createAdminPeopleClient(connectionString: string): PrismaClient 
  *
  * Read the list as the four claims the role's matrix makes, each expressed as an
  * absence PostgreSQL can be asked about directly. It cannot promote anybody, it
- * cannot enrol a credential, it cannot destroy the history of who could do what,
- * and it cannot reach the printing system or the money in it.
+ * cannot create or replace a credential of any kind, it cannot destroy the
+ * history of who could do what, and it cannot reach the printing system or the
+ * money in it.
  *
  * `admin_users.role` is checked at column granularity because the table-level
  * answer would be yes — this role does hold UPDATE on `admin_users`, on four
@@ -370,8 +371,17 @@ const FORBIDDEN_ADMIN_PEOPLE_PRIVILEGES: readonly (readonly [string, string])[] 
   ["public.admin_sessions", "INSERT"],
   ["public.admin_sessions", "DELETE"],
   ["public.admin_kiosk_scopes", "DELETE"],
-  ["public.admin_enrollment_tickets", "UPDATE"],
-  ["public.admin_enrollment_tickets", "DELETE"],
+  // The three identity tables this role holds nothing on at all. A connection
+  // that administers people must not be able to read, plant or replace what
+  // signs anybody in — which is what makes "it cannot manufacture an identity"
+  // a property of the grant rather than of the handler above it.
+  ["public.admin_passwords", "SELECT"],
+  ["public.admin_passwords", "INSERT"],
+  ["public.admin_passwords", "UPDATE"],
+  ["public.admin_invitations", "SELECT"],
+  ["public.admin_invitations", "INSERT"],
+  ["public.admin_password_resets", "SELECT"],
+  ["public.admin_password_resets", "INSERT"],
   ["public.admin_break_glass_credentials", "SELECT"],
   ["public.admin_break_glass_credentials", "INSERT"],
   ["public.admin_webauthn_challenges", "INSERT"],
@@ -403,7 +413,6 @@ const FORBIDDEN_ADMIN_PEOPLE_COLUMNS: readonly (readonly [string, string])[] = [
 /** The grants without which no people action can run. */
 const REQUIRED_ADMIN_PEOPLE_PRIVILEGES: readonly (readonly [string, string])[] = [
   ["public.admin_kiosk_scopes", "INSERT"],
-  ["public.admin_enrollment_tickets", "INSERT"],
   ["public.audit_events", "INSERT"]
 ];
 

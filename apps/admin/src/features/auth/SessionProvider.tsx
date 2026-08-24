@@ -10,12 +10,20 @@ import {
   type ReactNode
 } from "react";
 
-import type { AdminCapability, AdminIdentityResponse } from "@printing-kiosk/admin-access";
+import type {
+  AdminCapability,
+  AdminIdentityResponse,
+  AdminLockedIdentityResponse
+} from "@printing-kiosk/admin-access";
 
 import { AdminApiError, adminApi } from "./api.js";
 
 /**
  * Who is signed in, and what the page is allowed to draw for them.
+ *
+ * Four states rather than three: a session can be locked — idle window passed,
+ * absolute window not — and a locked session is not a signed-out one. The lock
+ * screen keeps the person's place; reauthenticating reopens the same session.
  *
  * `can()` decides visibility only. Every capability it reports is checked again
  * on the server for the request it guards, so hiding a control is a courtesy to
@@ -24,25 +32,30 @@ import { AdminApiError, adminApi } from "./api.js";
 
 interface SessionState {
   identity: AdminIdentityResponse | null;
-  status: "loading" | "signed-out" | "signed-in";
+  locked: AdminLockedIdentityResponse | null;
+  status: "loading" | "signed-out" | "signed-in" | "locked";
   error: string | null;
   errorCanRetry: boolean;
 }
 
 interface SessionContextValue extends SessionState {
-  activity: "idle" | "refreshing" | "signing-in" | "signing-out";
+  activity: "idle" | "refreshing" | "signing-in" | "signing-out" | "unlocking";
   can: (capability: AdminCapability) => boolean;
-  signIn: () => Promise<void>;
+  signIn: (username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /** Reopen a locked session: one key touch, or the password. */
+  unlock: (password?: string) => Promise<void>;
   /** Abort if another tab replaced this page's account cookie. */
   confirmCurrentIdentity: () => Promise<boolean>;
-  /** Prove presence again. Returns false when the operator cancelled. */
+  /**
+   * Prove presence again. A security key for privileged roles; the password,
+   * collected by the dialog this provider renders, for Operators. Returns
+   * false when the person cancelled.
+   */
   stepUp: () => Promise<boolean>;
   /** Returns false when the required security-key prompt did not complete. */
   enrolAuthenticator: (label: string) => Promise<boolean>;
   recoverAuthenticator: (recoveryCode: string, label: string) => Promise<void>;
-  /** Enrol a first key against a ticket an Admin issued. Signs nobody in. */
-  redeemEnrollmentTicket: (enrollmentCode: string, label: string) => Promise<void>;
   /** Move back to sign-in when any child request discovers the session is gone. */
   handleAuthenticationError: (error: unknown) => boolean;
   clearError: () => void;
@@ -54,16 +67,35 @@ const SessionContext = createContext<SessionContextValue | null>(null);
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SessionState>({
     identity: null,
+    locked: null,
     status: "loading",
     error: null,
     errorCanRetry: false
   });
   const [activity, setActivity] = useState<SessionContextValue["activity"]>("idle");
+  /** Non-null while the step-up dialog is collecting an Operator's password. */
+  const [passwordPrompt, setPasswordPrompt] = useState<{
+    resolve: (password: string | null) => void;
+  } | null>(null);
   const generation = useRef(0);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const signInInFlight = useRef<Promise<void> | null>(null);
   const signOutInFlight = useRef<Promise<void> | null>(null);
   const stepUpInFlight = useRef<Promise<boolean> | null>(null);
+
+  const applyMe = useCallback((me: AdminIdentityResponse | AdminLockedIdentityResponse) => {
+    if (me.state === "LOCKED") {
+      setState({ identity: null, locked: me, status: "locked", error: null, errorCanRetry: false });
+    } else {
+      setState({
+        identity: me,
+        locked: null,
+        status: "signed-in",
+        error: null,
+        errorCanRetry: false
+      });
+    }
+  }, []);
 
   const refresh = useCallback((): Promise<void> => {
     if (refreshInFlight.current) return refreshInFlight.current;
@@ -72,22 +104,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setActivity("refreshing");
     setState((current) => ({
       ...current,
-      ...(current.identity ? {} : { status: "loading" as const }),
+      ...(current.identity || current.locked ? {} : { status: "loading" as const }),
       error: null,
       errorCanRetry: false
     }));
 
     const attempt = (async () => {
       try {
-        const identity = await adminApi.me();
-        if (generation.current === requestGeneration) {
-          setState({
-            identity,
-            status: "signed-in",
-            error: null,
-            errorCanRetry: false
-          });
-        }
+        const me = await adminApi.me();
+        if (generation.current === requestGeneration) applyMe(me);
       } catch (error) {
         if (generation.current !== requestGeneration) return;
         if (error instanceof AdminApiError && error.requiresSignIn) {
@@ -95,7 +120,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           return;
         }
         setState((current) =>
-          current.identity
+          current.identity || current.locked
             ? { ...current, error: describe(error), errorCanRetry: true }
             : signedOut(describe(error), true)
         );
@@ -108,50 +133,81 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })();
     refreshInFlight.current = attempt;
     return attempt;
-  }, []);
+  }, [applyMe]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  const signIn = useCallback((): Promise<void> => {
-    if (signInInFlight.current) return signInInFlight.current;
+  const signIn = useCallback(
+    (username: string, password: string): Promise<void> => {
+      if (signInInFlight.current) return signInInFlight.current;
 
-    const requestGeneration = ++generation.current;
-    setActivity("signing-in");
-    setState((current) => ({ ...current, error: null, errorCanRetry: false }));
+      const requestGeneration = ++generation.current;
+      setActivity("signing-in");
+      setState((current) => ({ ...current, error: null, errorCanRetry: false }));
 
-    const attempt = (async () => {
-      try {
-        const ceremony = await adminApi.beginSignIn();
-        // No username is collected anywhere: the credential is discoverable, so
-        // the authenticator decides which account it asserts.
-        const credential = await startAuthentication({
-          optionsJSON: ceremony.options as never
-        });
-        const identity = await adminApi.completeSignIn(ceremony.ceremonyId, credential);
-        if (generation.current === requestGeneration) {
-          setState({
-            identity,
-            status: "signed-in",
-            error: null,
-            errorCanRetry: false
+      const attempt = (async () => {
+        try {
+          const result = await adminApi.login(username, password);
+          if (result.state === "AUTHENTICATED") {
+            if (generation.current === requestGeneration) applyMe(result.identity);
+            return;
+          }
+          // The password verified; the role owes a key. The ceremony is bound
+          // server-side to the account the password proved.
+          const credential = await startAuthentication({
+            optionsJSON: result.options as never
           });
+          const identity = await adminApi.completeLoginWebAuthn(result.ceremonyId, credential);
+          if (generation.current === requestGeneration) applyMe(identity);
+        } catch (error) {
+          if (generation.current === requestGeneration) {
+            setState(signedOut(describe(error)));
+          }
+        } finally {
+          signInInFlight.current = null;
+          if (generation.current === requestGeneration) {
+            setActivity((current) => (current === "signing-in" ? "idle" : current));
+          }
         }
+      })();
+      signInInFlight.current = attempt;
+      return attempt;
+    },
+    [applyMe]
+  );
+
+  const unlock = useCallback(
+    async (password?: string): Promise<void> => {
+      const requestGeneration = generation.current;
+      setActivity("unlocking");
+      setState((current) => ({ ...current, error: null, errorCanRetry: false }));
+      try {
+        let identity: AdminIdentityResponse;
+        if (password !== undefined) {
+          identity = await adminApi.unlockWithPassword(password);
+        } else {
+          const ceremony = await adminApi.beginUnlock();
+          const credential = await startAuthentication({ optionsJSON: ceremony.options as never });
+          identity = await adminApi.completeUnlock(ceremony.ceremonyId, credential);
+        }
+        if (generation.current === requestGeneration) applyMe(identity);
       } catch (error) {
-        if (generation.current === requestGeneration) {
-          setState(signedOut(describe(error)));
+        if (generation.current !== requestGeneration) return;
+        if (error instanceof AdminApiError && error.requiresSignIn) {
+          setState(signedOut());
+          return;
         }
+        setState((current) => ({ ...current, error: describe(error), errorCanRetry: false }));
       } finally {
-        signInInFlight.current = null;
         if (generation.current === requestGeneration) {
-          setActivity((current) => (current === "signing-in" ? "idle" : current));
+          setActivity((current) => (current === "unlocking" ? "idle" : current));
         }
       }
-    })();
-    signInInFlight.current = attempt;
-    return attempt;
-  }, []);
+    },
+    [applyMe]
+  );
 
   const confirmCurrentIdentity = useCallback(async (): Promise<boolean> => {
     const expected = state.identity;
@@ -159,17 +215,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     const requestGeneration = generation.current;
     try {
-      const identity = await adminApi.me();
+      const me = await adminApi.me();
       if (generation.current !== requestGeneration) return false;
 
-      if (identity.adminUserId !== expected.adminUserId) {
+      if (me.state === "LOCKED") {
+        applyMe(me);
+        return false;
+      }
+
+      if (me.adminUserId !== expected.adminUserId) {
         // Cookies are shared by every tab in a browser profile. Never let a tab
         // that still displays Alice perform a self-management action after a
         // different tab replaced the cookie with Bob's session.
         generation.current += 1;
         setActivity("idle");
         setState({
-          identity,
+          identity: me,
+          locked: null,
           status: "signed-in",
           error:
             "Your browser session changed to a different admin account. Review the account shown, then retry.",
@@ -180,12 +242,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
       // Role, capabilities, scopes and expiry may have changed even when the
       // account did not. Keep the page's view aligned with the server's view.
-      setState({
-        identity,
-        status: "signed-in",
-        error: null,
-        errorCanRetry: false
-      });
+      applyMe(me);
       return true;
     } catch (error) {
       if (generation.current !== requestGeneration) return false;
@@ -202,7 +259,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }));
       return false;
     }
-  }, [state.identity]);
+  }, [applyMe, state.identity]);
 
   const signOut = useCallback((): Promise<void> => {
     if (signOutInFlight.current) return signOutInFlight.current;
@@ -210,7 +267,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setActivity("signing-out");
 
     const attempt = (async () => {
-      if (!(await confirmCurrentIdentity())) return;
+      // A locked session may sign out directly; an active one first confirms
+      // no other tab swapped the account underneath this page.
+      if (state.status === "signed-in" && !(await confirmCurrentIdentity())) return;
 
       const requestGeneration = ++generation.current;
       setState((current) => ({ ...current, error: null, errorCanRetry: false }));
@@ -237,44 +296,60 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
     signOutInFlight.current = attempt;
     return attempt;
-  }, [confirmCurrentIdentity]);
+  }, [confirmCurrentIdentity, state.status]);
+
+  /** Ask the person for their password through the provider's own dialog. */
+  const collectPassword = useCallback((): Promise<string | null> => {
+    return new Promise((resolve) => {
+      setPasswordPrompt({
+        resolve: (password) => {
+          setPasswordPrompt(null);
+          resolve(password);
+        }
+      });
+    });
+  }, []);
 
   const stepUp = useCallback((): Promise<boolean> => {
     if (stepUpInFlight.current) return stepUpInFlight.current;
 
     const attempt = (async () => {
-      const expectedAdminUserId = state.identity?.adminUserId;
-      if (!expectedAdminUserId) return false;
+      const expected = state.identity;
+      if (!expected) return false;
       if (!(await confirmCurrentIdentity())) return false;
 
       const requestGeneration = ++generation.current;
       setState((current) => ({ ...current, error: null, errorCanRetry: false }));
       try {
-        const ceremony = await adminApi.beginStepUp();
-        if (ceremony.adminUserId !== expectedAdminUserId) {
-          // A different tab replaced the cookie after the `/me` check. Do not
-          // ask the operator to touch a key for the account this stale tab was
-          // not displaying.
-          await confirmCurrentIdentity();
-          return false;
-        }
-        const credential = await startAuthentication({
-          optionsJSON: ceremony.options as never
-        });
-        const identity = await adminApi.completeStepUp(ceremony.ceremonyId, credential);
-        if (generation.current === requestGeneration) {
-          setState({
-            identity,
-            status: "signed-in",
-            error: null,
-            errorCanRetry: false
+        let identity: AdminIdentityResponse;
+        if (expected.strongAuthMethod === "PASSWORD") {
+          const password = await collectPassword();
+          if (password === null) return false;
+          identity = await adminApi.stepUpWithPassword(password);
+        } else {
+          const ceremony = await adminApi.beginStepUp();
+          if (ceremony.adminUserId !== expected.adminUserId) {
+            // A different tab replaced the cookie after the `/me` check. Do not
+            // ask the operator to touch a key for the account this stale tab
+            // was not displaying.
+            await confirmCurrentIdentity();
+            return false;
+          }
+          const credential = await startAuthentication({
+            optionsJSON: ceremony.options as never
           });
+          identity = await adminApi.completeStepUp(ceremony.ceremonyId, credential);
         }
+        if (generation.current === requestGeneration) applyMe(identity);
         return true;
       } catch (error) {
         if (generation.current !== requestGeneration) return false;
         if (error instanceof AdminApiError && error.requiresSignIn) {
           setState(signedOut());
+          return false;
+        }
+        if (error instanceof AdminApiError && error.requiresUnlock) {
+          void refresh();
           return false;
         }
         setState((current) => ({
@@ -289,7 +364,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })();
     stepUpInFlight.current = attempt;
     return attempt;
-  }, [confirmCurrentIdentity, state.identity?.adminUserId]);
+  }, [applyMe, collectPassword, confirmCurrentIdentity, refresh, state.identity]);
 
   const enrolAuthenticator = useCallback(
     async (label: string): Promise<boolean> => {
@@ -303,7 +378,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         ceremony = await begin();
       } catch (error) {
         // Enrolment is a sensitive action, so the first attempt may be refused
-        // pending a fresh assertion. Ask for it, then continue.
+        // pending a fresh reauthentication. Ask for it, then continue.
         if (!(error instanceof AdminApiError) || !error.requiresStepUp) throw error;
         if (!(await stepUp())) return false;
         ceremony = await begin();
@@ -340,19 +415,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await adminApi.completeBreakGlassEnrolment(ceremony.ceremonyId, credential, label);
   }, []);
 
-  const redeemEnrollmentTicket = useCallback(async (enrollmentCode: string, label: string) => {
-    const ceremony = await adminApi.beginTicketEnrolment(enrollmentCode);
-    const credential = await startRegistration({ optionsJSON: ceremony.options as never });
-    await adminApi.completeTicketEnrolment(ceremony.ceremonyId, credential, label);
-  }, []);
-
-  const handleAuthenticationError = useCallback((error: unknown): boolean => {
-    if (!(error instanceof AdminApiError) || !error.requiresSignIn) return false;
-    generation.current += 1;
-    setActivity("idle");
-    setState(signedOut());
-    return true;
-  }, []);
+  const handleAuthenticationError = useCallback(
+    (error: unknown): boolean => {
+      if (!(error instanceof AdminApiError)) return false;
+      if (error.requiresUnlock) {
+        // The session locked while this page was open. Fetch who is locked so
+        // the lock screen can say so, rather than guessing from stale state.
+        generation.current += 1;
+        setActivity("idle");
+        void refresh();
+        return true;
+      }
+      if (!error.requiresSignIn) return false;
+      generation.current += 1;
+      setActivity("idle");
+      setState(signedOut());
+      return true;
+    },
+    [refresh]
+  );
 
   const clearError = useCallback(() => {
     setState((current) => ({ ...current, error: null, errorCanRetry: false }));
@@ -374,7 +455,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const timeout = window.setTimeout(expire, delay);
+    // setTimeout clamps beyond ~24.8 days; re-check daily until inside range.
+    const timeout = window.setTimeout(
+      () => {
+        if (new Date(hardExpiresAt).getTime() - Date.now() <= 0) expire();
+      },
+      Math.min(delay, 24 * 60 * 60 * 1000)
+    );
     return () => window.clearTimeout(timeout);
   }, [hardExpiresAt]);
 
@@ -385,11 +472,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       can: (capability) => state.identity?.capabilities.includes(capability) ?? false,
       signIn,
       signOut,
+      unlock,
       confirmCurrentIdentity,
       stepUp,
       enrolAuthenticator,
       recoverAuthenticator,
-      redeemEnrollmentTicket,
       handleAuthenticationError,
       clearError,
       refresh
@@ -399,18 +486,73 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       activity,
       signIn,
       signOut,
+      unlock,
       confirmCurrentIdentity,
       stepUp,
       enrolAuthenticator,
       recoverAuthenticator,
-      redeemEnrollmentTicket,
       handleAuthenticationError,
       clearError,
       refresh
     ]
   );
 
-  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+  return (
+    <SessionContext.Provider value={value}>
+      {children}
+      {passwordPrompt ? (
+        <PasswordPromptDialog
+          onSubmit={(password) => passwordPrompt.resolve(password)}
+          onCancel={() => passwordPrompt.resolve(null)}
+        />
+      ) : null}
+    </SessionContext.Provider>
+  );
+}
+
+/**
+ * The password prompt an Operator's step-up uses. Minimal by design — the UI
+ * is temporary — but a real dialog with a masked input, because the one thing
+ * a password prompt may never do is show the password.
+ */
+function PasswordPromptDialog({
+  onSubmit,
+  onCancel
+}: {
+  onSubmit: (password: string) => void;
+  onCancel: () => void;
+}) {
+  const [password, setPassword] = useState("");
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirm password">
+      <form
+        className="modal"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (password.length > 0) onSubmit(password);
+        }}
+      >
+        <h2>Confirm it is you</h2>
+        <p>This action needs your password again.</p>
+        <input
+          type="password"
+          autoFocus
+          autoComplete="current-password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          aria-label="Password"
+        />
+        <div className="modal__actions">
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" disabled={password.length === 0}>
+            Confirm
+          </button>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 export function useSession(): SessionContextValue {
@@ -437,5 +579,5 @@ function hasErrorName(error: unknown, name: string): boolean {
 }
 
 function signedOut(error: string | null = null, errorCanRetry = false): SessionState {
-  return { identity: null, status: "signed-out", error, errorCanRetry };
+  return { identity: null, locked: null, status: "signed-out", error, errorCanRetry };
 }

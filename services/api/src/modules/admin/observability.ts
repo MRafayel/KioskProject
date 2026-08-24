@@ -1668,6 +1668,7 @@ export class AdminObservabilityService {
       take: ADMIN_PEOPLE_LIMIT,
       select: {
         id: true,
+        username: true,
         displayName: true,
         role: true,
         status: true,
@@ -1682,43 +1683,66 @@ export class AdminObservabilityService {
     const ids = operators.map((person) => person.id);
     if (ids.length === 0) return { items: [], kiosks: await this.assignableKiosks() };
 
-    // Four bounded queries rather than four per person. Everything here is
-    // keyed on `admin_user_id`, which is indexed on all four tables.
-    const [authenticators, sessions, scopes, tickets, kiosks] = await Promise.all([
-      this.options.database.adminAuthenticator.findMany({
-        where: { adminUserId: { in: ids }, revokedAt: null },
-        orderBy: { createdAt: "asc" },
-        select: {
-          id: true,
-          adminUserId: true,
-          label: true,
-          attachment: true,
-          backupEligible: true,
-          createdAt: true,
-          lastUsedAt: true
-        }
-      }),
-      this.options.database.adminSession.findMany({
-        where: {
-          adminUserId: { in: ids },
-          revokedAt: null,
-          idleExpiresAt: { gt: now },
-          hardExpiresAt: { gt: now }
-        },
-        select: { id: true, adminUserId: true }
-      }),
-      this.options.database.adminKioskScope.findMany({
-        where: { adminUserId: { in: ids }, revokedAt: null },
-        orderBy: { kioskId: "asc" },
-        select: { adminUserId: true, kioskId: true }
-      }),
-      this.options.database.adminEnrollmentTicket.findMany({
-        where: { adminUserId: { in: ids }, consumedAt: null, expiresAt: { gt: now } },
-        orderBy: { expiresAt: "desc" },
-        select: { adminUserId: true, expiresAt: true }
-      }),
-      this.assignableKiosks()
-    ]);
+    // Bounded queries rather than several per person. Everything here is
+    // keyed on `admin_user_id`, which is indexed on every one of these tables.
+    const [authenticators, sessions, scopes, passwords, invitations, resets, kiosks] =
+      await Promise.all([
+        this.options.database.adminAuthenticator.findMany({
+          where: { adminUserId: { in: ids }, revokedAt: null },
+          orderBy: { createdAt: "asc" },
+          select: {
+            id: true,
+            adminUserId: true,
+            label: true,
+            attachment: true,
+            backupEligible: true,
+            createdAt: true,
+            lastUsedAt: true
+          }
+        }),
+        // A locked session is still a live credential — it can be reopened —
+        // so it counts. Only revocation and the absolute limit end one.
+        this.options.database.adminSession.findMany({
+          where: {
+            adminUserId: { in: ids },
+            revokedAt: null,
+            hardExpiresAt: { gt: now }
+          },
+          select: { id: true, adminUserId: true }
+        }),
+        this.options.database.adminKioskScope.findMany({
+          where: { adminUserId: { in: ids }, revokedAt: null },
+          orderBy: { kioskId: "asc" },
+          select: { adminUserId: true, kioskId: true }
+        }),
+        // Presence only. The reader role's grant stops at `admin_user_id`, so
+        // this query could not fetch a digest even if it asked.
+        this.options.database.adminPassword.findMany({
+          where: { adminUserId: { in: ids } },
+          select: { adminUserId: true }
+        }),
+        this.options.database.adminInvitation.findMany({
+          where: {
+            adminUserId: { in: ids },
+            consumedAt: null,
+            revokedAt: null,
+            expiresAt: { gt: now }
+          },
+          orderBy: { expiresAt: "desc" },
+          select: { adminUserId: true, expiresAt: true }
+        }),
+        this.options.database.adminPasswordReset.findMany({
+          where: {
+            adminUserId: { in: ids },
+            consumedAt: null,
+            revokedAt: null,
+            expiresAt: { gt: now }
+          },
+          orderBy: { expiresAt: "desc" },
+          select: { adminUserId: true, expiresAt: true }
+        }),
+        this.assignableKiosks()
+      ]);
 
     const byPerson = <TRow extends { adminUserId: string }>(rows: readonly TRow[]) => {
       const grouped = new Map<string, TRow[]>();
@@ -1733,14 +1757,18 @@ export class AdminObservabilityService {
     const keysByPerson = byPerson(authenticators);
     const sessionsByPerson = byPerson(sessions);
     const scopesByPerson = byPerson(scopes);
-    const ticketsByPerson = byPerson(tickets);
+    const passwordByPerson = new Set(passwords.map((row) => row.adminUserId));
+    const invitationsByPerson = byPerson(invitations);
+    const resetsByPerson = byPerson(resets);
 
     return {
       items: operators.map((person) => {
         const keys = keysByPerson.get(person.id) ?? [];
-        const live = ticketsByPerson.get(person.id) ?? [];
+        const liveInvitations = invitationsByPerson.get(person.id) ?? [];
+        const liveResets = resetsByPerson.get(person.id) ?? [];
         return {
           adminUserId: person.id,
+          username: person.username,
           displayName: person.displayName,
           role: asAdminRole(person.role),
           status: asAdminUserStatus(person.status),
@@ -1749,6 +1777,7 @@ export class AdminObservabilityService {
           suspendedAt: person.suspendedAt?.toISOString() ?? null,
           disabledAt: person.disabledAt?.toISOString() ?? null,
           lastLoginAt: person.lastLoginAt?.toISOString() ?? null,
+          passwordSet: passwordByPerson.has(person.id),
           usableAuthenticators: keys.length,
           minimumAuthenticators: minimumAuthenticators(asAdminRole(person.role)),
           authenticators: keys.map((key) => ({
@@ -1761,8 +1790,8 @@ export class AdminObservabilityService {
           })),
           activeSessions: (sessionsByPerson.get(person.id) ?? []).length,
           kioskIds: (scopesByPerson.get(person.id) ?? []).map((scope) => scope.kioskId),
-          liveEnrollmentTickets: live.length,
-          enrollmentTicketExpiresAt: live[0]?.expiresAt.toISOString() ?? null
+          pendingInvitationExpiresAt: liveInvitations[0]?.expiresAt.toISOString() ?? null,
+          pendingPasswordResetExpiresAt: liveResets[0]?.expiresAt.toISOString() ?? null
         };
       }),
       kiosks

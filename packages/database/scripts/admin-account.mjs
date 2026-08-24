@@ -10,16 +10,22 @@
  *
  * Usage:
  *
- *   node scripts/admin-account.mjs create --name "Ada" --role TECHNICAL_ADMIN
+ *   node scripts/admin-account.mjs bootstrap-technical-admin --name "Ada" --username ada
+ *   node scripts/admin-account.mjs create --name "Ada" --username ada --role OPERATOR
+ *   node scripts/admin-account.mjs invite --admin-user <uuid>
+ *   node scripts/admin-account.mjs reset-password --admin-user <uuid>
  *   node scripts/admin-account.mjs break-glass --admin-user <uuid> --label "safe A"
+ *   node scripts/admin-account.mjs set-username --admin-user <uuid> --username ada
  *   node scripts/admin-account.mjs list
  *   node scripts/admin-account.mjs suspend --admin-user <uuid>
  *   node scripts/admin-account.mjs resume --admin-user <uuid>
  *
- * A created account is PROVISIONING and can do nothing until the person uses a
- * break-glass code to enrol their first security key and then enrols a second.
- * That is the only bootstrap path, and it is the same path used to recover an
- * account that has lost every key.
+ * A created account is PROVISIONING and can do nothing until the person
+ * accepts an invitation: sets their password and, for privileged roles, enrols
+ * a security key. `bootstrap-technical-admin` is `create` + `invite` for the
+ * first Technical Administrator, and refuses to run while a working Technical
+ * Admin exists — day-to-day accounts are invited from the dashboard, and this
+ * must not become the alternative registration path.
  *
  * Like the other scripts here it speaks SQL directly rather than through the
  * generated client, so it runs from a checkout without a build step.
@@ -47,16 +53,23 @@ const workspaceDirectory = dirname(dirname(packageDirectory));
 loadDotenv({ path: `${workspaceDirectory}/.env`, override: false, quiet: true });
 
 const BREAK_GLASS_PURPOSE = "printing-kiosk/admin-break-glass/v1";
+// Must match `services/api/src/modules/admin/crypto.ts` byte for byte: the API
+// is what redeems these codes.
+const INVITATION_PURPOSE = "printing-kiosk/admin-invitation/v1";
+const PASSWORD_RESET_PURPOSE = "printing-kiosk/admin-password-reset/v1";
 const ROLES = ["OPERATOR", "ADMIN", "TECHNICAL_ADMIN"];
+const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/u;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     name: { type: "string" },
+    username: { type: "string" },
     role: { type: "string" },
     "admin-user": { type: "string" },
     label: { type: "string" },
-    "expires-days": { type: "string" }
+    "expires-days": { type: "string" },
+    force: { type: "boolean" }
   }
 });
 
@@ -71,6 +84,18 @@ try {
   switch (command) {
     case "create":
       await create();
+      break;
+    case "bootstrap-technical-admin":
+      await bootstrapTechnicalAdmin();
+      break;
+    case "invite":
+      await invite();
+      break;
+    case "reset-password":
+      await resetPassword();
+      break;
+    case "set-username":
+      await setUsername();
       break;
     case "break-glass":
       await issueBreakGlass();
@@ -93,41 +118,289 @@ try {
     default:
       fail(
         "Usage: admin-account.mjs " +
-          "<create|break-glass|revoke-break-glass|list|suspend|resume|disable> [options]"
+          "<create|bootstrap-technical-admin|invite|reset-password|set-username|" +
+          "break-glass|revoke-break-glass|list|suspend|resume|disable> [options]"
       );
   }
 } finally {
   await client.end();
 }
 
-async function create() {
-  const name = validated(() => normalizeRequiredOption(values.name, "--name", 120));
-  const role = values.role;
-  if (!role || !ROLES.includes(role)) fail(`--role must be one of ${ROLES.join(", ")}.`);
+function normalizeUsername(value) {
+  const username = (value ?? "").trim().toLowerCase();
+  if (!USERNAME_PATTERN.test(username)) {
+    throw new Error(
+      "--username must be 3-32 characters: lowercase letters, digits, and . _ - between them."
+    );
+  }
+  return username;
+}
 
-  const id = randomUUID();
+function oneTimeGrantPepper() {
+  const pepper = process.env.ADMIN_BREAK_GLASS_PEPPER;
+  if (!pepper || pepper.length < 32) {
+    fail("ADMIN_BREAK_GLASS_PEPPER must be set to the value the API uses.");
+  }
+  return pepper;
+}
+
+function digestOneTimeCode(purpose, secret, pepper) {
+  return createHmac("sha256", pepper)
+    .update(purpose, "utf8")
+    .update("\0", "utf8")
+    .update(secret, "utf8")
+    .digest("hex");
+}
+
+/** CLI acts are audited like panel acts, under their own actor type. */
+async function writeCliAuditEvent(action, metadata) {
   await client.query(
-    `INSERT INTO "admin_users" ("id", "user_handle", "display_name", "role", "status")
-     VALUES ($1, $2, $3, $4, 'PROVISIONING')`,
-    // 32 random bytes. Opaque and stable: never an email address, so a stolen
-    // authenticator database reveals no identities.
-    [id, randomBytes(32), name, role]
+    `INSERT INTO "audit_events" ("id", "actor_type", "actor_id", "action", "outcome", "metadata")
+     VALUES ($1, 'ADMIN_CLI', 'cli', $2, 'SUCCESS', $3::jsonb)`,
+    [randomUUID(), action, JSON.stringify(metadata)]
   );
+}
+
+async function createProvisioningAccount(name, username, role) {
+  const id = randomUUID();
+  try {
+    await client.query(
+      `INSERT INTO "admin_users" ("id", "user_handle", "username", "display_name", "role", "status")
+       VALUES ($1, $2, $3, $4, $5, 'PROVISIONING')`,
+      // 32 random bytes. Opaque and stable: never an email address, so a stolen
+      // authenticator database reveals no identities.
+      [id, randomBytes(32), username, name, role]
+    );
+  } catch (error) {
+    if (error && error.code === "23505") fail(`The username "${username}" is already in use.`);
+    throw error;
+  }
+  return id;
+}
+
+/**
+ * Issue (or replace) the invitation for a PROVISIONING account and print the
+ * code. The database keeps only a digest; losing the printed code means
+ * running this again.
+ */
+async function issueInvitationFor(adminUserId, { quiet = false } = {}) {
+  const pepper = oneTimeGrantPepper();
+  const ttlHours = Number(process.env.ADMIN_INVITATION_TTL_HOURS ?? "72");
+  if (!Number.isInteger(ttlHours) || ttlHours < 1) {
+    fail("ADMIN_INVITATION_TTL_HOURS must be a positive whole number of hours.");
+  }
+
+  const secret = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + ttlHours * 3_600_000);
+  let user;
+
+  await client.query("BEGIN");
+  try {
+    const found = await client.query(
+      `SELECT "display_name", "username", "role", "status"
+       FROM "admin_users" WHERE "id" = $1::uuid FOR UPDATE`,
+      [adminUserId]
+    );
+    if (found.rowCount !== 1) throw new Error("No such admin account.");
+    user = found.rows[0];
+    if (user.status !== "PROVISIONING") {
+      throw new Error(
+        "Only a PROVISIONING account can be invited. An active account that lost " +
+          "its password needs `reset-password` instead."
+      );
+    }
+
+    await client.query(
+      `UPDATE "admin_invitations" SET "revoked_at" = now()
+       WHERE "admin_user_id" = $1::uuid AND "consumed_at" IS NULL AND "revoked_at" IS NULL`,
+      [adminUserId]
+    );
+    await client.query(
+      `INSERT INTO "admin_invitations"
+         ("id", "admin_user_id", "secret_digest", "reason", "expires_at")
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        randomUUID(),
+        adminUserId,
+        digestOneTimeCode(INVITATION_PURPOSE, secret, pepper),
+        "Issued from the account CLI.",
+        expiresAt
+      ]
+    );
+    await writeCliAuditEvent("admin.invitation.create", {
+      targetAdminUserId: adminUserId,
+      targetRole: user.role,
+      invitationExpiresAt: expiresAt.toISOString()
+    });
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    fail(error instanceof Error ? error.message : "Could not issue an invitation.");
+  }
+
+  if (!quiet) {
+    process.stdout.write(
+      [
+        "",
+        "  INVITATION CODE — shown once, never stored, never recoverable",
+        "",
+        `  ${secret}`,
+        "",
+        `  account : ${user.display_name} (${user.role})`,
+        `  username: ${user.username}`,
+        `  expires : ${expiresAt.toISOString()}`,
+        "",
+        "  Hand it to the person securely. On the dashboard sign-in screen they",
+        '  choose "I have an invitation code", set their password, and — for',
+        "  privileged roles — enrol a security key. The code dies when the",
+        "  account activates, when it expires, or when a new one is issued.",
+        ""
+      ].join("\n")
+    );
+  }
+  return secret;
+}
+
+async function bootstrapTechnicalAdmin() {
+  const name = validated(() => normalizeRequiredOption(values.name, "--name", 120));
+  const username = validated(() => normalizeUsername(values.username));
+
+  // The bootstrap exists for an empty system. Once a Technical Admin can sign
+  // in — or is one accepted invitation away from it — new accounts come from
+  // the dashboard, where an authorized person creates them behind a step-up
+  // ceremony and an audit trail.
+  const existing = await client.query(
+    `SELECT count(*)::int AS "count" FROM "admin_users"
+     WHERE "role" = 'TECHNICAL_ADMIN' AND "status" IN ('PROVISIONING', 'ACTIVE')`
+  );
+  if (existing.rows[0].count > 0 && !values.force) {
+    fail(
+      "A Technical Admin already exists. Invite further accounts from the dashboard\n" +
+        "(People section), or pass --force if every Technical Admin is truly\n" +
+        "unrecoverable and this is a deliberate re-bootstrap."
+    );
+  }
+
+  const id = await createProvisioningAccount(name, username, "TECHNICAL_ADMIN");
+  process.stdout.write(`Created TECHNICAL_ADMIN account for ${name} (${username}): ${id}\n`);
+  await issueInvitationFor(id);
+}
+
+async function invite() {
+  const adminUserId = validated(() => normalizeAdminUserId(values["admin-user"]));
+  await issueInvitationFor(adminUserId);
+}
+
+async function resetPassword() {
+  const adminUserId = validated(() => normalizeAdminUserId(values["admin-user"]));
+  const pepper = oneTimeGrantPepper();
+  const ttlMinutes = Number(process.env.ADMIN_PASSWORD_RESET_TTL_MINUTES ?? "60");
+  if (!Number.isInteger(ttlMinutes) || ttlMinutes < 5) {
+    fail("ADMIN_PASSWORD_RESET_TTL_MINUTES must be at least 5.");
+  }
+
+  const secret = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
+  let user;
+
+  await client.query("BEGIN");
+  try {
+    const found = await client.query(
+      `SELECT "display_name", "username", "role", "status"
+       FROM "admin_users" WHERE "id" = $1::uuid FOR UPDATE`,
+      [adminUserId]
+    );
+    if (found.rowCount !== 1) throw new Error("No such admin account.");
+    user = found.rows[0];
+    if (user.status !== "ACTIVE") {
+      throw new Error(
+        "Only an ACTIVE account's password can be reset. A PROVISIONING account " +
+          "needs `invite`; a suspended one needs `resume` first."
+      );
+    }
+
+    await client.query(
+      `UPDATE "admin_password_resets" SET "revoked_at" = now()
+       WHERE "admin_user_id" = $1::uuid AND "consumed_at" IS NULL AND "revoked_at" IS NULL`,
+      [adminUserId]
+    );
+    await client.query(
+      `INSERT INTO "admin_password_resets"
+         ("id", "admin_user_id", "secret_digest", "reason", "expires_at")
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        randomUUID(),
+        adminUserId,
+        digestOneTimeCode(PASSWORD_RESET_PURPOSE, secret, pepper),
+        "Issued from the account CLI.",
+        expiresAt
+      ]
+    );
+    await writeCliAuditEvent("admin.password_reset.issue", {
+      targetAdminUserId: adminUserId,
+      targetRole: user.role,
+      resetExpiresAt: expiresAt.toISOString()
+    });
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    fail(error instanceof Error ? error.message : "Could not issue a reset code.");
+  }
 
   process.stdout.write(
     [
-      `Created ${role} account for ${name}.`,
+      "",
+      "  PASSWORD RESET CODE — shown once, never stored, never recoverable",
+      "",
+      `  ${secret}`,
+      "",
+      `  account : ${user.display_name} (${user.role})`,
+      `  username: ${user.username}`,
+      `  expires : ${expiresAt.toISOString()}`,
+      "",
+      '  On the sign-in screen the person chooses "I have a reset code" and',
+      "  sets a new password. Completing it signs the account out everywhere.",
+      "  WebAuthn keys are untouched: a privileged sign-in still needs theirs.",
+      ""
+    ].join("\n")
+  );
+}
+
+async function setUsername() {
+  const adminUserId = validated(() => normalizeAdminUserId(values["admin-user"]));
+  const username = validated(() => normalizeUsername(values.username));
+  try {
+    const updated = await client.query(
+      `UPDATE "admin_users" SET "username" = $2, "updated_at" = now() WHERE "id" = $1::uuid`,
+      [adminUserId, username]
+    );
+    if (updated.rowCount !== 1) fail("No such admin account.");
+  } catch (error) {
+    if (error && error.code === "23505") fail(`The username "${username}" is already in use.`);
+    throw error;
+  }
+  process.stdout.write(`Account ${adminUserId} now signs in as "${username}".\n`);
+}
+
+async function create() {
+  const name = validated(() => normalizeRequiredOption(values.name, "--name", 120));
+  const username = validated(() => normalizeUsername(values.username));
+  const role = values.role;
+  if (!role || !ROLES.includes(role)) fail(`--role must be one of ${ROLES.join(", ")}.`);
+
+  const id = await createProvisioningAccount(name, username, role);
+
+  process.stdout.write(
+    [
+      `Created ${role} account for ${name} (${username}).`,
       `  admin user id: ${id}`,
       "",
-      "The account is PROVISIONING and cannot sign in yet.",
-      "Issue two one-time bootstrap codes, one for each initial security key:",
+      "The account is PROVISIONING and cannot sign in yet. Hand it over with:",
       "",
-      `  pnpm db:admin break-glass --admin-user ${id} --label "initial key A"`,
-      `  pnpm db:admin break-glass --admin-user ${id} --label "initial key B"`,
+      `  pnpm db:admin invite --admin-user ${id}`,
       "",
-      "Each code authorises exactly one enrolment. The account activates only",
-      "after both keys are enrolled; it cannot sign in between them.",
-      "After activation, issue fresh codes for the sealed recovery envelopes.",
+      "(Ordinary accounts are better invited from the dashboard's People",
+      "section, which records who authorised them.)",
       ""
     ].join("\n")
   );
@@ -233,17 +506,20 @@ async function revokeBreakGlass() {
 
 async function list() {
   const result = await client.query(
-    `SELECT u."id", u."status", u."role", u."display_name",
-            count(a."id") FILTER (WHERE a."revoked_at" IS NULL) AS "usable_keys"
+    `SELECT u."id", u."status", u."role", u."username", u."display_name",
+            count(a."id") FILTER (WHERE a."revoked_at" IS NULL) AS "usable_keys",
+            (p."admin_user_id" IS NOT NULL) AS "has_password"
      FROM "admin_users" u
      LEFT JOIN "admin_authenticators" a ON a."admin_user_id" = u."id"
-     GROUP BY u."id"
+     LEFT JOIN "admin_passwords" p ON p."admin_user_id" = u."id"
+     GROUP BY u."id", p."admin_user_id"
      ORDER BY u."created_at" ASC`
   );
 
   for (const row of result.rows) {
     process.stdout.write(
       `${row.id}  ${row.status.padEnd(12)} ${row.role.padEnd(16)} ` +
+        `${String(row.username).padEnd(20)} password=${row.has_password ? "yes" : "no "} ` +
         `keys=${row.usable_keys}  ${row.display_name}\n`
     );
   }

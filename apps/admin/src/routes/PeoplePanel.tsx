@@ -1,12 +1,15 @@
 import { useCallback, useState } from "react";
 
-import type {
-  AdminPeopleResponse,
-  AdminPerson,
-  AdminStatusAction
+import {
+  invitableRoles,
+  type AdminPeopleResponse,
+  type AdminPerson,
+  type AdminRole,
+  type AdminStatusAction
 } from "@printing-kiosk/admin-access";
 
 import { useSession } from "../features/auth/SessionProvider.js";
+import { adminApi } from "../features/auth/api.js";
 import { observabilityApi } from "../features/observability/api.js";
 import { Empty, Identifier, When } from "../features/observability/components.js";
 import { useAdminAction } from "../features/observability/useAdminAction.js";
@@ -15,17 +18,18 @@ import { useAdminData } from "../features/observability/useAdminData.js";
 /**
  * The Operators, and what can be done about them.
  *
- * Two capabilities feed this screen and they draw different things. An Admin
- * holds both and sees everything below. A Technical Admin holds only
- * `authenticator.manage.operator`, so it sees the same roster with the same key
- * controls and no status or kiosk controls at all — it can get somebody onto a
- * key, and it cannot decide whether they may work or where.
+ * Several capabilities feed this screen and they draw different things. An
+ * Admin holds them all and sees everything below. A Technical Admin holds
+ * `authenticator.manage.operator`, `invitation.manage` and `recovery.manage`
+ * but not `operator.manage`, so it can bring somebody in and get them back
+ * into their account, and still cannot decide whether they may work or where.
  *
  * The screen is written to make three things hard to do by accident. Suspending
  * somebody says how many sessions it will end before it ends them. Retiring a
- * key is refused, visibly, when it would leave an active account unable to sign
- * in. And an enrolment code is shown exactly once, on a panel that says so, next
- * to the instruction that it goes to the person by voice rather than by message.
+ * key is refused, visibly, when it would leave an account without the second
+ * factor its role signs in with. And a one-time code — an invitation or a
+ * password reset — is shown exactly once, on a panel that says so, next to the
+ * instruction that it goes to the person directly rather than by message.
  *
  * Only Operators appear, because the capabilities behind it reach nothing else.
  * A screen listing Admins with every control disabled would be a screen telling
@@ -34,8 +38,8 @@ import { useAdminData } from "../features/observability/useAdminData.js";
 
 const STATUS_LABELS: Readonly<Record<string, { label: string; hint: string }>> = {
   PROVISIONING: {
-    label: "Awaiting keys",
-    hint: "Cannot sign in yet. Needs its security keys enrolled."
+    label: "Setting up",
+    hint: "Cannot sign in yet. Waiting for the invitation to be accepted."
   },
   ACTIVE: { label: "Active", hint: "Can sign in and work." },
   SUSPENDED: { label: "Suspended", hint: "Cannot sign in. Access can be given back." },
@@ -46,9 +50,12 @@ export function PeoplePanel() {
   const session = useSession();
   const load = useCallback(() => observabilityApi.people(), []);
   const state = useAdminData<AdminPeopleResponse>(load);
+  const [inviting, setInviting] = useState(false);
 
   const canManage = session.can("operator.manage");
   const canManageKeys = session.can("authenticator.manage.operator");
+  const canInvite = session.can("invitation.manage");
+  const canRecover = session.can("recovery.manage");
 
   if (state.error) {
     return (
@@ -67,23 +74,37 @@ export function PeoplePanel() {
     <section className="panel">
       <header className="panel__header">
         <h2>People</h2>
-        <button type="button" onClick={state.reload} disabled={state.loading}>
-          Refresh
-        </button>
+        <div className="panel__actions">
+          {canInvite ? (
+            <button type="button" onClick={() => setInviting((current) => !current)}>
+              {inviting ? "Close" : "Invite somebody"}
+            </button>
+          ) : null}
+          <button type="button" onClick={state.reload} disabled={state.loading}>
+            Refresh
+          </button>
+        </div>
       </header>
 
       {canManage ? null : (
         <p className="panel__hint">
-          Your role can get an Operator onto a security key and retire one. Suspending an account
-          and changing which kiosks somebody covers are held by Admins.
+          Your role can bring somebody in, help them back into their account, and retire a key.
+          Suspending an account and changing which kiosks somebody covers are held by Admins.
         </p>
       )}
 
+      {inviting && canInvite ? (
+        <InvitationForm
+          onClose={() => setInviting(false)}
+          onCreated={state.reload}
+          invitableRoles={session.identity ? invitableRoles(session.identity.role) : []}
+        />
+      ) : null}
+
       {data.items.length === 0 ? (
         <Empty>
-          No Operator accounts exist yet. Accounts are created with{" "}
-          <code>pnpm db:admin create</code>; this screen is where they are given a kiosk and a way
-          to enrol their first key.
+          No Operator accounts exist yet. Use <strong>Invite somebody</strong> above: it creates the
+          account and a one-time code they use to set a password.
         </Empty>
       ) : (
         <ul className="people">
@@ -94,6 +115,8 @@ export function PeoplePanel() {
               kiosks={data.kiosks}
               canManage={canManage}
               canManageKeys={canManageKeys}
+              canInvite={canInvite}
+              canRecover={canRecover}
               onChanged={state.reload}
             />
           ))}
@@ -103,20 +126,208 @@ export function PeoplePanel() {
   );
 }
 
+/**
+ * Creating an account and the code that hands it over.
+ *
+ * The account exists from the moment this succeeds, holding the role chosen
+ * here — acceptance decides nothing, it only proves the code and supplies the
+ * factors. The role list comes from the shared matrix, so an Admin is offered
+ * Operator and nothing else, and the server refuses anything wider regardless
+ * of what this form draws.
+ */
+function InvitationForm({
+  onClose,
+  onCreated,
+  invitableRoles: roles
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+  invitableRoles: readonly AdminRole[];
+}) {
+  const [displayName, setDisplayName] = useState("");
+  const [username, setUsername] = useState("");
+  const [role, setRole] = useState<AdminRole>(roles[0] ?? "OPERATOR");
+  const [reason, setReason] = useState("");
+  const [issued, setIssued] = useState<{
+    code: string;
+    expiresAt: string;
+    username: string;
+  } | null>(null);
+
+  const action = useAdminAction<{
+    displayName: string;
+    username: string;
+    role: AdminRole;
+    reason: string;
+  }>(
+    useCallback(async (input) => {
+      const invitation = await adminApi.createInvitation({
+        displayName: input.displayName.trim(),
+        username: input.username.trim().toLowerCase(),
+        role: input.role,
+        reason: input.reason.trim()
+      });
+      setIssued({
+        code: invitation.invitationCode,
+        expiresAt: invitation.expiresAt,
+        username: invitation.username
+      });
+      return invitation;
+    }, [])
+  );
+
+  const trimmedReason = reason.trim();
+  const ready =
+    displayName.trim().length > 0 &&
+    username.trim().length >= 3 &&
+    trimmedReason.length >= 8 &&
+    !action.state.running;
+
+  if (issued) {
+    return (
+      <div className="resolve enrollment-ticket">
+        <h3>Invitation code for {displayName}</h3>
+        <p className="enrollment-ticket__code">
+          <code>{issued.code}</code>
+        </p>
+        <p className="resolve__money" role="note">
+          <strong>This is shown once.</strong> It cannot be looked up again — issue another if it is
+          lost. Hand it over directly rather than sending it. It expires{" "}
+          <When value={issued.expiresAt} />.
+        </p>
+        <p className="resolve__optional">
+          They enter it on the sign-in screen under &ldquo;I have an invitation code&rdquo;, set
+          their password, and — for privileged roles — enrol a security key. They will sign in as{" "}
+          <strong>{issued.username}</strong>.
+        </p>
+        <div className="resolve__actions">
+          <button
+            type="button"
+            onClick={() => {
+              setIssued(null);
+              onCreated();
+              onClose();
+            }}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      className="resolve"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!ready) return;
+        void action.run({ displayName, username, role, reason });
+      }}
+    >
+      <h3>Invite somebody</h3>
+      <p className="resolve__optional">
+        Creates the account and a one-time code. Nothing here sets a password — only the person does
+        that, and nobody else ever sees it.
+      </p>
+
+      <label className="resolve__field">
+        Their name
+        <input
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+          maxLength={120}
+          placeholder="Ada Lovelace"
+        />
+      </label>
+
+      <label className="resolve__field">
+        Username
+        <input
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          maxLength={32}
+          autoCapitalize="none"
+          spellCheck={false}
+          placeholder="ada"
+        />
+        <small className="resolve__optional">
+          Lowercase letters, digits, and . _ - between them. This is what they type to sign in.
+        </small>
+      </label>
+
+      <label className="resolve__field">
+        Role
+        <select value={role} onChange={(event) => setRole(event.target.value as AdminRole)}>
+          {roles.map((option) => (
+            <option key={option} value={option}>
+              {option === "OPERATOR"
+                ? "Operator"
+                : option === "ADMIN"
+                  ? "Admin"
+                  : "Technical Admin"}
+            </option>
+          ))}
+        </select>
+        <small className="resolve__optional">
+          {role === "OPERATOR"
+            ? "Signs in with a password."
+            : "Signs in with a password and a security key, which they enrol when they accept."}
+        </small>
+      </label>
+
+      <label className="resolve__field">
+        Why
+        <textarea
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          rows={2}
+          maxLength={280}
+          placeholder="New operator at the central branch, starting Monday."
+        />
+        <small className="resolve__optional">
+          {trimmedReason.length < 8 ? "A few words at least." : `${trimmedReason.length}/280`}
+        </small>
+      </label>
+
+      {action.state.error ? (
+        <p className="resolve__error" role="alert">
+          {action.state.error}
+        </p>
+      ) : null}
+
+      <div className="resolve__actions">
+        <button type="submit" disabled={!ready}>
+          {action.state.running ? "Creating…" : "Create account and code"}
+        </button>
+        <button type="button" className="button-quiet" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function PersonRow({
   person,
   kiosks,
   canManage,
   canManageKeys,
+  canInvite,
+  canRecover,
   onChanged
 }: {
   person: AdminPerson;
   kiosks: AdminPeopleResponse["kiosks"];
   canManage: boolean;
   canManageKeys: boolean;
+  canInvite: boolean;
+  canRecover: boolean;
   onChanged: () => void;
 }) {
-  const [open, setOpen] = useState<"status" | "kiosks" | "sessions" | "ticket" | null>(null);
+  const [open, setOpen] = useState<
+    "status" | "kiosks" | "sessions" | "invitation" | "reset" | null
+  >(null);
   const status = STATUS_LABELS[person.status] ?? { label: person.status, hint: "" };
   const belowMinimum = person.usableAuthenticators < person.minimumAuthenticators;
 
@@ -125,6 +336,7 @@ function PersonRow({
       <div className="people__identity">
         <p className="people__name">
           <strong>{person.displayName}</strong>
+          <span className="key-list__meta"> {person.username}</span>
           <span className={`people__status people__status--${person.status.toLowerCase()}`}>
             {status.label}
           </span>
@@ -145,7 +357,10 @@ function PersonRow({
 
       <div className="people__facts">
         <p>
-          {person.usableAuthenticators} of {person.minimumAuthenticators} security key(s)
+          {person.passwordSet ? "Password set" : "No password yet"}
+          {person.minimumAuthenticators > 0 || person.usableAuthenticators > 0
+            ? ` · ${person.usableAuthenticators} security key(s)`
+            : ""}
           {belowMinimum ? " — below the minimum for this role" : ""}
         </p>
         <p className="key-list__meta">
@@ -156,24 +371,33 @@ function PersonRow({
             ? "No kiosks assigned, so this account can act on none."
             : `Covers ${person.kioskIds.join(", ")}.`}
         </p>
-        {person.liveEnrollmentTickets > 0 ? (
+        {person.pendingInvitationExpiresAt ? (
           <p className="people__ticket-warning" role="note">
-            {person.liveEnrollmentTickets} enrolment ticket(s) outstanding
-            {person.enrollmentTicketExpiresAt ? (
-              <>
-                {" "}
-                until <When value={person.enrollmentTicketExpiresAt} />
-              </>
-            ) : null}
-            . Anybody holding one can put a key on this account.
+            An invitation code is outstanding until{" "}
+            <When value={person.pendingInvitationExpiresAt} />. Anybody holding it can set this
+            account&rsquo;s password.
+          </p>
+        ) : null}
+        {person.pendingPasswordResetExpiresAt ? (
+          <p className="people__ticket-warning" role="note">
+            A password reset code is outstanding until{" "}
+            <When value={person.pendingPasswordResetExpiresAt} />.
           </p>
         ) : null}
       </div>
 
       <div className="people__controls">
-        {canManageKeys && person.status === "PROVISIONING" ? (
-          <button type="button" onClick={() => setOpen(open === "ticket" ? null : "ticket")}>
-            Issue an enrolment code
+        {canInvite && person.status === "PROVISIONING" ? (
+          <button
+            type="button"
+            onClick={() => setOpen(open === "invitation" ? null : "invitation")}
+          >
+            New invitation code
+          </button>
+        ) : null}
+        {canRecover && person.status === "ACTIVE" ? (
+          <button type="button" onClick={() => setOpen(open === "reset" ? null : "reset")}>
+            Reset password
           </button>
         ) : null}
         {canManage && person.status !== "DISABLED" ? (
@@ -201,8 +425,21 @@ function PersonRow({
         ) : null}
       </div>
 
-      {open === "ticket" ? (
-        <EnrollmentTicketForm person={person} onClose={() => setOpen(null)} onIssued={onChanged} />
+      {open === "invitation" ? (
+        <OneTimeCodeForm
+          person={person}
+          kind="invitation"
+          onClose={() => setOpen(null)}
+          onIssued={onChanged}
+        />
+      ) : null}
+      {open === "reset" ? (
+        <OneTimeCodeForm
+          person={person}
+          kind="reset"
+          onClose={() => setOpen(null)}
+          onIssued={onChanged}
+        />
       ) : null}
       {open === "status" ? (
         <StatusForm
@@ -522,19 +759,23 @@ function SessionsForm({
 }
 
 /**
- * Minting the code that lets somebody enrol their first key.
+ * Minting a one-time code for somebody else: a fresh invitation, or a password
+ * reset.
  *
- * The code appears once. Everything about this component is arranged around
- * that: it is shown on its own, in full, with the expiry beside it and an
- * instruction about how to hand it over — and once the panel is closed there is
- * no way back to it, because the server kept only a digest.
+ * One component for both because they are the same act with different words —
+ * a code that appears exactly once, goes to a person directly, and cannot be
+ * looked up afterwards because the server kept only a digest. What differs is
+ * which account state it applies to and what the person does with it, and both
+ * of those are text.
  */
-function EnrollmentTicketForm({
+function OneTimeCodeForm({
   person,
+  kind,
   onClose,
   onIssued
 }: {
   person: AdminPerson;
+  kind: "invitation" | "reset";
   onClose: () => void;
   onIssued: () => void;
 }) {
@@ -544,35 +785,53 @@ function EnrollmentTicketForm({
   const action = useAdminAction<{ reason: string }>(
     useCallback(
       async (input) => {
-        const ticket = await observabilityApi.issueEnrollmentTicket(person.adminUserId, {
-          reason: input.reason.trim()
-        });
-        setIssued({ code: ticket.enrollmentCode, expiresAt: ticket.expiresAt });
-        return ticket;
+        if (kind === "invitation") {
+          const invitation = await adminApi.reissueInvitation(
+            person.adminUserId,
+            input.reason.trim()
+          );
+          setIssued({ code: invitation.invitationCode, expiresAt: invitation.expiresAt });
+          return invitation;
+        }
+        const reset = await adminApi.issuePasswordReset(person.adminUserId, input.reason.trim());
+        setIssued({ code: reset.resetCode, expiresAt: reset.expiresAt });
+        return reset;
       },
-      [person.adminUserId]
+      [kind, person.adminUserId]
     )
   );
 
   const trimmed = reason.trim();
   const ready = trimmed.length >= 8 && !action.state.running;
+  const isInvitation = kind === "invitation";
 
   if (issued) {
     return (
       <div className="resolve enrollment-ticket">
-        <h3>Enrolment code for {person.displayName}</h3>
+        <h3>
+          {isInvitation ? "Invitation code" : "Password reset code"} for {person.displayName}
+        </h3>
         <p className="enrollment-ticket__code">
           <code>{issued.code}</code>
         </p>
         <p className="resolve__money" role="note">
           <strong>This is shown once.</strong> It cannot be looked up again — issue another if it is
-          lost. Read it to {person.displayName} yourself rather than sending it, and watch them
-          enrol. Anybody who has it can put a security key on this account until it expires{" "}
+          lost. Hand it over directly rather than sending it. It expires{" "}
           <When value={issued.expiresAt} />.
         </p>
         <p className="resolve__optional">
-          They enter it on the sign-in screen under &ldquo;I have an enrolment code&rdquo;. It
-          enrols one key and signs nobody in; the account stays awaiting keys until it has enough.
+          {isInvitation ? (
+            <>
+              They enter it on the sign-in screen under &ldquo;I have an invitation code&rdquo; and
+              set their password. Any earlier invitation for this account has been revoked.
+            </>
+          ) : (
+            <>
+              They enter it under &ldquo;I have a password reset code&rdquo; and choose a new
+              password — you never see it. Completing it signs the account out everywhere; their
+              security keys are untouched.
+            </>
+          )}
         </p>
         <div className="resolve__actions">
           <button
@@ -599,11 +858,15 @@ function EnrollmentTicketForm({
         void action.run({ reason });
       }}
     >
-      <h3>Issue an enrolment code for {person.displayName}</h3>
+      <h3>
+        {isInvitation
+          ? `Issue a new invitation code for ${person.displayName}`
+          : `Reset ${person.displayName}'s password`}
+      </h3>
       <p className="resolve__optional">
-        Authorises one enrolment ceremony, for fifteen minutes, on this account only. It works only
-        while the account has no security key at all — a lost key is a recovery, which is the sealed
-        offline procedure and not this.
+        {isInvitation
+          ? "Replaces any code already outstanding for this account. Works only while the account is still being set up."
+          : "Issues a short-lived, single-use code. You never see or choose the password that results, and completing it ends every session the account holds."}
       </p>
 
       <label className="resolve__field">
@@ -613,7 +876,11 @@ function EnrollmentTicketForm({
           onChange={(event) => setReason(event.target.value)}
           rows={2}
           maxLength={280}
-          placeholder="First day; enrolling their key at the counter."
+          placeholder={
+            isInvitation
+              ? "The first code expired before they could use it."
+              : "Forgot their password; confirmed their identity in person."
+          }
         />
         <small className="resolve__optional">
           {trimmed.length < 8 ? "A few words at least." : `${trimmed.length}/280`}
@@ -641,9 +908,10 @@ function EnrollmentTicketForm({
 /**
  * One of somebody's keys, and the option to retire it.
  *
- * Disabled with a reason when the account is active and at its minimum. There
- * is no password in this system, so a revocation that leaves nothing behind is a
- * lockout rather than a cleanup — and the server refuses it either way.
+ * Disabled with a reason when the account is active and at its minimum — for a
+ * privileged role that means the last key, because removing it would leave a
+ * password as the only thing between the internet and an administrator
+ * account. The server refuses it either way.
  */
 function KeyRow({
   person,

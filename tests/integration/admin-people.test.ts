@@ -20,6 +20,7 @@ import {
   digestAdminCsrfToken,
   digestAdminSessionToken
 } from "../../services/api/src/modules/admin/crypto.js";
+import { hashPassword } from "../../services/api/src/modules/admin/passwords.js";
 import { assertSafeIntegrationEnvironment } from "./safety.js";
 
 /**
@@ -34,17 +35,20 @@ import { assertSafeIntegrationEnvironment } from "./safety.js";
  *   rather than in a handler — and it is asked that way below.
  *
  *   Can it manufacture an identity? It holds no INSERT on `admin_users`, none
- *   on `admin_authenticators` and none on `admin_sessions`. The only thing it
- *   can create that leads to a credential is a ticket, and a trigger confines
- *   that to an Operator account which has never held one.
+ *   on `admin_authenticators`, none on `admin_sessions`, and nothing at all on
+ *   the password and one-time-grant tables. Creating an account is an
+ *   invitation, which runs on the application connection behind its own
+ *   capability and role matrix.
  *
  *   Can it erase what it did? No DELETE anywhere, and no UPDATE on
  *   `audit_events`. Retiring a key, ending a session and taking a kiosk back
  *   are all timestamps on rows that stay.
  *
- *   Does the split between the two people capabilities hold? A Technical Admin
- *   can issue a ticket and retire a key; it is refused a suspension and a kiosk
- *   assignment, and the refusal is recorded.
+ *   Does the split between the people capabilities hold? A Technical Admin can
+ *   invite somebody and retire a key; it is refused a suspension and a kiosk
+ *   assignment, and the refusal is recorded. And can anybody escalate through
+ *   an invitation or a reset? Not an Admin minting a peer, and not anybody
+ *   resetting a Technical Admin — both asked below.
  *
  * Every action runs through the real API on the least-privilege people role, so
  * these are statements about the deployed shape rather than about this file.
@@ -208,7 +212,7 @@ describe("the people connection is bounded by grants rather than by handlers", (
     ).toBe("42501");
   });
 
-  it("cannot read a credential, a session token, or a ticket digest", async () => {
+  it("cannot read a credential, a session token, a password or a one-time code", async () => {
     if (!usingPeopleRole) return expectSkippedRoleCheck();
 
     for (const [table, column] of [
@@ -216,7 +220,12 @@ describe("the people connection is bounded by grants rather than by handlers", (
       ["admin_authenticators", "credential_id"],
       ["admin_sessions", "token_digest"],
       ["admin_users", "user_handle"],
-      ["admin_enrollment_tickets", "secret_digest"]
+      // The three identity tables this connection holds nothing on at all: it
+      // can suspend somebody and still not read, plant or replace what signs
+      // them in.
+      ["admin_passwords", "digest"],
+      ["admin_invitations", "secret_digest"],
+      ["admin_password_resets", "secret_digest"]
     ] as const) {
       expect(
         await captureFailure(() =>
@@ -234,7 +243,6 @@ describe("the people connection is bounded by grants rather than by handlers", (
       "admin_authenticators",
       "admin_sessions",
       "admin_kiosk_scopes",
-      "admin_enrollment_tickets",
       "audit_events"
     ]) {
       expect(
@@ -277,16 +285,20 @@ describe("the two people capabilities are split", () => {
         { kioskId, granted: true, reason: "Trying it on as well." }
       ],
       [`/v1/admin/people/${target}/sessions/revoke`, { reason: "Trying it on again." }],
-      [`/v1/admin/people/${target}/enrollment-ticket`, { reason: "Minting myself a colleague." }]
+      [`/v1/admin/people/${target}/invitation`, { reason: "Minting myself a colleague." }]
     ] as const) {
       const response = await request(operatorSession, "POST", url, payload);
       expect(response.statusCode).toBe(403);
     }
+    // An Operator holds neither capability, so all four refuse at the gate
+    // before the role matrix behind them is ever consulted.
 
     const denied = await database.auditEvent.findMany({
       where: { actorId: operatorSession.adminUserId, outcome: "DENIED" }
     });
-    expect(denied.length).toBeGreaterThanOrEqual(4);
+    // Three of the four record a DENIED people row; the invitation route
+    // refuses on the capability without a people-module recorder behind it.
+    expect(denied.length).toBeGreaterThanOrEqual(3);
     expect(denied.every((row) => row.action.startsWith("admin.people."))).toBe(true);
   });
 
@@ -311,17 +323,15 @@ describe("the two people capabilities are split", () => {
     expect(await database.adminKioskScope.count({ where: { adminUserId: target } })).toBe(0);
   });
 
-  it("lets a Technical Admin issue a ticket and retire a key", async () => {
-    const target = await seedOperator({ status: "PROVISIONING", keys: 0 });
-
-    const ticket = await request(
-      technical,
-      "POST",
-      `/v1/admin/people/${target}/enrollment-ticket`,
-      { reason: "Onboarding at three in the morning, no Admin awake." }
-    );
-    expect(ticket.statusCode).toBe(200);
-    expect(ticket.json().grantsSession).toBe(false);
+  it("lets a Technical Admin invite somebody and retire a key", async () => {
+    const invitation = await request(technical, "POST", "/v1/admin/invitations", {
+      displayName: "Onboarded At Three AM",
+      username: `nightshift-${randomBytes(3).toString("hex")}`,
+      role: "OPERATOR",
+      reason: "Onboarding at three in the morning, no Admin awake."
+    });
+    expect(invitation.statusCode).toBe(200);
+    seededAdminUserIds.push(invitation.json().adminUserId);
 
     const keyed = await seedOperator({ status: "ACTIVE", keys: 3 });
     const key = await database.adminAuthenticator.findFirst({
@@ -559,8 +569,13 @@ describe("kiosk assignment", () => {
 // ---------------------------------------------------------------------------
 
 describe("keys and sessions belonging to somebody else", () => {
-  it("refuses a revocation that would leave an active account unable to sign in", async () => {
-    const target = await seedOperator({ status: "ACTIVE", keys: 2 });
+  it("retires an Operator's last key, because their password is what signs them in", async () => {
+    // The rule this used to assert has moved rather than gone. An Operator
+    // authenticates with a password; a key is an optional extra, so retiring
+    // the last one is a cleanup and leaves them able to work. The refusal now
+    // protects privileged accounts, whose key is a second factor — asserted
+    // directly below and again at the database in admin-access.test.ts.
+    const target = await seedOperator({ status: "ACTIVE", keys: 1 });
     const key = await database.adminAuthenticator.findFirst({
       where: { adminUserId: target, revokedAt: null }
     });
@@ -569,13 +584,34 @@ describe("keys and sessions belonging to somebody else", () => {
       admin,
       "POST",
       `/v1/admin/people/${target}/authenticators/${key?.id}/revoke`,
-      { reason: "Retiring their last spare." }
+      { reason: "Reported lost; they sign in with a password." }
     );
 
-    expect(response.statusCode).toBe(409);
+    expect(response.statusCode).toBe(200);
     expect(
       await database.adminAuthenticator.count({ where: { adminUserId: target, revokedAt: null } })
-    ).toBe(2);
+    ).toBe(0);
+    // Still ACTIVE: the account did not lose the factor it signs in with.
+    await expect(
+      database.adminUser.findUniqueOrThrow({ where: { id: target } })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+  });
+
+  it("refuses to strip a privileged account of its last key, at the database", async () => {
+    // No route reaches an Admin's keys — `authenticator.manage.operator` names
+    // Operators only — so the guarantee is asserted where it actually lives.
+    const privileged = await seedSession("ADMIN", { steppedUp: false });
+    const keys = await database.adminAuthenticator.findMany({
+      where: { adminUserId: privileged.adminUserId, revokedAt: null }
+    });
+    expect(keys).toHaveLength(1);
+
+    await expect(
+      database.adminAuthenticator.update({
+        where: { id: keys[0]!.id },
+        data: { revokedAt: new Date(), revokedReason: "LAST_KEY" }
+      })
+    ).rejects.toThrow("must keep a usable security key");
   });
 
   it("retires a key when a spare remains, and leaves the row in place", async () => {
@@ -615,166 +651,206 @@ describe("keys and sessions belonging to somebody else", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Enrollment tickets
+// Invitations and administrator-assisted recovery
 // ---------------------------------------------------------------------------
 
-describe("enrollment tickets", () => {
-  it("mints one that names an account with no key, and audits both the issue and the redemption", async () => {
-    const target = await seedOperator({ status: "PROVISIONING", keys: 0 });
-
-    const issued = await request(admin, "POST", `/v1/admin/people/${target}/enrollment-ticket`, {
-      reason: "First day; enrolling their key at the counter."
+describe("invitations", () => {
+  it("creates the account and a code, and audits both the issue and the acceptance", async () => {
+    const username = `invited-${randomBytes(3).toString("hex")}`;
+    const created = await request(admin, "POST", "/v1/admin/invitations", {
+      displayName: "Newly Invited",
+      username,
+      role: "OPERATOR",
+      reason: "New operator at the central branch, starting Monday."
     });
 
-    expect(issued.statusCode).toBe(200);
-    const body = issued.json();
-    expect(body.targetAdminUserId).toBe(target);
-    expect(body.grantsSession).toBe(false);
-    expect(body.enrollmentCode).toMatch(/^[A-Za-z0-9_-]{40,}$/u);
+    expect(created.statusCode).toBe(200);
+    const body = created.json();
+    seededAdminUserIds.push(body.adminUserId);
+    expect(body.username).toBe(username);
+    expect(body.invitationCode).toMatch(/^[A-Za-z0-9_-]{40,}$/u);
+
+    // The account exists, holding the role the invitation named, and cannot
+    // sign in yet.
+    const account = await database.adminUser.findUniqueOrThrow({
+      where: { id: body.adminUserId }
+    });
+    expect(account.status).toBe("PROVISIONING");
+    expect(account.role).toBe("OPERATOR");
 
     // The code is never stored in a form anything can read back.
-    const stored = await database.adminEnrollmentTicket.findUnique({
-      where: { id: body.ticketId }
+    const stored = await database.adminInvitation.findUniqueOrThrow({
+      where: { id: body.invitationId }
     });
-    expect(stored?.secretDigest).toMatch(/^[0-9a-f]{64}$/u);
-    expect(stored?.secretDigest).not.toContain(body.enrollmentCode);
-    expect(stored?.consumedAt).toBeNull();
+    expect(stored.secretDigest).toMatch(/^[0-9a-f]{64}$/u);
+    expect(stored.secretDigest).not.toContain(body.invitationCode);
+    expect(stored.consumedAt).toBeNull();
 
     const issueEvent = await database.auditEvent.findFirst({
-      where: { action: "admin.people.enrollment.issue", actorId: admin.adminUserId },
+      where: { action: "admin.invitation.create", actorId: admin.adminUserId },
       orderBy: { occurredAt: "desc" }
     });
     expect(issueEvent?.outcome).toBe("SUCCESS");
     expect(issueEvent?.metadata).toMatchObject({
-      targetAdminUserId: target,
-      ticketId: body.ticketId
+      targetAdminUserId: body.adminUserId,
+      targetRole: "OPERATOR"
     });
     // The code itself is not in the audit row, and neither is anything derived
     // from it that could be replayed.
-    expect(JSON.stringify(issueEvent?.metadata)).not.toContain(body.enrollmentCode);
+    expect(JSON.stringify(issueEvent?.metadata)).not.toContain(body.invitationCode);
 
-    // Redemption opens a ceremony and burns the ticket. The WebAuthn half
-    // cannot run here, so this asserts what happens up to the browser: a
-    // ceremony bound to the right account, and a spent code.
-    const opened = await app.inject({
+    // Accepting it: an Operator needs only a password, so this activates the
+    // account and consumes the invitation in one step.
+    const accepted = await app.inject({
       method: "POST",
-      url: "/v1/admin/auth/enrollment/registration/options",
-      payload: { enrollmentCode: body.enrollmentCode }
+      url: "/v1/admin/auth/invitation/password",
+      payload: { code: body.invitationCode, password: "a-well-chosen-password" }
     });
-    expect(opened.statusCode).toBe(200);
-    expect(opened.json().ceremonyId).toBeTruthy();
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toMatchObject({ activated: true, passwordSet: true });
 
-    const consumed = await database.adminEnrollmentTicket.findUnique({
-      where: { id: body.ticketId }
-    });
-    expect(consumed?.consumedAt).not.toBeNull();
+    await expect(
+      database.adminUser.findUniqueOrThrow({ where: { id: body.adminUserId } })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+    await expect(
+      database.adminInvitation.findUniqueOrThrow({ where: { id: body.invitationId } })
+    ).resolves.toMatchObject({ consumedAt: expect.any(Date) });
 
-    const redeemEvent = await database.auditEvent.findFirst({
-      where: { action: "admin.enrollment.redeem", actorId: target },
-      orderBy: { occurredAt: "desc" }
-    });
-    expect(redeemEvent?.outcome).toBe("SUCCESS");
-
-    // Single use: the same code a second time is refused, in the same words a
-    // wrong code gets.
+    // Single use in the way that matters: once the account is set up, the code
+    // buys nothing, and the refusal is the one a wrong code gets.
     const replayed = await app.inject({
       method: "POST",
-      url: "/v1/admin/auth/enrollment/registration/options",
-      payload: { enrollmentCode: body.enrollmentCode }
+      url: "/v1/admin/auth/invitation/password",
+      payload: { code: body.invitationCode, password: "another-password-entirely" }
     });
     expect(replayed.statusCode).toBe(401);
-    expect(replayed.json().error.code).toBe("ADMIN_ENROLLMENT_FAILED");
+    expect(replayed.json().error.code).toBe("ADMIN_INVITATION_INVALID");
+
+    // And the new account really can sign in, with the password only it knows.
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { username, password: "a-well-chosen-password" }
+    });
+    expect(login.statusCode).toBe(200);
+    expect(login.json().state).toBe("AUTHENTICATED");
   });
 
-  it("refuses to mint one for an account that already has a key", async () => {
-    const target = await seedOperator({ status: "ACTIVE", keys: 2 });
-    const response = await request(admin, "POST", `/v1/admin/people/${target}/enrollment-ticket`, {
-      reason: "Trying to add a key to a working identity."
+  it("refuses an Admin the roles it may not mint, and refuses an Operator every role", async () => {
+    // The escalation this exists to prevent: an Admin inviting an Admin, or a
+    // Technical Admin, would make `invitation.manage` a promotion.
+    for (const role of ["ADMIN", "TECHNICAL_ADMIN"] as const) {
+      const response = await request(admin, "POST", "/v1/admin/invitations", {
+        displayName: "Would-be peer",
+        username: `escalate-${randomBytes(3).toString("hex")}`,
+        role,
+        reason: "Attempting to mint a peer or a superior."
+      });
+      expect(response.statusCode).toBe(403);
+    }
+
+    const operatorAttempt = await request(operatorSession, "POST", "/v1/admin/invitations", {
+      displayName: "Would-be colleague",
+      username: `escalate-${randomBytes(3).toString("hex")}`,
+      role: "OPERATOR",
+      reason: "An Operator minting a colleague."
     });
-    expect(response.statusCode).toBe(409);
-    expect(await database.adminEnrollmentTicket.count({ where: { adminUserId: target } })).toBe(0);
+    expect(operatorAttempt.statusCode).toBe(403);
+
+    expect(
+      await database.adminUser.count({ where: { displayName: { startsWith: "Would-be" } } })
+    ).toBe(0);
   });
 
-  it("refuses one for a suspended or disabled account", async () => {
-    const target = await seedOperator({ status: "ACTIVE", keys: 2 });
-    await request(admin, "POST", `/v1/admin/people/${target}/status`, {
-      status: "SUSPENDED",
-      reason: "Suspended before anybody tried this."
+  it("lets a Technical Admin mint any role, including another Technical Admin", async () => {
+    const username = `tech-invited-${randomBytes(3).toString("hex")}`;
+    const response = await request(technical, "POST", "/v1/admin/invitations", {
+      displayName: "Invited By Technical",
+      username,
+      role: "TECHNICAL_ADMIN",
+      reason: "The second technical administrator, as agreed."
     });
-
-    const response = await request(admin, "POST", `/v1/admin/people/${target}/enrollment-ticket`, {
-      reason: "Trying to enrol onto a suspended account."
-    });
-    expect(response.statusCode).toBe(409);
+    expect(response.statusCode).toBe(200);
+    seededAdminUserIds.push(response.json().adminUserId);
   });
 
-  it("cannot be minted for a Technical Admin, at the database as well as the route", async () => {
-    if (!usingPeopleRole) return expectSkippedRoleCheck();
+  it("refuses a username that is already taken", async () => {
+    const username = `duplicate-${randomBytes(3).toString("hex")}`;
+    const first = await request(admin, "POST", "/v1/admin/invitations", {
+      displayName: "First Holder",
+      username,
+      role: "OPERATOR",
+      reason: "The first person to hold this name."
+    });
+    expect(first.statusCode).toBe(200);
+    seededAdminUserIds.push(first.json().adminUserId);
 
-    // The route refuses it as a 404 before this matters. The trigger is what
-    // makes it true for anything else that ever holds this grant.
-    const failure = await captureFailure(() =>
-      peopleDatabase.$executeRawUnsafe(
-        `INSERT INTO "admin_enrollment_tickets"
-           ("id", "admin_user_id", "issued_by_admin_id", "secret_digest", "reason", "expires_at")
-         VALUES ($1, $2, $3, $4, 'planted by hand', now() + interval '15 minutes')`,
-        randomUUID(),
-        technical.adminUserId,
-        admin.adminUserId,
-        randomBytes(32).toString("hex")
-      )
+    const second = await request(admin, "POST", "/v1/admin/invitations", {
+      displayName: "Second Holder",
+      username,
+      role: "OPERATOR",
+      reason: "The second person trying to hold it."
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error.code).toBe("ADMIN_USERNAME_TAKEN");
+  });
+
+  it("stops working the moment it is revoked", async () => {
+    const created = await request(admin, "POST", "/v1/admin/invitations", {
+      displayName: "Revoked Before Use",
+      username: `revoked-${randomBytes(3).toString("hex")}`,
+      role: "OPERATOR",
+      reason: "Issued to the wrong person by mistake."
+    });
+    const body = created.json();
+    seededAdminUserIds.push(body.adminUserId);
+
+    const revoked = await request(
+      admin,
+      "POST",
+      `/v1/admin/invitations/${body.invitationId}/revoke`
     );
-    expect(failure).toBe("23514");
-  });
+    expect(revoked.statusCode).toBe(204);
 
-  it("cannot be issued to oneself", async () => {
-    if (!usingPeopleRole) return expectSkippedRoleCheck();
-
-    const failure = await captureFailure(() =>
-      peopleDatabase.$executeRawUnsafe(
-        `INSERT INTO "admin_enrollment_tickets"
-           ("id", "admin_user_id", "issued_by_admin_id", "secret_digest", "reason", "expires_at")
-         VALUES ($1, $2, $2, $3, 'authorising my own enrolment', now() + interval '15 minutes')`,
-        randomUUID(),
-        admin.adminUserId,
-        randomBytes(32).toString("hex")
-      )
-    );
-    expect(failure).toBe("23514");
+    const attempted = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/invitation/password",
+      payload: { code: body.invitationCode, password: "a-well-chosen-password" }
+    });
+    expect(attempted.statusCode).toBe(401);
+    await expect(
+      database.adminUser.findUniqueOrThrow({ where: { id: body.adminUserId } })
+    ).resolves.toMatchObject({ status: "PROVISIONING" });
   });
 
   it("refuses an expired code", async () => {
-    const target = await seedOperator({ status: "PROVISIONING", keys: 0 });
-    const issued = await request(admin, "POST", `/v1/admin/people/${target}/enrollment-ticket`, {
+    const created = await request(admin, "POST", "/v1/admin/invitations", {
+      displayName: "Left Too Long",
+      username: `expired-${randomBytes(3).toString("hex")}`,
+      role: "OPERATOR",
       reason: "Issued and then left too long."
     });
-    const { ticketId, enrollmentCode } = issued.json();
+    const body = created.json();
+    seededAdminUserIds.push(body.adminUserId);
 
-    // Ageing the ticket needs a connection that owns the table; the people role
-    // cannot move an expiry, which is itself the property being relied on. Both
-    // timestamps move, because `expires_at > created_at` is a CHECK constraint
-    // rather than a trigger and survives the suspension below — which is the
-    // right outcome, and worth seeing here rather than only asserting.
+    // Ageing the grant needs a connection that owns the table; the people role
+    // cannot move an expiry, which is itself the property being relied on.
     await database.$transaction(async (transaction) => {
+      await transaction.$executeRawUnsafe(`ALTER TABLE "admin_invitations" DISABLE TRIGGER USER`);
       await transaction.$executeRawUnsafe(
-        `ALTER TABLE "admin_enrollment_tickets" DISABLE TRIGGER USER`
-      );
-      await transaction.$executeRawUnsafe(
-        `UPDATE "admin_enrollment_tickets"
-            SET "created_at" = now() - interval '2 hours',
+        `UPDATE "admin_invitations"
+            SET "created_at" = now() - interval '8 days',
                 "expires_at" = now() - interval '1 hour'
           WHERE "id" = $1`,
-        ticketId
+        body.invitationId
       );
-      await transaction.$executeRawUnsafe(
-        `ALTER TABLE "admin_enrollment_tickets" ENABLE TRIGGER USER`
-      );
+      await transaction.$executeRawUnsafe(`ALTER TABLE "admin_invitations" ENABLE TRIGGER USER`);
     });
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/admin/auth/enrollment/registration/options",
-      payload: { enrollmentCode }
+      url: "/v1/admin/auth/invitation/password",
+      payload: { code: body.invitationCode, password: "a-well-chosen-password" }
     });
     expect(response.statusCode).toBe(401);
   });
@@ -782,10 +858,129 @@ describe("enrollment tickets", () => {
   it("refuses a code that was never issued", async () => {
     const response = await app.inject({
       method: "POST",
-      url: "/v1/admin/auth/enrollment/registration/options",
-      payload: { enrollmentCode: randomBytes(32).toString("base64url") }
+      url: "/v1/admin/auth/invitation/preview",
+      payload: { code: randomBytes(32).toString("base64url") }
     });
     expect(response.statusCode).toBe(401);
+  });
+});
+
+describe("administrator-assisted password recovery", () => {
+  it("resets an Operator's password, ends every session, and leaves their keys alone", async () => {
+    const username = `resetme-${randomBytes(3).toString("hex")}`;
+    const created = await request(admin, "POST", "/v1/admin/invitations", {
+      displayName: "Forgetful Operator",
+      username,
+      role: "OPERATOR",
+      reason: "An operator who will forget their password."
+    });
+    const invitation = created.json();
+    seededAdminUserIds.push(invitation.adminUserId);
+    await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/invitation/password",
+      payload: { code: invitation.invitationCode, password: "the-first-password" }
+    });
+
+    // A live session, so the revocation has something to revoke.
+    const firstLogin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { username, password: "the-first-password" }
+    });
+    expect(firstLogin.statusCode).toBe(200);
+    expect(
+      await database.adminSession.count({
+        where: { adminUserId: invitation.adminUserId, revokedAt: null }
+      })
+    ).toBe(1);
+
+    const issued = await request(
+      admin,
+      "POST",
+      `/v1/admin/people/${invitation.adminUserId}/password-reset`,
+      { reason: "Forgot their password; confirmed their identity in person." }
+    );
+    expect(issued.statusCode).toBe(200);
+    const reset = issued.json();
+    expect(reset.resetCode).toMatch(/^[A-Za-z0-9_-]{40,}$/u);
+
+    // The issuing administrator never sees or chooses the password.
+    const issueEvent = await database.auditEvent.findFirst({
+      where: { action: "admin.password_reset.issue", actorId: admin.adminUserId },
+      orderBy: { occurredAt: "desc" }
+    });
+    expect(JSON.stringify(issueEvent?.metadata)).not.toContain(reset.resetCode);
+
+    const completed = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/password-reset/complete",
+      payload: { code: reset.resetCode, newPassword: "the-second-password" }
+    });
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json().revokedSessions).toBe(1);
+
+    // Every session is gone, the old password no longer works, the new one
+    // does, and the account's keys were never touched.
+    expect(
+      await database.adminSession.count({
+        where: { adminUserId: invitation.adminUserId, revokedAt: null }
+      })
+    ).toBe(0);
+    const stale = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { username, password: "the-first-password" }
+    });
+    expect(stale.statusCode).toBe(401);
+    const fresh = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { username, password: "the-second-password" }
+    });
+    expect(fresh.statusCode).toBe(200);
+
+    // Single use.
+    const replayed = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/password-reset/complete",
+      payload: { code: reset.resetCode, newPassword: "a-third-password" }
+    });
+    expect(replayed.statusCode).toBe(401);
+  });
+
+  it("refuses an Admin a reset against a peer or a Technical Admin, as a 404", async () => {
+    // The escalation this exists to prevent. A 404 rather than a 403, so the
+    // panel does not become a way to find out who the privileged accounts are.
+    for (const target of [admin.adminUserId, technical.adminUserId]) {
+      const response = await request(admin, "POST", `/v1/admin/people/${target}/password-reset`, {
+        reason: "Attempting a reset against somebody I may not reset."
+      });
+      expect(response.statusCode).toBe(404);
+    }
+  });
+
+  it("refuses a Technical Admin a reset against another Technical Admin", async () => {
+    // Nobody resets a Technical Admin from a browser: the accounts that could
+    // authorise it are exactly the ones an attacker would be holding.
+    const response = await request(
+      technical,
+      "POST",
+      `/v1/admin/people/${technical.adminUserId}/password-reset`,
+      { reason: "Attempting a reset against my own role." }
+    );
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("refuses an Operator the ability to issue a reset for anybody", async () => {
+    const target = await seedOperator({ status: "ACTIVE", keys: 1 });
+    const response = await request(
+      operatorSession,
+      "POST",
+      `/v1/admin/people/${target}/password-reset`,
+      { reason: "An operator trying to reset a colleague." }
+    );
+    expect(response.statusCode).toBe(403);
   });
 });
 
@@ -883,10 +1078,16 @@ async function seedOperator(options: {
     data: {
       id: adminUserId,
       userHandle: randomBytes(32),
+      username: `op-${adminUserId.slice(0, 12)}`,
       displayName: `People operator ${randomBytes(3).toString("hex")}`,
       role: "OPERATOR",
       status: "PROVISIONING"
     }
+  });
+
+  // Every account needs a password before it can become ACTIVE.
+  await database.adminPassword.create({
+    data: { adminUserId, digest: await hashPassword("integration-suite-password") }
   });
 
   for (let index = 0; index < options.keys; index += 1) {
@@ -924,13 +1125,18 @@ async function seedSession(
     data: {
       id: adminUserId,
       userHandle: randomBytes(32),
+      username: `ps-${adminUserId.slice(0, 12)}`,
       displayName: `People ${role} ${randomBytes(2).toString("hex")}`,
       role,
       status: "PROVISIONING"
     }
   });
 
-  for (let index = 0; index < 2; index += 1) {
+  await database.adminPassword.create({
+    data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+  });
+
+  for (let index = 0; index < 1; index += 1) {
     await database.adminAuthenticator.create({
       data: {
         id: randomUUID(),
@@ -982,17 +1188,14 @@ async function seedLiveSession(
 /**
  * Remove this suite's accounts.
  *
- * Tickets go first: they hold `ON DELETE RESTRICT` to the accounts they name,
- * which is the property that stops an account being removed while the record of
- * an enrolment it authorised still stands.
+ * Everything that names an account holds `ON DELETE RESTRICT`, which is the
+ * property that stops an account being removed while the record of a credential
+ * it held still stands. So each of them goes first.
  */
 async function cleanUpSeededAdmins(): Promise<void> {
   const ids = seededAdminUserIds.splice(0);
   if (ids.length === 0) return;
 
-  await database.adminEnrollmentTicket.deleteMany({
-    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
-  });
   await database.adminWebAuthnChallenge.deleteMany({ where: { adminUserId: { in: ids } } });
   await database.adminSession.deleteMany({ where: { adminUserId: { in: ids } } });
   await database.adminBreakGlassCredential.deleteMany({ where: { adminUserId: { in: ids } } });
@@ -1004,5 +1207,14 @@ async function cleanUpSeededAdmins(): Promise<void> {
     data: { status: "SUSPENDED" }
   });
   await database.adminAuthenticator.deleteMany({ where: { adminUserId: { in: ids } } });
+  // The knowledge factor and the two kinds of one-time grant hold the account
+  // by a RESTRICT foreign key, so they go first.
+  await database.adminPassword.deleteMany({ where: { adminUserId: { in: ids } } });
+  await database.adminInvitation.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
+  await database.adminPasswordReset.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
   await database.adminUser.deleteMany({ where: { id: { in: ids } } });
 }

@@ -104,13 +104,15 @@ const OWNED_TABLES = Object.freeze({
   admin_webauthn_challenges: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   admin_break_glass_credentials: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   admin_kiosk_scopes: ["SELECT", "INSERT", "UPDATE", "DELETE"],
-  // Phase 4B. Redemption runs on the application connection — matching a
-  // presented code against a stored digest, and marking the ticket consumed —
-  // so the application keeps ordinary CRUD here. What it loses, as everywhere
-  // else in this list, is the ability to drop the table or switch off the
-  // trigger that makes a ticket single-use and refuses to let one name a
-  // working account.
-  admin_enrollment_tickets: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  // Phase 7, the authentication rework. All three are identity tables the
+  // application pool works directly — verifying a password, redeeming an
+  // invitation or reset code against a stored digest, marking it consumed —
+  // so the application keeps ordinary CRUD. What it loses, as everywhere else
+  // in this list, is the ability to drop the tables or switch off the
+  // triggers that make a one-time grant single-use.
+  admin_passwords: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  admin_invitations: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  admin_password_resets: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   // Phase 5. The application never writes either of these — proposing and
   // approving are the change and pricing roles' work — but it keeps the same
   // DML as the other admin tables so an integration teardown can clear them.

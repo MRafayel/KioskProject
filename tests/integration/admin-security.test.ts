@@ -29,7 +29,11 @@ import {
   digestAdminCsrfToken,
   digestAdminSessionToken
 } from "../../services/api/src/modules/admin/crypto.js";
+import { hashPassword } from "../../services/api/src/modules/admin/passwords.js";
 import { assertSafeIntegrationEnvironment } from "./safety.js";
+
+/** Every seeded account shares one password. Nothing here tests secrecy. */
+const SEEDED_PASSWORD = "integration-suite-password";
 
 /**
  * The Phase 6 acceptance gate: the security test suite.
@@ -153,19 +157,72 @@ interface AdminEndpoint {
  */
 const ENDPOINTS: readonly AdminEndpoint[] = [
   // --- Authentication: open by necessity ---------------------------------
-  { method: "POST", path: "/v1/admin/auth/authentication/options", gate: "OPEN" },
-  { method: "POST", path: "/v1/admin/auth/authentication/verify", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/login", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/login/webauthn", gate: "OPEN" },
   { method: "POST", path: "/v1/admin/auth/break-glass/registration/options", gate: "OPEN" },
   { method: "POST", path: "/v1/admin/auth/break-glass/registration/verify", gate: "OPEN" },
-  { method: "POST", path: "/v1/admin/auth/enrollment/registration/options", gate: "OPEN" },
-  { method: "POST", path: "/v1/admin/auth/enrollment/registration/verify", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/invitation/preview", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/invitation/password", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/invitation/registration/options", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/invitation/registration/verify", gate: "OPEN" },
+  { method: "POST", path: "/v1/admin/auth/password-reset/complete", gate: "OPEN" },
 
   // --- The session itself -------------------------------------------------
   { method: "POST", path: "/v1/admin/auth/logout", gate: "SESSION", endsTheSession: true },
   { method: "POST", path: "/v1/admin/auth/step-up/options", gate: "SESSION" },
   { method: "POST", path: "/v1/admin/auth/step-up/verify", gate: "SESSION" },
+  { method: "POST", path: "/v1/admin/auth/step-up/password", gate: "SESSION" },
+  // The unlock routes accept a locked session and refuse an active one, so
+  // they are gated by presence rather than by capability. A signed-out caller
+  // still gets 401 from them, which the OPEN sweep would not assert.
+  { method: "POST", path: "/v1/admin/auth/unlock/options", gate: "SESSION" },
+  { method: "POST", path: "/v1/admin/auth/unlock/verify", gate: "SESSION" },
+  { method: "POST", path: "/v1/admin/auth/unlock/password", gate: "SESSION" },
   { method: "GET", path: "/v1/admin/me", gate: "SESSION" },
   { method: "GET", path: "/v1/admin/authenticators", gate: "SESSION" },
+
+  // --- One's own sessions and password ------------------------------------
+  { method: "GET", path: "/v1/admin/account/sessions", gate: "account.sessions.read" },
+  {
+    method: "POST",
+    path: "/v1/admin/account/sessions/:sessionId/revoke",
+    url: `/v1/admin/account/sessions/${ABSENT_ID}/revoke`,
+    gate: "account.sessions.revoke"
+  },
+  {
+    method: "POST",
+    path: "/v1/admin/account/sessions/revoke-others",
+    gate: "account.sessions.revoke"
+  },
+  { method: "POST", path: "/v1/admin/account/password", gate: "account.password.change" },
+
+  // --- Invitations and recovery -------------------------------------------
+  { method: "GET", path: "/v1/admin/invitations", gate: "invitation.read" },
+  { method: "POST", path: "/v1/admin/invitations", gate: "invitation.manage" },
+  {
+    method: "POST",
+    path: "/v1/admin/invitations/:invitationId/revoke",
+    url: `/v1/admin/invitations/${ABSENT_ID}/revoke`,
+    gate: "invitation.manage"
+  },
+  {
+    method: "POST",
+    path: "/v1/admin/people/:adminUserId/invitation",
+    url: `/v1/admin/people/${ABSENT_ID}/invitation`,
+    gate: "invitation.manage"
+  },
+  {
+    method: "POST",
+    path: "/v1/admin/people/:adminUserId/password-reset",
+    url: `/v1/admin/people/${ABSENT_ID}/password-reset`,
+    gate: "recovery.manage"
+  },
+  {
+    method: "POST",
+    path: "/v1/admin/password-resets/:resetId/revoke",
+    url: `/v1/admin/password-resets/${ABSENT_ID}/revoke`,
+    gate: "recovery.manage"
+  },
 
   // --- One's own security keys -------------------------------------------
   {
@@ -274,13 +331,6 @@ const ENDPOINTS: readonly AdminEndpoint[] = [
     method: "POST",
     path: "/v1/admin/people/:adminUserId/authenticators/:authenticatorId/revoke",
     url: `/v1/admin/people/${ABSENT_ID}/authenticators/${ABSENT_ID}/revoke`,
-    gate: "authenticator.manage.operator",
-    needs: "PEOPLE"
-  },
-  {
-    method: "POST",
-    path: "/v1/admin/people/:adminUserId/enrollment-ticket",
-    url: `/v1/admin/people/${ABSENT_ID}/enrollment-ticket`,
     gate: "authenticator.manage.operator",
     needs: "PEOPLE"
   },
@@ -1156,7 +1206,12 @@ const MIGRATOR_OWNED_TABLES = [
   "admin_webauthn_challenges",
   "admin_break_glass_credentials",
   "admin_kiosk_scopes",
-  "admin_enrollment_tickets",
+  // The identity tables the authentication rework added. Each holds a
+  // credential digest and each is protected by a trigger the application must
+  // not be able to switch off, which is what ownership decides.
+  "admin_passwords",
+  "admin_invitations",
+  "admin_password_resets",
   "admin_change_executions",
   "print_job_recovery_resolutions",
   "print_job_recovery_corrections",
@@ -1564,26 +1619,35 @@ async function seedAdminWithSession(
     data: {
       id: adminUserId,
       userHandle: randomBytes(32),
+      username: `sec-${adminUserId.slice(0, 12)}`,
       displayName: `Security ${role}`,
       role,
       status: "PROVISIONING"
     }
   });
 
-  // Two authenticators, because an active account may not exist with fewer.
-  for (let index = 0; index < 2; index += 1) {
-    await database.adminAuthenticator.create({
-      data: {
-        id: randomUUID(),
-        adminUserId,
-        credentialId: `sec-credential-${adminUserId}-${index}`,
-        publicKey: randomBytes(32),
-        label: `key ${index}`,
-        attachment: "cross-platform",
-        backupEligible: false
-      }
-    });
-  }
+  // A password, because no account may become ACTIVE without one. The digest
+  // is real rather than a placeholder: the activation trigger only checks
+  // presence, but a login test that ran against a fake one would fail for the
+  // wrong reason.
+  await database.adminPassword.create({
+    data: { adminUserId, digest: await hashPassword(SEEDED_PASSWORD) }
+  });
+
+  // One authenticator for the privileged roles, whose second factor it is.
+  // Operators sign in with a password alone and get one anyway, so the
+  // key-management sweeps have something to act on.
+  await database.adminAuthenticator.create({
+    data: {
+      id: randomUUID(),
+      adminUserId,
+      credentialId: `sec-credential-${adminUserId}-0`,
+      publicKey: randomBytes(32),
+      label: "key 0",
+      attachment: "cross-platform",
+      backupEligible: false
+    }
+  });
 
   await database.adminUser.update({
     where: { id: adminUserId },
@@ -1884,6 +1948,15 @@ async function cleanUpSeededAdmins(): Promise<void> {
     data: { status: "SUSPENDED" }
   });
   await database.adminAuthenticator.deleteMany({ where: { adminUserId: { in: ids } } });
+  // The knowledge factor and the two kinds of one-time grant hold the account
+  // by a RESTRICT foreign key, so they go first.
+  await database.adminPassword.deleteMany({ where: { adminUserId: { in: ids } } });
+  await database.adminInvitation.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
+  await database.adminPasswordReset.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
   await database.adminUser.deleteMany({ where: { id: { in: ids } } });
 }
 

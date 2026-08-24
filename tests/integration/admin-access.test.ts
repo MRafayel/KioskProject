@@ -15,6 +15,7 @@ import {
   digestAdminCsrfToken,
   digestAdminSessionToken
 } from "../../services/api/src/modules/admin/crypto.js";
+import { hashPassword } from "../../services/api/src/modules/admin/passwords.js";
 import { assertSafeIntegrationEnvironment } from "./safety.js";
 
 /**
@@ -71,6 +72,15 @@ async function cleanUpSeededAdmins(): Promise<void> {
     data: { status: "SUSPENDED" }
   });
   await database.adminAuthenticator.deleteMany({ where: { adminUserId: { in: ids } } });
+  // The knowledge factor and the two kinds of one-time grant hold the account
+  // by a RESTRICT foreign key, so they go first.
+  await database.adminPassword.deleteMany({ where: { adminUserId: { in: ids } } });
+  await database.adminInvitation.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
+  await database.adminPasswordReset.deleteMany({
+    where: { OR: [{ adminUserId: { in: ids } }, { issuedByAdminId: { in: ids } }] }
+  });
   await database.adminUser.deleteMany({ where: { id: { in: ids } } });
 }
 
@@ -87,6 +97,8 @@ async function seedAdminWithSession(
     steppedUpAgo?: number;
     revoked?: boolean;
     idleExpiredAgo?: number;
+    /** Past the absolute limit, which no reauthentication can reopen. */
+    hardExpiredAgo?: number;
     status?: "ACTIVE" | "SUSPENDED" | "DISABLED" | "PROVISIONING";
   } = {}
 ): Promise<SeededSession> {
@@ -98,14 +110,20 @@ async function seedAdminWithSession(
     data: {
       id: adminUserId,
       userHandle: randomBytes(32),
+      username: `u-${adminUserId.slice(0, 12)}`,
       displayName: `Test ${role}`,
       role,
       status: "PROVISIONING"
     }
   });
 
-  // Two authenticators, because an active account may not exist with fewer.
-  for (let index = 0; index < 2; index += 1) {
+  // No account may become ACTIVE without a password now.
+  await database.adminPassword.create({
+    data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+  });
+
+  // One authenticator: a privileged account's second factor.
+  for (let index = 0; index < 1; index += 1) {
     await database.adminAuthenticator.create({
       data: {
         id: randomUUID(),
@@ -139,9 +157,13 @@ async function seedAdminWithSession(
       tokenDigest: digestAdminSessionToken(sessionToken, environment.ADMIN_SESSION_PEPPER),
       csrfDigest: digestAdminCsrfToken(csrfToken, environment.ADMIN_SESSION_PEPPER),
       idleExpiresAt: new Date(
-        overrides.idleExpiredAgo ? now - overrides.idleExpiredAgo : now + 600_000
+        (overrides.idleExpiredAgo ?? overrides.hardExpiredAgo)
+          ? now - (overrides.idleExpiredAgo ?? overrides.hardExpiredAgo ?? 0)
+          : now + 600_000
       ),
-      hardExpiresAt: new Date(now + 3_600_000),
+      hardExpiresAt: new Date(
+        overrides.hardExpiredAgo ? now - overrides.hardExpiredAgo : now + 3_600_000
+      ),
       ...(overrides.revoked ? { revokedAt: new Date(now - 1_000) } : {}),
       ...(overrides.steppedUpAgo === undefined
         ? {}
@@ -174,19 +196,31 @@ describe("unauthenticated access", () => {
   });
 
   it("does not reveal whether an account exists", async () => {
-    // Login is discoverable-credential: there is no username field to probe,
-    // and the options route answers identically regardless of what exists.
-    const first = await app.inject({
-      method: "POST",
-      url: "/v1/admin/auth/authentication/options"
+    // Login names an account now, so the property this used to get for free
+    // has to be asserted: a wrong password against a real account and any
+    // password against an account that does not exist answer identically.
+    const real = await seedAdminWithSession("ADMIN");
+    const account = await database.adminUser.findUniqueOrThrow({
+      where: { id: real.adminUserId },
+      select: { username: true }
     });
-    const second = await app.inject({
+
+    const wrongPassword = await app.inject({
       method: "POST",
-      url: "/v1/admin/auth/authentication/options"
+      url: "/v1/admin/auth/login",
+      payload: { username: account.username, password: "not-the-right-password" }
     });
-    expect(first.statusCode).toBe(200);
-    expect(second.statusCode).toBe(200);
-    expect(Object.keys(first.json())).toEqual(Object.keys(second.json()));
+    const noSuchAccount = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { username: "nobody-by-this-name", password: "not-the-right-password" }
+    });
+
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(noSuchAccount.statusCode).toBe(401);
+    // Everything but the per-request identifier, which differs by design.
+    expect(noSuchAccount.json().error.code).toBe(wrongPassword.json().error.code);
+    expect(noSuchAccount.json().error.message).toBe(wrongPassword.json().error.message);
   });
 
   it("refuses a forged session cookie", async () => {
@@ -225,14 +259,77 @@ describe("session lifecycle", () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it("refuses an idle-expired session", async () => {
+  it("locks an idle-expired session rather than destroying it", async () => {
+    // The behaviour the whole rework exists for. `/me` reports the lock so the
+    // page can draw a lock screen; every other route refuses with a code the
+    // UI can tell apart from "sign in again"; and the session row survives, so
+    // one reauthentication reopens it.
     const session = await seedAdminWithSession("ADMIN", { idleExpiredAgo: 1_000 });
-    const response = await app.inject({
+
+    const me = await app.inject({
       method: "GET",
       url: "/v1/admin/me",
       headers: { cookie: session.cookieHeader }
     });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ state: "LOCKED", strongAuthMethod: "WEBAUTHN" });
+
+    const work = await app.inject({
+      method: "GET",
+      url: "/v1/admin/health",
+      headers: { cookie: session.cookieHeader }
+    });
+    expect(work.statusCode).toBe(401);
+    expect(work.json().error.code).toBe("ADMIN_SESSION_LOCKED");
+
+    await expect(
+      database.adminSession.count({
+        where: { adminUserId: session.adminUserId, revokedAt: null }
+      })
+    ).resolves.toBe(1);
+  });
+
+  it("reopens the same locked session on a correct password, keeping its absolute limit", async () => {
+    const session = await seedAdminWithSession("OPERATOR", { idleExpiredAgo: 1_000 });
+    const before = await database.adminSession.findFirstOrThrow({
+      where: { adminUserId: session.adminUserId, revokedAt: null }
+    });
+
+    const unlocked = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/unlock/password",
+      headers: { cookie: session.cookieHeader, "x-csrf-token": session.csrfToken },
+      payload: { password: "integration-suite-password" }
+    });
+    expect(unlocked.statusCode).toBe(200);
+    expect(unlocked.json()).toMatchObject({ state: "ACTIVE" });
+
+    // The same row, moved forward — not a new session, and not a later
+    // absolute limit than the one it was issued with.
+    const after = await database.adminSession.findUniqueOrThrow({ where: { id: before.id } });
+    expect(after.revokedAt).toBeNull();
+    expect(after.idleExpiresAt.getTime()).toBeGreaterThan(before.idleExpiresAt.getTime());
+    expect(after.hardExpiresAt.getTime()).toBe(before.hardExpiresAt.getTime());
+
+    // And the reopened session works.
+    const work = await app.inject({
+      method: "GET",
+      url: "/v1/admin/health",
+      headers: { cookie: session.cookieHeader }
+    });
+    expect(work.statusCode).toBe(200);
+  });
+
+  it("refuses to unlock a session past its absolute limit: nothing saves that one", async () => {
+    const session = await seedAdminWithSession("OPERATOR", { hardExpiredAgo: 1_000 });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/unlock/password",
+      headers: { cookie: session.cookieHeader, "x-csrf-token": session.csrfToken },
+      payload: { password: "integration-suite-password" }
+    });
     expect(response.statusCode).toBe(401);
+    expect(response.json().error.code).toBe("ADMIN_AUTHENTICATION_REQUIRED");
   });
 
   it("refuses a session whose account was suspended", async () => {
@@ -413,12 +510,15 @@ describe("step-up enforcement", () => {
 });
 
 describe("authenticator invariants", () => {
-  it("refuses to retire the last spare of an active account", async () => {
+  it("refuses to retire the last key of an active privileged account", async () => {
+    // A password alone must not be enough to reach an administrator account,
+    // so the second factor cannot be removed while the account is live: a
+    // replacement is enrolled first.
     const session = await seedAdminWithSession("TECHNICAL_ADMIN", { steppedUpAgo: 1_000 });
     const authenticators = await database.adminAuthenticator.findMany({
       where: { adminUserId: session.adminUserId, revokedAt: null }
     });
-    expect(authenticators).toHaveLength(2);
+    expect(authenticators).toHaveLength(1);
 
     const response = await app.inject({
       method: "POST",
@@ -475,7 +575,13 @@ describe("authenticator invariants", () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it("refuses a synchronised passkey for a Technical Admin at the database level", async () => {
+  it("accepts a platform authenticator for a Technical Admin, the rule having retired", async () => {
+    // The device-bound requirement was right while WebAuthn stood alone. With
+    // a password as the first factor it cost more in lockouts than it bought:
+    // on a machine with no hardware key it forced a browser-lifetime virtual
+    // authenticator and burned a break-glass code per restart. Asserted in the
+    // affirmative so that reintroducing the rule fails here rather than in
+    // somebody's browser.
     const session = await seedAdminWithSession("TECHNICAL_ADMIN");
     await expect(
       database.adminAuthenticator.create({
@@ -489,16 +595,17 @@ describe("authenticator invariants", () => {
           backupEligible: true
         }
       })
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ label: "synced passkey" });
   });
 
-  it("refuses to activate an account with a single authenticator", async () => {
+  it("refuses to activate an account that holds a key but no password", async () => {
     const adminUserId = randomUUID();
     seededAdminUserIds.push(adminUserId);
     await database.adminUser.create({
       data: {
         id: adminUserId,
         userHandle: randomBytes(32),
+        username: `u-${adminUserId.slice(0, 12)}`,
         displayName: "Half provisioned",
         role: "ADMIN",
         status: "PROVISIONING"
@@ -519,19 +626,75 @@ describe("authenticator invariants", () => {
     await expect(
       database.adminUser.update({ where: { id: adminUserId }, data: { status: "ACTIVE" } })
     ).rejects.toThrow();
+
+    // The password is the missing half, and adding it is enough.
+    await database.adminPassword.create({
+      data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+    });
+    await expect(
+      database.adminUser.update({ where: { id: adminUserId }, data: { status: "ACTIVE" } })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
   });
 
-  it("serializes concurrent registrations so the second key activates the account", async () => {
+  it("refuses to activate a privileged account that holds a password but no key", async () => {
     const adminUserId = randomUUID();
     seededAdminUserIds.push(adminUserId);
     await database.adminUser.create({
       data: {
         id: adminUserId,
         userHandle: randomBytes(32),
+        username: `u-${adminUserId.slice(0, 12)}`,
+        displayName: "Keyless admin",
+        role: "ADMIN",
+        status: "PROVISIONING"
+      }
+    });
+    await database.adminPassword.create({
+      data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+    });
+
+    await expect(
+      database.adminUser.update({ where: { id: adminUserId }, data: { status: "ACTIVE" } })
+    ).rejects.toThrow();
+  });
+
+  it("activates an Operator on a password alone: they sign in with no key", async () => {
+    const adminUserId = randomUUID();
+    seededAdminUserIds.push(adminUserId);
+    await database.adminUser.create({
+      data: {
+        id: adminUserId,
+        userHandle: randomBytes(32),
+        username: `u-${adminUserId.slice(0, 12)}`,
+        displayName: "Keyless operator",
+        role: "OPERATOR",
+        status: "PROVISIONING"
+      }
+    });
+    await database.adminPassword.create({
+      data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+    });
+
+    await expect(
+      database.adminUser.update({ where: { id: adminUserId }, data: { status: "ACTIVE" } })
+    ).resolves.toMatchObject({ status: "ACTIVE" });
+  });
+
+  it("serializes concurrent registrations so the count that activates is the committed one", async () => {
+    const adminUserId = randomUUID();
+    seededAdminUserIds.push(adminUserId);
+    await database.adminUser.create({
+      data: {
+        id: adminUserId,
+        userHandle: randomBytes(32),
+        username: `u-${adminUserId.slice(0, 12)}`,
         displayName: "Concurrent enrolment",
         role: "ADMIN",
         status: "PROVISIONING"
       }
+    });
+    await database.adminPassword.create({
+      data: { adminUserId, digest: await hashPassword("integration-suite-password") }
     });
 
     const firstInserted = deferred();
@@ -582,20 +745,22 @@ describe("authenticator invariants", () => {
     await expect(
       database.adminUser.findUniqueOrThrow({ where: { id: adminUserId } })
     ).resolves.toMatchObject({ status: "ACTIVE" });
+    // Both enrolments committed: the owner lock serialised them rather than
+    // losing one, which is the property being asserted.
     await expect(
       database.adminAuthenticator.count({ where: { adminUserId, revokedAt: null } })
     ).resolves.toBe(2);
   });
 
-  it("serializes concurrent revocations so three keys cannot become one", async () => {
+  it("serializes concurrent revocations so two keys cannot become none", async () => {
     const session = await seedAdminWithSession("ADMIN");
     await database.adminAuthenticator.create({
       data: {
         id: randomUUID(),
         adminUserId: session.adminUserId,
-        credentialId: `concurrent-revocation-${session.adminUserId}-third`,
+        credentialId: `concurrent-revocation-${session.adminUserId}-second`,
         publicKey: randomBytes(32),
-        label: "third key",
+        label: "second key",
         attachment: "cross-platform",
         backupEligible: false
       }
@@ -638,13 +803,16 @@ describe("authenticator invariants", () => {
     expect(results[0]!.status).toBe("fulfilled");
     expect(results[1]!.status).toBe("rejected");
     if (results[1]!.status === "rejected") {
-      expect(String(results[1]!.reason)).toContain("at least two usable authenticators");
+      expect(String(results[1]!.reason)).toContain("must keep a usable security key");
     }
+    // One key left, which is the privileged minimum: the second revocation
+    // waited for the owner lock and was then refused against the committed
+    // count rather than its own snapshot.
     await expect(
       database.adminAuthenticator.count({
         where: { adminUserId: session.adminUserId, revokedAt: null }
       })
-    ).resolves.toBe(2);
+    ).resolves.toBe(1);
   });
 
   it("serializes activation against revocation", async () => {
@@ -654,13 +822,19 @@ describe("authenticator invariants", () => {
       data: {
         id: adminUserId,
         userHandle: randomBytes(32),
+        username: `u-${adminUserId.slice(0, 12)}`,
         displayName: "Activation race",
         role: "ADMIN",
         status: "PROVISIONING"
       }
     });
+    await database.adminPassword.create({
+      data: { adminUserId, digest: await hashPassword("integration-suite-password") }
+    });
+    // One key, which is the privileged minimum: revoking it while activation
+    // is in flight is exactly the race the owner lock exists to settle.
     const authenticatorIds: string[] = [];
-    for (let index = 0; index < 2; index += 1) {
+    for (let index = 0; index < 1; index += 1) {
       const id = randomUUID();
       authenticatorIds.push(id);
       await database.adminAuthenticator.create({
@@ -713,7 +887,7 @@ describe("authenticator invariants", () => {
     ).resolves.toMatchObject({ status: "ACTIVE" });
     await expect(
       database.adminAuthenticator.count({ where: { adminUserId, revokedAt: null } })
-    ).resolves.toBe(2);
+    ).resolves.toBe(1);
   });
 
   it("keeps authenticator ownership, policy and revocation history immutable", async () => {
@@ -759,40 +933,6 @@ describe("authenticator invariants", () => {
         data: { revokedAt: null, revokedReason: null }
       })
     ).rejects.toThrow("revocation is final");
-  });
-
-  it("refuses promotion to Technical Admin while a usable synced passkey exists", async () => {
-    const session = await seedAdminWithSession("ADMIN");
-    const authenticator = await database.adminAuthenticator.findFirstOrThrow({
-      where: { adminUserId: session.adminUserId }
-    });
-    // Identity and policy become immutable after this migration, so create the
-    // unsafe-but-valid Admin credential as a replacement rather than rewriting
-    // an enrolled credential.
-    await database.adminUser.update({
-      where: { id: session.adminUserId },
-      data: { status: "SUSPENDED" }
-    });
-    await database.adminAuthenticator.delete({ where: { id: authenticator.id } });
-    await database.adminAuthenticator.create({
-      data: {
-        id: randomUUID(),
-        adminUserId: session.adminUserId,
-        credentialId: `synced-admin-${session.adminUserId}`,
-        publicKey: randomBytes(32),
-        label: "synced passkey",
-        attachment: "platform",
-        backupEligible: true,
-        backedUp: true
-      }
-    });
-
-    await expect(
-      database.adminUser.update({
-        where: { id: session.adminUserId },
-        data: { role: "TECHNICAL_ADMIN" }
-      })
-    ).rejects.toThrow("device-bound roaming authenticators");
   });
 
   it("enforces forward-only account status transitions", async () => {

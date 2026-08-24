@@ -183,6 +183,10 @@ export const READABLE_TABLES = Object.freeze({
     "confidence",
     "failure_code",
     "warning_code",
+    // The device's own account of the operation, bounded by the agent contract
+    // on the way in. Unlike `detail` beside it, which stays free-form and
+    // ungranted, this is a fixed shape the job detail screen renders.
+    "device_detail",
     "created_at"
   ],
 
@@ -276,6 +280,7 @@ export const READABLE_TABLES = Object.freeze({
   // Enough to put a colleague's name on an audit row. Not the WebAuthn handle.
   admin_users: [
     "id",
+    "username",
     "display_name",
     "role",
     "status",
@@ -321,18 +326,37 @@ export const READABLE_TABLES = Object.freeze({
     "revoked_reason"
   ],
 
-  // Whether an enrolment is outstanding on an account, and until when. Never
-  // `secret_digest` — the redeemable half lives on the application connection,
-  // which is the only thing that ever needs to match one.
-  admin_enrollment_tickets: [
+  // Whether an invitation or a password reset is outstanding on an account,
+  // and until when — credentials in flight are exactly what the roster exists
+  // to surface. Never `secret_digest`: the redeemable half lives on the
+  // application connection, which is the only thing that ever needs to match
+  // one.
+  admin_invitations: [
     "id",
     "admin_user_id",
     "issued_by_admin_id",
     "reason",
     "created_at",
     "expires_at",
-    "consumed_at"
+    "consumed_at",
+    "revoked_at"
   ],
+
+  admin_password_resets: [
+    "id",
+    "admin_user_id",
+    "issued_by_admin_id",
+    "reason",
+    "created_at",
+    "expires_at",
+    "consumed_at",
+    "revoked_at"
+  ],
+
+  // Presence only: the roster says whether an account has a password, never
+  // anything about it. The digest column is denied by omission, so a query
+  // that asked for it would be refused by PostgreSQL.
+  admin_passwords: ["admin_user_id"],
 
   // What has been proposed about the tariff, and what became of it. Readable in
   // full: a change request contains numbers somebody typed into a form and the

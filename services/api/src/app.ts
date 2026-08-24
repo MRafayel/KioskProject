@@ -596,9 +596,25 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     },
     sessionPepper: options.environment.ADMIN_SESSION_PEPPER,
     breakGlassPepper: options.environment.ADMIN_BREAK_GLASS_PEPPER,
-    idleTtlMilliseconds: options.environment.ADMIN_SESSION_IDLE_MINUTES * 60_000,
-    absoluteTtlMilliseconds: options.environment.ADMIN_SESSION_ABSOLUTE_MINUTES * 60_000,
-    challengeTtlMilliseconds: options.environment.ADMIN_CHALLENGE_TTL_SECONDS * 1_000
+    // Idle locks; absolute ends. Both windows follow the role, because the
+    // cost of an unattended Operator dashboard and an unattended Technical
+    // Admin one are different facts.
+    sessionWindows: {
+      idleTtlMilliseconds: {
+        OPERATOR: options.environment.ADMIN_SESSION_IDLE_MINUTES_OPERATOR * 60_000,
+        ADMIN: options.environment.ADMIN_SESSION_IDLE_MINUTES_ADMIN * 60_000,
+        TECHNICAL_ADMIN: options.environment.ADMIN_SESSION_IDLE_MINUTES_TECHNICAL_ADMIN * 60_000
+      },
+      absoluteTtlMilliseconds: {
+        OPERATOR: options.environment.ADMIN_SESSION_ABSOLUTE_HOURS_OPERATOR * 3_600_000,
+        ADMIN: options.environment.ADMIN_SESSION_ABSOLUTE_HOURS_ADMIN * 3_600_000,
+        TECHNICAL_ADMIN:
+          options.environment.ADMIN_SESSION_ABSOLUTE_HOURS_TECHNICAL_ADMIN * 3_600_000
+      }
+    },
+    challengeTtlMilliseconds: options.environment.ADMIN_CHALLENGE_TTL_SECONDS * 1_000,
+    invitationTtlMilliseconds: options.environment.ADMIN_INVITATION_TTL_HOURS * 3_600_000,
+    passwordResetTtlMilliseconds: options.environment.ADMIN_PASSWORD_RESET_TTL_MINUTES * 60_000
   });
   registerAdminRoutes(app, {
     admin: adminService,
@@ -758,8 +774,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       people: new AdminPeopleService({
         database: asAdminPeopleDatabase(adminPeopleDatabase),
         clock,
-        random,
-        breakGlassPepper: options.environment.ADMIN_BREAK_GLASS_PEPPER
+        random
       })
     });
   } else {

@@ -1,11 +1,28 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
-import type { AdminAuthenticatorsResponse } from "@printing-kiosk/admin-access";
+import type {
+  AdminAuthenticatorsResponse,
+  AdminOwnSessionsResponse
+} from "@printing-kiosk/admin-access";
 
 import { useSession } from "../features/auth/SessionProvider.js";
 import { AdminApiError, adminApi } from "../features/auth/api.js";
 
 type Authenticator = AdminAuthenticatorsResponse["items"][number];
+
+/**
+ * The Security section: your password, your sessions, your keys. Everything on
+ * this page is about the signed-in account and nothing else's.
+ */
+export function SecurityPanel() {
+  return (
+    <>
+      <OwnSessionsPanel />
+      <PasswordPanel />
+      <SecurityKeysPanel />
+    </>
+  );
+}
 
 /**
  * Managing your own security keys.
@@ -322,6 +339,273 @@ export function SecurityKeysPanel() {
       ) : null}
     </section>
   );
+}
+
+/**
+ * Where you are signed in.
+ *
+ * The address and browser strings are context for "is this mine", nothing
+ * more: the page never claims they identify a device, and neither does the
+ * server. The one session that cannot be revoked from here is the one being
+ * used — that is what "Sign out" is for.
+ */
+function OwnSessionsPanel() {
+  const session = useSession();
+  const [listing, setListing] = useState<AdminOwnSessionsResponse | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const inFlight = useRef(false);
+  const handleAuthenticationError = session.handleAuthenticationError;
+
+  const load = useCallback(async () => {
+    try {
+      setLoadError(null);
+      setListing(await adminApi.ownSessions());
+    } catch (error) {
+      if (handleAuthenticationError(error)) return;
+      setLoadError("Could not load your sessions.");
+    }
+  }, [handleAuthenticationError]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const act = async (work: () => Promise<void>, success: string) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setMessage(null);
+    try {
+      await work();
+      await load();
+      setMessage({ kind: "success", text: success });
+    } catch (error) {
+      if (handleAuthenticationError(error)) return;
+      setMessage({
+        kind: "error",
+        text: error instanceof AdminApiError ? error.message : "The request could not be completed."
+      });
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  const others = listing?.items.filter((item) => !item.current) ?? [];
+
+  return (
+    <section className="panel" aria-labelledby="own-sessions-title">
+      <div className="panel__heading">
+        <h2 id="own-sessions-title">Where you are signed in</h2>
+        <button type="button" className="button-link" disabled={busy} onClick={() => void load()}>
+          Refresh
+        </button>
+      </div>
+
+      {loadError ? (
+        <p role="alert" className="panel__error-text">
+          {loadError}
+        </p>
+      ) : null}
+
+      {listing ? (
+        <ul className="key-list">
+          {listing.items.map((item) => (
+            <li key={item.sessionId} className="key-list__item">
+              <div>
+                <strong>
+                  {item.current ? "This browser" : (describeUserAgent(item.userAgent) ?? "Browser")}
+                  {item.state === "LOCKED" ? " · locked" : ""}
+                </strong>
+                <span className="key-list__meta">
+                  signed in {formatDateTime(item.createdAt)}
+                  {item.lastSeenAt ? ` · last active ${formatDateTime(item.lastSeenAt)}` : ""}
+                  {item.ipAddress ? ` · from ${item.ipAddress}` : ""}
+                </span>
+              </div>
+              {!item.current ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    void act(() => adminApi.revokeOwnSession(item.sessionId), "Session signed out.")
+                  }
+                >
+                  Sign out
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p role="status">Loading your sessions…</p>
+      )}
+
+      {others.length > 0 ? (
+        <div className="panel__actions">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              void act(async () => {
+                await adminApi.revokeOtherSessions();
+              }, "Signed out everywhere else.")
+            }
+          >
+            Sign out everywhere else
+          </button>
+        </div>
+      ) : null}
+
+      {message ? (
+        <p
+          role={message.kind === "error" ? "alert" : "status"}
+          className={message.kind === "error" ? "panel__error-text" : "panel__status"}
+        >
+          {message.text}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Changing your own password. The server demands the current password and a
+ * fresh strong reauthentication, and ends every other session when it
+ * succeeds — so the panel says all three before the person starts.
+ */
+function PasswordPanel() {
+  const session = useSession();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const inFlight = useRef(false);
+  const handleAuthenticationError = session.handleAuthenticationError;
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (inFlight.current) return;
+    if (newPassword.length < 12) {
+      setMessage({ kind: "error", text: "The new password must be at least 12 characters." });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setMessage({ kind: "error", text: "The two new passwords do not match." });
+      return;
+    }
+
+    inFlight.current = true;
+    setBusy(true);
+    setMessage(null);
+    void (async () => {
+      try {
+        if (!(await session.confirmCurrentIdentity())) return;
+        const change = () => adminApi.changePassword(currentPassword, newPassword);
+        let result;
+        try {
+          result = await change();
+        } catch (error) {
+          if (!(error instanceof AdminApiError) || !error.requiresStepUp) throw error;
+          if (!(await session.stepUp())) return;
+          result = await change();
+        }
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setMessage({
+          kind: "success",
+          text:
+            result.revokedSessions > 0
+              ? `Password changed. ${result.revokedSessions} other session(s) were signed out.`
+              : "Password changed."
+        });
+      } catch (error) {
+        if (handleAuthenticationError(error)) return;
+        setMessage({
+          kind: "error",
+          text:
+            error instanceof AdminApiError ? error.message : "The password could not be changed."
+        });
+      } finally {
+        inFlight.current = false;
+        setBusy(false);
+      }
+    })();
+  };
+
+  return (
+    <section className="panel" aria-labelledby="password-title">
+      <h2 id="password-title">Your password</h2>
+      <p className="panel__hint">
+        Changing it asks you to confirm it is you, and signs out every other session.
+      </p>
+
+      <form className="panel__form" onSubmit={submit}>
+        <label htmlFor="password-current">Current password</label>
+        <input
+          id="password-current"
+          type="password"
+          value={currentPassword}
+          autoComplete="current-password"
+          maxLength={128}
+          disabled={busy}
+          onChange={(event) => setCurrentPassword(event.target.value)}
+        />
+        <label htmlFor="password-new">New password (at least 12 characters)</label>
+        <input
+          id="password-new"
+          type="password"
+          value={newPassword}
+          autoComplete="new-password"
+          minLength={12}
+          maxLength={128}
+          disabled={busy}
+          onChange={(event) => setNewPassword(event.target.value)}
+        />
+        <label htmlFor="password-confirm">Repeat the new password</label>
+        <input
+          id="password-confirm"
+          type="password"
+          value={confirmPassword}
+          autoComplete="new-password"
+          minLength={12}
+          maxLength={128}
+          disabled={busy}
+          onChange={(event) => setConfirmPassword(event.target.value)}
+        />
+        <button type="submit" disabled={busy || !currentPassword || newPassword.length < 12}>
+          {busy ? "Changing…" : "Change password"}
+        </button>
+      </form>
+
+      {message ? (
+        <p
+          role={message.kind === "error" ? "alert" : "status"}
+          className={message.kind === "error" ? "panel__error-text" : "panel__status"}
+        >
+          {message.text}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function describeUserAgent(userAgent: string | null): string | null {
+  if (!userAgent) return null;
+  // A rough family name is all the page needs; the full string is noise.
+  if (userAgent.includes("Firefox/")) return "Firefox";
+  if (userAgent.includes("Edg/")) return "Edge";
+  if (userAgent.includes("Chrome/")) return "Chrome";
+  if (userAgent.includes("Safari/")) return "Safari";
+  return userAgent.slice(0, 40);
+}
+
+function formatDateTime(value: string): string {
+  return new Date(value).toLocaleString();
 }
 
 function describeAuthenticator(item: Authenticator): string {

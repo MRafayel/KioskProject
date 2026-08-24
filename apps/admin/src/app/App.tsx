@@ -17,7 +17,7 @@ import { OverviewScreen } from "../routes/OverviewScreen.js";
 import { PeoplePanel } from "../routes/PeoplePanel.js";
 import { PrintingPanel } from "../routes/PrintingPanel.js";
 import { RetentionPanel } from "../routes/RetentionPanel.js";
-import { SecurityKeysPanel } from "../routes/SecurityKeysPanel.js";
+import { SecurityPanel } from "../routes/SecurityKeysPanel.js";
 import { SessionsPanel } from "../routes/SessionsPanel.js";
 import { SignInScreen } from "../routes/SignInScreen.js";
 
@@ -65,7 +65,7 @@ const SECTIONS: readonly Section[] = [
   { id: "audit", label: "Audit", render: () => <AuditPanel /> },
   { id: "changes", label: "Changes", render: () => <ChangesPanel /> },
   { id: "people", label: "People", render: () => <PeoplePanel /> },
-  { id: "security-keys", label: "Security keys", render: () => <SecurityKeysPanel /> }
+  { id: "security-keys", label: "Security", render: () => <SecurityPanel /> }
 ];
 
 export function App() {
@@ -100,6 +100,10 @@ function Shell() {
         <p role="status">Checking your session…</p>
       </main>
     );
+  }
+
+  if (session.status === "locked" && session.locked) {
+    return <LockScreen />;
   }
 
   if (session.status === "signed-out" || !session.identity) {
@@ -198,6 +202,92 @@ function Shell() {
         </div>
       </div>
     </NavigationContext>
+  );
+}
+
+/**
+ * The lock screen: the session paused, not ended.
+ *
+ * A privileged role reopens with one key touch; the password works for
+ * everybody. "Not me" signs the session out properly. Nothing else renders —
+ * the session behind this screen still holds a place in whatever the person
+ * was doing, and drawing any of it would defeat the lock.
+ */
+function LockScreen() {
+  const session = useSession();
+  const [password, setPassword] = useState("");
+  const locked = session.locked;
+  if (!locked) return null;
+
+  const busy = session.activity !== "idle";
+  const submitPassword = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy || !password) return;
+    const submitted = password;
+    setPassword("");
+    void session.unlock(submitted);
+  };
+
+  return (
+    <main className="signin" aria-labelledby="lock-title">
+      <h1 id="lock-title">Session locked</h1>
+      <p>
+        {locked.displayName} — you have been away for a while. Confirm it is you to continue where
+        you left off.
+      </p>
+
+      {locked.strongAuthMethod === "WEBAUTHN" ? (
+        <button
+          type="button"
+          className="signin__action"
+          disabled={busy}
+          onClick={() => void session.unlock()}
+        >
+          {session.activity === "unlocking"
+            ? "Waiting for security key…"
+            : "Unlock with security key"}
+        </button>
+      ) : null}
+
+      <form className="recovery__form signin__form" onSubmit={submitPassword}>
+        <label htmlFor="lock-password">
+          {locked.strongAuthMethod === "WEBAUTHN" ? "Or unlock with your password" : "Password"}
+        </label>
+        <input
+          id="lock-password"
+          type="password"
+          value={password}
+          autoComplete="current-password"
+          maxLength={128}
+          disabled={busy}
+          onChange={(event) => setPassword(event.target.value)}
+        />
+        <button type="submit" className="recovery__submit" disabled={busy || !password}>
+          {session.activity === "unlocking" ? "Unlocking…" : "Unlock"}
+        </button>
+      </form>
+
+      {locked.strongAuthMethod === "WEBAUTHN" ? (
+        <p className="signin__note">
+          A password unlock reopens the dashboard; sensitive actions will still ask for your key.
+        </p>
+      ) : null}
+
+      {session.error ? (
+        <p role="alert" className="signin__error">
+          {session.error}
+        </p>
+      ) : null}
+
+      <button
+        type="button"
+        className="button-link"
+        disabled={session.activity === "signing-out"}
+        onClick={() => void session.signOut()}
+      >
+        Not {locked.displayName}? Sign out
+      </button>
+    </main>
   );
 }
 

@@ -83,8 +83,6 @@ export const UPDATABLE_COLUMNS = Object.freeze({
 export const INSERTABLE_TABLES = Object.freeze({
   admin_kiosk_scopes:
     "Assigning a kiosk to an Operator for the first time. A repeat assignment clears revoked_at on the row that already exists.",
-  admin_enrollment_tickets:
-    "Authorising one enrolment ceremony, for fifteen minutes, on an Operator account that holds no usable key. A trigger enforces every word of that.",
   audit_events: "Every people action records itself here, including the ones that failed."
 });
 
@@ -105,6 +103,7 @@ export const READABLE_TABLES = Object.freeze({
   // identifier and no people action needs it.
   admin_users: [
     "id",
+    "username",
     "display_name",
     "role",
     "status",
@@ -149,20 +148,6 @@ export const READABLE_TABLES = Object.freeze({
 
   admin_kiosk_scopes: "*",
 
-  // Read back so an issued ticket can be returned with its expiry, and so the
-  // action can say how many are already outstanding. `secret_digest` is absent:
-  // this role writes one and can never match one, which is why redemption
-  // happens on the application connection and not here.
-  admin_enrollment_tickets: [
-    "id",
-    "admin_user_id",
-    "issued_by_admin_id",
-    "reason",
-    "created_at",
-    "expires_at",
-    "consumed_at"
-  ],
-
   // An assignment must name a kiosk that exists. Nothing more is read of it.
   kiosks: ["id", "name", "status"],
 
@@ -183,6 +168,12 @@ export const FORBIDDEN_TABLES = Object.freeze({
     "In-flight ceremony state. Managing a person does not mean standing in the middle of their WebAuthn ceremony.",
   admin_break_glass_credentials:
     "Recovery credential digests. Break-glass is a sealed offline artifact issued by CLI; nothing reachable from a browser touches it.",
+  admin_passwords:
+    "Password digests. The connection that suspends people must never read, plant or replace the thing that signs them in.",
+  admin_invitations:
+    "Invitation digests. Creating an account and its one-time code is the identity service's act on the application connection, with the invitation matrix in front of it.",
+  admin_password_resets:
+    "Reset digests. Same boundary as invitations: issued and redeemed on the application connection only.",
 
   refunds: "Money. Its own role, its own pool: printing_kiosk_admin_refund_writer.",
   refund_authorizations: "The record of who decided a payout.",
@@ -213,6 +204,9 @@ export const FORBIDDEN_TABLES = Object.freeze({
   agent_commands: "Durable work for a printer.",
   outbox_events: "The event publication log.",
   session_events: "The session timeline.",
+  kiosk_agents:
+    "The device plane's agent registry. Hardware management is not reachable from any admin connection.",
+  printers: "The device plane's printer registry. Same boundary as kiosk_agents.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

@@ -8,7 +8,6 @@ import {
   authorizeRefundResponseSchema,
   changeAdminStatusResponseSchema,
   correctRecoveryResponseSchema,
-  enrollmentTicketResponseSchema,
   kioskAssignmentResponseSchema,
   publishChangeResponseSchema,
   resolveRecoveryResponseSchema,
@@ -37,8 +36,6 @@ import {
   type ChangeAdminStatusResponse,
   type CorrectRecoveryBody,
   type CorrectRecoveryResponse,
-  type EnrollmentTicketResponse,
-  type IssueEnrollmentTicketBody,
   type KioskAssignmentBody,
   type KioskAssignmentResponse,
   type PublishChangeBody,
@@ -253,22 +250,6 @@ export const observabilityApi = {
       `/v1/admin/people/${encodeURIComponent(adminUserId)}/authenticators/${encodeURIComponent(
         authenticatorId
       )}/revoke`,
-      body
-    ),
-
-  /**
-   * Mint one enrolment ticket. The only response in this client that contains a
-   * credential — shown once, never stored, never re-readable.
-   *
-   * Parsed rather than trusted, and for a sharper reason than the others: the
-   * schema's `grantsSession: false` literal means no response can persuade this
-   * build that redeeming a ticket signs somebody in.
-   */
-  issueEnrollmentTicket: (adminUserId: string, body: IssueEnrollmentTicketBody) =>
-    adminRequestParsed<EnrollmentTicketResponse>(
-      enrollmentTicketResponseSchema,
-      "POST",
-      `/v1/admin/people/${encodeURIComponent(adminUserId)}/enrollment-ticket`,
       body
     ),
 

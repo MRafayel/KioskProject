@@ -1,11 +1,25 @@
 # Handoff — Admin Control Plane
 
 For the next session. Read this, then `docs/ADMIN_PHASE_0.md` (the threat model
-and the phase plan) and `docs/ADMIN_PHASE_6_STATUS.md` (what shipped last).
+and the phase plan) and `docs/ADMIN_PHASE_7_STATUS.md` (what shipped last).
 
-**State: Phases 0–6 complete, all checks green. The working tree has uncommitted
-Phase 6 work awaiting the owner's commit. Every phase in the plan is now built;
-what comes next is a choice rather than a queue — see §8.**
+**State: Phases 0–7 complete, all checks green. The working tree has uncommitted
+Phase 6 and Phase 7 work awaiting the owner's commit. Every phase in the plan is
+built; what comes next is a choice rather than a queue — see §8.**
+
+> **Phase 7 replaced how people sign in, and it invalidates the identity half of
+> every earlier document.** Authentication is now **username + Argon2id password
+> for everybody, plus a WebAuthn key as a second factor for Admin and Technical
+> Admin**. Inactivity **locks** a session rather than destroying it. Accounts are
+> created by **invitation** from the panel, and recovered by an
+> **administrator-issued reset code**. The Technical Admin device-bound key rule
+> is **gone**, which is what ends the Touch ID problem below. Enrolment tickets
+> are gone, subsumed by invitations. Where an older document says "WebAuthn is
+> the only factor", the code is right and the document is stale —
+> `ADMIN_PHASE_7_STATUS.md` is the current account.
+>
+> **Existing accounts have no password and cannot sign in until one is issued.**
+> See `ADMIN_PHASE_7_STATUS.md` §6 before doing anything else with a deployment.
 
 > **Two owner decisions in Phase 5 changed how to read the older documents.**
 > Admin is the operational authority; Technical Admin is a support role and is
@@ -74,9 +88,14 @@ longer owns the table it protects).
 **Authorization:** granular capabilities, never `if (role === "admin")`. Default
 deny. Frontend visibility is _not_ authorization — the server refuses regardless
 of what the UI draws, and every refusal is covered by a test. **No capability
-anywhere changes an account's role**, and none may be added: creating an
-identity and deciding what it is are CLI acts with a database credential behind
-them.
+anywhere changes an account's role**, and none may be added.
+
+Phase 7 narrowed that last sentence rather than breaking it. Creating an
+identity is now a panel act — an invitation, behind `invitation.manage`, a
+step-up ceremony and a role matrix that stops an Admin minting a peer. Deciding
+what an existing account _is_ remains impossible from anywhere: no connection
+reachable from a browser holds UPDATE on `admin_users.role`, and an invitation
+fixes the role at creation.
 
 **Since Phase 6, two rules about routes are enforced by a test rather than by
 review.** Every admin route must appear in the `ENDPOINTS` table in
@@ -90,8 +109,11 @@ to display a list.
 Admin, and possibly one Technical Admin account. Design so that is survivable.
 
 **Risk classes:** R0 read → R4. R1 safe and idempotent; R2 sensitive, requiring
-a fresh WebAuthn assertion, a reason and an audit row with before and after; R4
-permanently impossible from the panel.
+a fresh strong reauthentication, a reason and an audit row with before and
+after; R4 permanently impossible from the panel. Since Phase 7 "strong" follows
+the role: a WebAuthn assertion for Admin and Technical Admin, the password for
+an Operator, who holds nothing stronger. A privileged account cannot satisfy a
+step-up with its password.
 
 **R3 means "no single account may do this alone", and nothing is classified R3.**
 There is one Admin (§23.5 of `ADMIN_PHASE_0.md`), so such a rule would be a
@@ -102,8 +124,9 @@ reintroduce a second-approver workflow without the owner asking for one.
 
 **Dependencies:** avoid unnecessary ones, justify every significant one in the
 phase doc. The whole control plane has added exactly one runtime dependency so
-far (`@simplewebauthn/server`, justified in `ADMIN_PHASE_0.md` §13.1). Phases 3,
-4, 4B, 5 and 6 added none.
+far (`@simplewebauthn/server`, justified in `ADMIN_PHASE_0.md` §13.1). Phases 3
+through 7 added none — Phase 7's Argon2id is `node:crypto` in Node 24, which is
+why password hashing cost nothing.
 
 **The UI is temporary and will be replaced.** Keep panel work minimal and
 functional; do not invest in visual polish, layout refinement or reusable UI
@@ -206,7 +229,9 @@ its digest from the rows written and refuses at COMMIT_. Preserve all four.
 
 Since Phase 6 the migrator also owns `print_job_recovery_resolutions`,
 `print_job_recovery_corrections`, `refund_authorizations` and
-`cleanup_retry_requests` — thirteen tables in all. The application keeps SELECT
+`cleanup_retry_requests`; Phase 7 added `admin_passwords`, `admin_invitations`
+and `admin_password_resets`, and retired `admin_enrollment_tickets` — fifteen
+tables in all. The application keeps SELECT
 on those four and nothing else, so the credential the append-only triggers exist
 to constrain can no longer switch them off. **In production the API and worker
 now refuse to start if the application role is a superuser**, because under that
@@ -271,7 +296,6 @@ Admin only, and exactly one role in the system can cause a payout.
 | assign or withdraw a kiosk             | `operator.manage`               | Admin      | `revoked_at`, never a delete         |
 | sign an Operator out everywhere        | `operator.manage`               | Admin      | session revocations                  |
 | retire an Operator's key               | `authenticator.manage.operator` | Admin + TA | a revocation, refused at the minimum |
-| issue an enrolment ticket              | `authenticator.manage.operator` | Admin + TA | a 15-minute single-use authorisation |
 
 Plus `GET /v1/admin/people` on the read pool — gated on `authenticator.manage.
 operator` until Phase 6 found that this made a screen demand a security key, and
@@ -298,6 +322,24 @@ the tariff's canonical digest from the rows actually written and refuses at
 COMMIT. The record takes no UPDATE and no DELETE from any role, its own owner
 included. Publishing requires echoing the digest the preview returned, so what is
 published is what was reviewed.
+
+**Phase 7 — authentication.** How somebody signs in, rebuilt. Full account in
+`ADMIN_PHASE_7_STATUS.md`; the short version:
+
+| Was                                  | Is                                                        |
+| ------------------------------------ | --------------------------------------------------------- |
+| WebAuthn only, no username           | username + Argon2id password; key as 2FA for Admin and TA |
+| 15-minute idle → session destroyed   | idle **locks**; 6h/2h/1h by role, reopened by one reauth  |
+| 4-hour absolute, all roles           | 30d/14d/7d by role — the only thing that ends a session   |
+| TA keys must be device-bound roaming | any authenticator; Touch ID works and persists            |
+| accounts by CLI, keys by ticket      | invitations from the panel, role matrix, audited          |
+| lost key → sealed break-glass        | lost password → admin-issued reset; break-glass unchanged |
+
+Three new tables (`admin_passwords`, `admin_invitations`,
+`admin_password_resets`), all migrator-owned. Argon2id is `node:crypto` in Node
+24, so **no new dependency**. `tests/integration/admin-authentication.test.ts`
+is the phase gate: 17 tests, including the one that would have caught the
+original defect — logging out leaves every credential exactly where it was.
 
 **Phase 6 — hardening.** No new operational surface. What it produced instead:
 
@@ -333,6 +375,10 @@ published is what was reviewed.
 | [admin-pricing-writer-matrix.mjs](packages/database/scripts/admin-pricing-writer-matrix.mjs)                         | the only connection that can change a price       |
 | [admin-owner.mjs](packages/database/scripts/admin-owner.mjs)                                                         | who owns the evidence, and the superuser check    |
 | [admin-security.test.ts](tests/integration/admin-security.test.ts)                                                   | the authorization matrix, and the Phase 6 gate    |
+| [authentication.ts](packages/admin-access/src/authentication.ts)                                                     | which roles need a key, who may invite and reset  |
+| [passwords.ts](services/api/src/modules/admin/passwords.ts)                                                          | Argon2id on the runtime's own implementation      |
+| [admin-authentication.test.ts](tests/integration/admin-authentication.test.ts)                                       | the Phase 7 gate: login, lock, unlock, step-up    |
+| [migration.sql](packages/database/prisma/migrations/20260824010000_admin_password_authentication/migration.sql)      | passwords, invitations, resets, and what retired  |
 | [admin-read-benchmark.ts](services/api/scripts/admin-read-benchmark.ts)                                              | what the dashboard costs at volume                |
 | [migration.sql](packages/database/prisma/migrations/20260811020000_admin_phase4_money_and_corrections/migration.sql) | the deferred authorization trigger                |
 | [migration.sql](packages/database/prisma/migrations/20260811030000_admin_phase4b_people_management/migration.sql)    | who an enrolment ticket may ever name             |
@@ -379,9 +425,19 @@ left running. To stop the panel: `lsof -ti tcp:5175 | xargs kill`.
 `ADMIN_WEBAUTHN_RP_NAME`, `ADMIN_READ_DATABASE_URL`, `ADMIN_WRITE_DATABASE_URL`,
 `ADMIN_REFUND_DATABASE_URL`, `ADMIN_PEOPLE_DATABASE_URL`,
 `ADMIN_OWNER_DATABASE_URL`. All six roles are provisioned in the local database
-already.
+already. Phase 7's session-window and one-time-grant settings all have defaults
+(`ADMIN_PHASE_7_STATUS.md` §6); `ADMIN_SESSION_IDLE_MINUTES` and
+`ADMIN_SESSION_ABSOLUTE_MINUTES` no longer exist.
 
-Account CLI: `pnpm db:admin <create|list|break-glass|revoke-break-glass|suspend|resume|disable>`.
+The role provisioning scripts read a password from a `*_PASSWORD` variable
+rather than from the connection URL — `ADMIN_OWNER_DATABASE_PASSWORD`,
+`ADMIN_READ_DATABASE_PASSWORD` and so on. They are not in `.env`; extract them
+from the matching URL when re-provisioning. `admin-owner.mjs provision` also has
+to run on a connection that may `ALTER ROLE`, which the migrator itself may not,
+so point `ADMIN_OWNER_DATABASE_URL` at `DATABASE_URL` for that one command.
+
+Account CLI: `pnpm db:admin <bootstrap-technical-admin|create|invite|reset-password|
+set-username|list|break-glass|revoke-break-glass|suspend|resume|disable>`.
 Role CLIs: `pnpm db:admin-reader`, `db:admin-writer`, `db:admin-refund-writer`,
 `db:admin-people-writer`, `db:admin-pricing-writer` (each
 `provision|verify|disable`) and `pnpm db:admin-owner <provision|verify>`.
@@ -390,30 +446,40 @@ Read performance: `pnpm db:admin-benchmark <seed|measure|clean>` — development
 only, refuses a non-loopback database, and `clean` cannot remove the audit rows
 it wrote because the log is append-only for everybody.
 
-Onboarding an Operator end to end: `pnpm db:admin create --role OPERATOR ...`,
-then **People → Issue an enrolment code** in the panel (read it out, do not send
-it), then the person enters it at sign-in twice for two keys, then **People →
-Kiosks**. The panel cannot create an account and cannot change a role.
+Onboarding an Operator end to end, since Phase 7: **People → Invite somebody**
+in the panel — name, username, role, reason — then hand over the code it shows
+once (read it out, do not send it). They enter it at sign-in under "I have an
+invitation code", set a password, and are active. Then **People → Kiosks**.
+A privileged invitation adds one step: they enrol a security key before the
+account activates. The panel still cannot change a role; nothing anywhere can.
+
+The CLI does the same for a system with nobody in it yet:
+`pnpm db:admin bootstrap-technical-admin --name "Ada" --username ada`, which
+refuses to run while a working Technical Admin exists.
 
 Checks before any commit: `pnpm lint && pnpm typecheck && pnpm test && pnpm format:check`,
 plus `pnpm test:integration` for anything touching the admin plane.
 
-### The Touch ID situation — expect this question again
+### The Touch ID situation — resolved in Phase 7
 
-The owner's account (`Raf`) is `TECHNICAL_ADMIN`. That role requires
-**cross-platform, non-backup-eligible** authenticators, which Touch ID is not.
-With no hardware FIDO2 key on this Mac, the only thing that satisfies it is a
-Chrome DevTools **virtual authenticator**, which is destroyed when DevTools or
-the browser closes — so every browser session costs one break-glass code. Four
-codes have been burned this way; one unconsumed code (labelled "virtual key E")
-is held by the owner offline and is valid ~90 days from 2026-08-09.
+**This is fixed and the question should not come back.** The Technical Admin
+device-bound key rule is gone: with a password as the first factor, Touch ID is
+an acceptable second factor for every role, and it persists across browser
+restarts. No more virtual authenticators, and no more break-glass codes spent on
+what were effectively browser restarts.
 
-Note the failure mode that burned one: break-glass **consumes the code at the
-start** of the ceremony, so if `navigator.credentials.create()` never completes
-(no virtual authenticator present), the code is spent with nothing enrolled.
+Kept for the record, because it explains four spent envelopes: the role used to
+require **cross-platform, non-backup-eligible** authenticators, which Touch ID is
+not, so on a Mac with no hardware FIDO2 key the only thing satisfying it was a
+Chrome DevTools virtual authenticator — destroyed when the browser closed. One
+unconsumed code (labelled "virtual key E") is held by the owner offline and is
+valid ~90 days from 2026-08-09; it still works, for its actual purpose, which is
+an account that has lost every key.
 
-The durable fix is a second **`ADMIN`** account, where Touch ID is acceptable
-and persists. This has been offered and not taken up; offer it once, then drop it.
+Note the failure mode that burned one, because break-glass still behaves this
+way: it **consumes the code at the start** of the ceremony, so if
+`navigator.credentials.create()` never completes the code is spent with nothing
+enrolled. Invitations deliberately do not — see `ADMIN_PHASE_7_STATUS.md` §1.5.
 
 ---
 
@@ -451,9 +517,10 @@ Full detail in `docs/ADMIN_PHASE_6_STATUS.md` §4.3, `ADMIN_PHASE_4_STATUS.md`
    capability by doing so and still cannot suspend anybody or move a kiosk
    assignment, but it gains a second name to act under. Both halves are audited
    and outstanding tickets are visible on the roster.
-8. **An enrolment ticket cannot be withdrawn.** Issued by mistake, it expires in
-   fifteen minutes and there is no button. A `revoked_at` column and a fourth
-   route away if that turns out to matter.
+8. ~~An enrolment ticket cannot be withdrawn.~~ **Closed in Phase 7** by
+   deleting the feature. Invitations replaced tickets and are revocable from the
+   panel, as are password resets; issuing a fresh invitation revokes the
+   outstanding one in the same transaction.
 9. **Production has an unfixed 304 blind spot.** In dev this was a real bug: the
    CSP header was set via `server.headers`, which Vite does not apply to `304 Not
 Modified`, and `index.html`'s ETag never changes when only a header changes —
@@ -475,6 +542,16 @@ Modified`, and `index.html`'s ETag never changes when only a header changes —
     answers "are these queries fast" (they are — 12.5ms at p95 on 50,000
     sessions) and not "what do they cost the print path while a kiosk is
     quoting". The second question needs load from both sides at once.
+12. **Six device-plane integration tests fail, and did before Phase 7.**
+    `device-plane.test.ts`, all about `approvedQueues`. Verified by stashing the
+    Phase 7 work and re-running: identical failures on a clean checkout. They
+    belong to the uncommitted device work, not to the control plane.
+13. **`pnpm format:check` fails on 25 files nobody in Phase 7 touched** — the
+    device, telemetry and kiosk-agent work. Phase 7's own files are formatted.
+    Run Prettier over the rest when that work is picked up.
+14. **Existing admin accounts have no password after the Phase 7 migration**, so
+    nobody can sign in until one is issued. `ADMIN_PHASE_7_STATUS.md` §6 is the
+    procedure. This is the first thing to do on any deployment.
 
 Two small improvements were offered in an earlier session and never approved —
 take them or drop them: a test that clicks an attention row and asserts the
@@ -485,13 +562,16 @@ already been used…" / "The code was spent but no key was enrolled.").
 
 ## 8. Do this next
 
-**The phase plan is finished.** `ADMIN_PHASE_0.md` §22 had six rows and all six
-are built. There is no next phase queued, so the next session starts with a
-choice rather than a list — which makes it the first session where "what should
-we do" is a real question and not a formality. Put it to the owner before
-building anything.
+**The phase plan is finished, and Phase 7 was the first phase from outside it** —
+the owner asked for it directly rather than it coming off `ADMIN_PHASE_0.md` §22.
+Expect the same again: the next session starts with a choice, not a list. Put it
+to the owner before building anything.
 
-The honest ranking, with the reason each earns its place:
+**Before anything else, give the existing accounts passwords** (§7 item 14). It
+is not a phase, it is five minutes with the CLI, and nobody can sign in until it
+is done.
+
+The honest ranking of what is left, with the reason each earns its place:
 
 1. **Nothing settles a refund** (§7 item 4). This is the largest hole left in the
    product, not just in the control plane: obligations have been accumulating at
@@ -511,9 +591,13 @@ The honest ranking, with the reason each earns its place:
    read may be gated on a capability that can change something.
 5. **The four dead capabilities** (§7 item 10). Small, and worth doing while
    somebody is holding the authorization model in their head.
+6. **Two questions Phase 7 left open rather than answered.** Whether an Operator
+   should be able to enrol a security key at all — they can, and it does nothing
+   for their sign-in — and whether break-glass should stop burning its code when
+   the ceremony fails, which invitations now demonstrate is possible.
 
 Whatever is chosen, follow the established rhythm: implement, prove the gate with
-integration tests, write `docs/ADMIN_PHASE_7_STATUS.md` in the same voice (what
+integration tests, write `docs/ADMIN_PHASE_8_STATUS.md` in the same voice (what
 was built, new dependencies and their justification, verification, security
 review including deviations and known gaps, printing performance impact, setup,
 what remains), and **let the owner make the commit** — that is the convention
@@ -526,9 +610,10 @@ decision for, so after a migration each of the five least-privilege roles must b
 re-provisioned before deploy. That is the mechanism working, not a nuisance — but
 it does mean `pnpm db:migrate:owner` is never the last step.
 
-And **the migrator now owns thirteen tables, not nine.** Any migration that
+And **the migrator now owns fifteen tables, not nine.** Any migration that
 alters `print_job_recovery_resolutions`, `print_job_recovery_corrections`,
-`refund_authorizations` or `cleanup_retry_requests` has to run as the owner too,
+`refund_authorizations`, `cleanup_retry_requests`, `admin_passwords`,
+`admin_invitations` or `admin_password_resets` has to run as the owner too,
 and a role script that grants on one of them needs the owner connection — which
 is the defect Phase 5 found in `admin-append-role.mjs` and Phase 6 found again in
 `admin-reader.mjs`. If a third script is ever written, check which connection it
