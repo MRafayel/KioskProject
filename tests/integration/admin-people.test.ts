@@ -655,6 +655,47 @@ describe("keys and sessions belonging to somebody else", () => {
 // ---------------------------------------------------------------------------
 
 describe("invitations", () => {
+  it("opens a WebAuthn ceremony for a privileged invitation", async () => {
+    const created = await request(technical, "POST", "/v1/admin/invitations", {
+      displayName: "Invited Technical Admin",
+      username: `invited-technical-${randomBytes(3).toString("hex")}`,
+      role: "TECHNICAL_ADMIN",
+      reason: "A second technical administrator needs a control-plane account."
+    });
+
+    expect(created.statusCode).toBe(200);
+    const invitation = created.json();
+    seededAdminUserIds.push(invitation.adminUserId);
+
+    const password = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/invitation/password",
+      payload: { code: invitation.invitationCode, password: "a-well-chosen-password" }
+    });
+    expect(password.statusCode).toBe(200);
+    expect(password.json()).toMatchObject({ activated: false, webAuthnRequired: true });
+
+    const options = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/invitation/registration/options",
+      payload: { code: invitation.invitationCode }
+    });
+    expect(options.statusCode).toBe(200);
+    expect(options.json()).toMatchObject({
+      ceremonyId: expect.any(String),
+      options: { challenge: expect.any(String), rp: { id: environment.ADMIN_WEBAUTHN_RP_ID } }
+    });
+
+    await expect(
+      database.adminWebAuthnChallenge.findUniqueOrThrow({
+        where: { id: options.json().ceremonyId }
+      })
+    ).resolves.toMatchObject({
+      adminUserId: invitation.adminUserId,
+      purpose: "INVITATION_REGISTRATION"
+    });
+  });
+
   it("creates the account and a code, and audits both the issue and the acceptance", async () => {
     const username = `invited-${randomBytes(3).toString("hex")}`;
     const created = await request(admin, "POST", "/v1/admin/invitations", {
