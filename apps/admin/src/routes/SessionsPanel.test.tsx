@@ -20,15 +20,29 @@ import { observabilityApi } from "../features/observability/api.js";
  * a keyboard user does not restart at the top of the page.
  */
 
-vi.mock("../features/auth/SessionProvider.js", () => ({
-  useSession: () => ({
-    can: () => true,
-    handleAuthenticationError: () => false
-  })
-}));
+vi.mock("../features/auth/SessionProvider.js", () => {
+  // Production memoizes this callback. Keeping it stable here ensures filter
+  // changes have to invalidate the data loader itself rather than accidentally
+  // retriggering it through an unrelated effect dependency.
+  const handleAuthenticationError = () => false;
+  return {
+    useSession: () => ({
+      can: () => true,
+      handleAuthenticationError
+    })
+  };
+});
 
 beforeEach(() => {
-  vi.spyOn(observabilityApi, "sessions").mockResolvedValue(listing());
+  vi.spyOn(observabilityApi, "sessions").mockImplementation((filters = {}) => {
+    const result = listing();
+    return Promise.resolve({
+      ...result,
+      items: filters.state
+        ? result.items.filter((item) => item.state === filters.state)
+        : result.items
+    });
+  });
   vi.spyOn(observabilityApi, "session").mockResolvedValue(detail());
   vi.spyOn(observabilityApi, "timeline").mockResolvedValue({
     sessionId: sessionId(1),
@@ -93,7 +107,7 @@ describe("the sessions table", () => {
 });
 
 describe("the summary tiles", () => {
-  it("filters the table when chosen, and clears when chosen again", async () => {
+  it("keeps every card, the returned rows, and the state dropdown synchronized", async () => {
     const user = userEvent.setup();
     render(<SessionsPanel />);
 
@@ -108,17 +122,36 @@ describe("the summary tiles", () => {
         expect.objectContaining({ state: "FAILED" })
       )
     );
-    expect(await screen.findByRole("button", { name: /^Failed:/ })).toHaveAttribute(
+    const activeFailed = await screen.findByRole("button", { name: /^Failed:/ });
+    expect(activeFailed).toHaveAttribute("aria-pressed", "true");
+    expect(activeFailed.closest(".kpi")).toHaveClass("is-pressed");
+    expect(screen.getByLabelText("State")).toHaveValue("FAILED");
+    expect(sessionRows()).toHaveLength(1);
+    expect(sessionRows()[0]).toHaveAccessibleName(/Failed, started/);
+
+    await user.click(screen.getByRole("button", { name: /^Recovery required:/ }));
+    await waitFor(() => expect(screen.getByLabelText("State")).toHaveValue("RECOVERY_REQUIRED"));
+    expect(screen.getByRole("button", { name: /^Recovery required:/ })).toHaveAttribute(
       "aria-pressed",
       "true"
     );
+    expect(sessionRows()).toHaveLength(1);
+    expect(sessionRows()[0]).toHaveAccessibleName(/Recovery required, started/);
 
-    await user.click(screen.getByRole("button", { name: /^Failed:/ }));
-    await waitFor(() =>
-      expect(observabilityApi.sessions).toHaveBeenLastCalledWith(
-        expect.objectContaining({ state: undefined })
-      )
+    await user.click(screen.getByRole("button", { name: /^Completed:/ }));
+    await waitFor(() => expect(screen.getByLabelText("State")).toHaveValue("COMPLETED"));
+    expect(screen.getByRole("button", { name: /^Completed:/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
     );
+    expect(sessionRows()).toHaveLength(1);
+    expect(sessionRows()[0]).toHaveAccessibleName(/Completed, started/);
+
+    await user.click(screen.getByRole("button", { name: "Show all" }));
+    await waitFor(() => expect(screen.getByLabelText("State")).toHaveValue(""));
+    expect(sessionRows()).toHaveLength(3);
+    expect(screen.queryAllByRole("button", { pressed: true })).toHaveLength(0);
+    expect(document.querySelector(".kpi.is-pressed")).not.toBeInTheDocument();
   });
 
   it("filters to charged-but-unprinted sessions without asking the server for a state", async () => {
@@ -128,28 +161,47 @@ describe("the summary tiles", () => {
     await user.click(await screen.findByRole("button", { name: /^Charged, not printed: 1\./ }));
 
     // One row survives: the charged one. The header row is always present.
-    await waitFor(() => expect(screen.getAllByRole("row")).toHaveLength(2));
+    await waitFor(() => expect(sessionRows()).toHaveLength(1));
+    expect(sessionRows()[0]).toHaveAccessibleName(/Recovery required, started/);
+    expect(screen.getByLabelText("State")).toHaveValue("");
+    expect(screen.getByRole("button", { name: /^Charged, not printed:/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
     expect(observabilityApi.sessions).not.toHaveBeenCalledWith(
       expect.objectContaining({ state: "CHARGED" })
     );
   });
 
-  it("keeps the state dropdown and the tiles as one filter", async () => {
+  it("lets the state dropdown replace a card filter instead of combining with it", async () => {
     const user = userEvent.setup();
     render(<SessionsPanel />);
 
-    await user.click(await screen.findByRole("button", { name: /^Completed:/ }));
-    await waitFor(() => expect(screen.getByLabelText("State")).toHaveValue("COMPLETED"));
+    await user.click(await screen.findByRole("button", { name: /^Charged, not printed:/ }));
+    await waitFor(() => expect(sessionRows()).toHaveLength(1));
 
-    await user.selectOptions(screen.getByLabelText("State"), "");
+    await user.selectOptions(screen.getByLabelText("State"), "FAILED");
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^Completed:/ })).toHaveAttribute(
-        "aria-pressed",
-        "false"
+      expect(observabilityApi.sessions).toHaveBeenLastCalledWith(
+        expect.objectContaining({ state: "FAILED" })
       )
+    );
+    await waitFor(() => expect(sessionRows()).toHaveLength(1));
+    expect(sessionRows()[0]).toHaveAccessibleName(/Failed, started/);
+    expect(screen.getByRole("button", { name: /^Failed:/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByRole("button", { name: /^Charged, not printed:/ })).toHaveAttribute(
+      "aria-pressed",
+      "false"
     );
   });
 });
+
+function sessionRows(): HTMLButtonElement[] {
+  return screen.getAllByRole("button", { name: /^Session on / });
+}
 
 function sessionId(ordinal: number): string {
   return `0000000${ordinal}-0000-4000-8000-000000000000`;

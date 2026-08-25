@@ -348,16 +348,7 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
         </KpiRow>
       ) : null}
 
-      <Panel
-        title="Recent sessions"
-        state={list}
-        emptyMessage="No sessions to show."
-        hint={
-          items.length > 0
-            ? "Select any row to open the session beside the table. Counts above filter these rows."
-            : undefined
-        }
-      >
+      <Panel title="Recent sessions" state={list} emptyMessage="No sessions to show.">
         {list.data && visible.length === 0 ? (
           <Empty>
             {filtered ? (

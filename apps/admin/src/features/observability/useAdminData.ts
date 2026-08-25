@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useSession } from "../auth/SessionProvider.js";
 import { AdminApiError } from "../auth/api.js";
@@ -14,6 +14,11 @@ import { AdminApiError } from "../auth/api.js";
  *
  * A poll never overlaps its predecessor and never fires while the tab is
  * hidden, so a forgotten dashboard costs nothing.
+ *
+ * The loader's identity is also the query key: callers memoize it with
+ * `useCallback`, and changing one of its dependencies starts a fresh read.
+ * This is what keeps controls such as state filters and pagination cursors in
+ * sync with the rows returned by the server.
  */
 
 export interface AdminDataState<T> {
@@ -33,8 +38,6 @@ export function useAdminData<T>(
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [nonce, setNonce] = useState(0);
-  const loadRef = useRef(load);
-  loadRef.current = load;
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
@@ -49,7 +52,7 @@ export function useAdminData<T>(
 
     const run = async () => {
       try {
-        const next = await loadRef.current();
+        const next = await load();
         if (cancelled) return;
         setData(next);
         setError(null);
@@ -85,7 +88,7 @@ export function useAdminData<T>(
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [enabled, nonce, options.refreshMilliseconds, session.handleAuthenticationError]);
+  }, [enabled, load, nonce, options.refreshMilliseconds, session.handleAuthenticationError]);
 
   return { data, error, loading, reload };
 }

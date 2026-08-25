@@ -1571,6 +1571,13 @@ code {
   font-size: 0.9rem;
 }
 
+/* The Sessions page is primarily an investigation table. With its former hint
+   removed, let the pane use that vertical space (and a little more of taller
+   displays) so more sessions remain visible at once. */
+.sessions-pane {
+  max-height: clamp(24rem, 64vh, 50rem);
+}
+
 .sessions-table tbody tr {
   cursor: pointer;
   transition: background 110ms ease;
