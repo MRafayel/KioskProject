@@ -91,11 +91,26 @@
   --radius-control: 10px;
   --radius-pill: 999px;
 
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+  /* Type, as two tokens so a change lands everywhere at once instead of in the
+     nine places a family was previously spelled out.
+
+     Both stacks are resolved from faces the operating system already has. The
+     panel ships no web font and imports none: a dashboard somebody opens to
+     find out whether a print failed cannot spend its first paint waiting on a
+     font host, and a control plane that fetches from one has acquired an
+     outbound dependency it did not need.
+
+     `-apple-system` leads because SF Text is the most legible face available at
+     the sizes these tables use, and the kiosks and the office machines are
+     Macs. The named fallbacks that follow are the closest equivalent on each
+     other platform and are metrically similar enough that nothing reflows
+     between them. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
+    system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+
+  font-family: var(--font-sans);
 }
 
 /* Motion is decorative everywhere in this panel — a hover tint, a revealed
@@ -115,12 +130,45 @@
   box-sizing: border-box;
 }
 
+/**
+ * The readability pass, kept here rather than repeated on each block.
+ *
+ * `-webkit-font-smoothing: antialiased` used to be set here and has been
+ * removed, which is the single largest change to how this panel reads. It
+ * switches macOS from subpixel to greyscale rendering, and greyscale strips
+ * roughly a third of the apparent weight from dark text on a light background.
+ * On a page whose secondary text is already grey and whose table is set at
+ * fourteen pixels, that is the difference between quiet and washed out — it is
+ * a look borrowed from large display type, applied to the smallest text on the
+ * screen. Letting the platform render normally puts the weight back.
+ *
+ * The hair of negative tracking is what a 15–16px UI face wants: it tightens
+ * word shapes without touching the letterforms, so words read as units.
+ */
 body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
+  font-size: 1rem;
   line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.006em;
+  text-rendering: optimizeLegibility;
+  /* The detail sheet locks page scrolling while it is open. On a platform with
+     a scrollbar that takes width, removing it would shift the whole layout
+     sideways as the sheet appears — so the gutter is held whether the bar is
+     there or not, and nothing moves. */
+  scrollbar-gutter: stable;
+}
+
+/* Anything a person compares down a column — times, counts, money — is set on a
+   fixed advance so the digits line up between rows. Prose is left alone. */
+.table,
+.kpi__value,
+.money,
+.counter dd,
+.stat dd,
+time {
+  font-variant-numeric: tabular-nums;
 }
 
 /* A control reads as a control by being slightly recessed from the card it sits
@@ -222,8 +270,10 @@ textarea::placeholder {
 }
 
 code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85em;
+  font-family: var(--font-mono);
+  /* Mono faces run small beside SF Text at the same nominal size; 0.9em brings
+     an identifier back to the x-height of the sentence it sits in. */
+  font-size: 0.9em;
 }
 
 /* ---------------------------------------------------------------------------
@@ -270,11 +320,26 @@ code {
   padding: 0.7rem 1.6rem;
 }
 
+/* Hover stays inside the accent. A filled orange control that turned blue under
+   the pointer was the one place in the panel where an interaction changed the
+   meaning of a colour rather than its intensity — and blue means nothing here,
+   so the button appeared to become a different button.
+   The three states are one hue at three depths: `--accent-deep` at rest,
+   `--accent-strong` under the pointer, and a shade past it when held. All three
+   carry white above 5:1, and the shift is large enough to read as feedback
+   without the control appearing to change identity. */
 .signin__action:hover:not(:disabled),
 .recovery__submit:hover:not(:disabled),
 .button-primary:hover:not(:disabled) {
-  background: #1d54cc;
+  background: var(--accent-strong);
   border-color: var(--accent-strong);
+}
+
+.signin__action:active:not(:disabled),
+.recovery__submit:active:not(:disabled),
+.button-primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-strong) 88%, #000000);
+  border-color: color-mix(in srgb, var(--accent-strong) 88%, #000000);
 }
 
 .signin__error {
@@ -1081,6 +1146,45 @@ code {
   background: color-mix(in srgb, var(--ink) 7%, transparent);
 }
 
+/**
+ * A tile that is currently filtering the table under it.
+ *
+ * This has to be distinguishable from `--elevated`, which is a different claim
+ * about the same tile: elevated says "this number needs a person", pressed says
+ * "you are looking at only these rows". A tile is routinely both, so the two
+ * cannot share a treatment.
+ *
+ * Elevated keeps the soft tint it already had. Pressed takes a ring — a shape
+ * change rather than another fill, so it survives on top of the tint, and so
+ * that the state reads as a control being held down rather than as one more
+ * card with a colour. `aria-pressed` carries the same fact to a screen reader,
+ * and the footnote says it in words for anyone the ring does not reach.
+ */
+.kpi.is-pressed {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent),
+    var(--shadow-lift);
+}
+
+.kpi.is-pressed .kpi__label {
+  color: var(--accent-strong);
+}
+
+/* Says what clicking again does, in the tile's own quietest line. */
+.kpi__foot--pressed {
+  color: var(--accent-strong);
+  font-weight: 500;
+}
+
+/* The way back to everything, stated on the line that says what is being shown.
+   Deliberately not a fifth tile: "All" is not a number, and drawing it as one
+   would put a count beside it that nothing counted. */
+.page-head__clear {
+  margin-left: 0.35rem;
+  font-size: inherit;
+}
+
 /* ---------------------------------------------------------------------------
    Modules
    ---------------------------------------------------------------------------
@@ -1369,10 +1473,34 @@ code {
   margin-top: 0.85rem;
 }
 
+/**
+ * A table that keeps its own scroll, so its header can stay.
+ *
+ * `position: sticky` resolves against the nearest scrolling ancestor, and the
+ * plain wrapper above is only ever scrolled sideways — a header stuck to the
+ * top of a box that never scrolls down is a header that never moves. Giving the
+ * pane a height of its own makes the rows the thing that scrolls and the
+ * column names the thing that does not.
+ *
+ * The height is a viewport fraction with a floor and a ceiling: tall enough to
+ * be worth scrolling inside on a laptop, never so tall on a large display that
+ * the header leaves the screen before the pane does.
+ */
+.table-scroll--pane {
+  overflow: auto;
+  max-height: clamp(22rem, 58vh, 44rem);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  /* The pane is its own surface, one step down from the card, so the sticky
+     header has something opaque to sit on and the scroll edge is legible. */
+  background: var(--card);
+  overscroll-behavior: contain;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.86rem;
+  font-size: 0.9rem;
 }
 
 .table th,
@@ -1385,12 +1513,31 @@ code {
 }
 
 .table th {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  /* Wide tracking is what makes an all-caps label legible; past ~0.06em it
+     starts to read as spaced-out letters rather than a word. */
+  letter-spacing: 0.06em;
   color: var(--ink-soft);
   border-bottom-color: var(--line-strong);
+}
+
+/* Inside a scrolling pane the header rides above the rows.
+   `border-collapse: collapse` hands the cell's border to the table rather than
+   the cell, and a stuck cell leaves it behind — so the rule under the header is
+   drawn as an inset shadow, which travels with the element. The second shadow
+   is a hairline of depth that only appears once there is something scrolled
+   underneath, which is the whole signal: the header is in front. */
+.table-scroll--pane thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--card);
+  border-bottom: none;
+  box-shadow:
+    inset 0 -1px 0 var(--line-strong),
+    0 1px 2px rgb(27 25 23 / 4%);
 }
 
 .table tbody tr:hover {
@@ -1421,33 +1568,121 @@ code {
    ------------------------------------------------------------------------- */
 
 .sessions-table {
-  font-size: 0.87rem;
+  font-size: 0.9rem;
 }
 
 .sessions-table tbody tr {
   cursor: pointer;
+  transition: background 110ms ease;
 }
 
 .sessions-table td {
-  padding-top: 0.6rem;
-  padding-bottom: 0.6rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+/**
+ * The row is the control.
+ *
+ * The old table put the only clickable thing inside the first cell — an
+ * eight-character identifier, underlined, about as wide as a thumbnail. The
+ * pointer target was a fraction of a row that was already responding to hover,
+ * which taught people that rows are clickable and then made them aim anyway.
+ *
+ * So the row takes the click, and the button inside the leading cell remains
+ * for the keyboard: it is what `Tab` lands on and what a screen reader
+ * announces, it carries the accessible name and the open/closed state, and it
+ * is drawn as the cell's own text rather than as a link. Two affordances, one
+ * target — nobody has to aim at a word any more.
+ */
+.session-open {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.session-open:hover:not(:disabled) {
+  border: none;
+  background: transparent;
+}
+
+/* The focus ring belongs around the whole cell rather than around two lines of
+   text, so keyboard focus and pointer hover point at the same thing. */
+.session-open:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 3px;
+}
+
+/* Time first, date under it. The clock is what distinguishes rows from the same
+   afternoon, which is nearly all of them, so it takes the readable weight and
+   the date drops to metadata. The full ISO value stays on `title`. */
+.session-when {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.session-when__date {
+  display: block;
+  margin-top: 0.05rem;
+  font-size: 0.76rem;
+  color: var(--ink-dim);
 }
 
 /* The cross-state verdict, said on the row rather than left for somebody to
-   work out by comparing two cells eight columns apart. */
+   work out by comparing two cells eight columns apart.
+   It sits under the state badge rather than beside it: stacked, a two-word
+   verdict costs no column width, and "Recovery required / charged, not printed"
+   reads as one finding about one session instead of two separate cells. */
 .session-flags {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
-  gap: 0.3rem;
-  margin-left: 0.5rem;
-  vertical-align: middle;
+  gap: 0.25rem;
+  margin-top: 0.2rem;
+}
+
+.session-flags .status-pill {
+  font-size: 0.68rem;
+}
+
+/* A hint of where the row goes, revealed on hover or focus and never taking
+   layout when it is hidden. */
+.sessions-table .session-chevron {
+  color: var(--ink-dim);
+  opacity: 0;
+  transition: opacity 110ms ease;
+}
+
+.sessions-table tbody tr:hover .session-chevron,
+.sessions-table tbody tr.is-selected .session-chevron,
+.session-open:focus-visible .session-chevron {
+  opacity: 1;
 }
 
 @media (max-width: 60rem) {
-  /* Below this the eight columns stop being a table anybody can read and become
+  /* Below this the seven columns stop being a table anybody can read and become
      a horizontal scroll nobody does. Each row becomes a card, and every cell
      carries its column name from `data-label`, so the same information survives
      without the header row it lost. */
+
+  /* The pane's own scroll goes with the header it existed to hold up. Nesting a
+     scrolling box inside a scrolling page is unpleasant on a touch screen, and
+     there is no longer a sticky header down here to justify it. */
+  .sessions-pane {
+    max-height: none;
+    overflow: visible;
+    border: none;
+    background: transparent;
+  }
+
   .sessions-table,
   .sessions-table thead,
   .sessions-table tbody,
@@ -1513,7 +1748,204 @@ code {
   }
 
   .session-flags {
-    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  /* The leading cell is a button filling a card-width row now, and a card row
+     has space for the whole timestamp on one line. */
+  .sessions-table .session-open {
+    text-align: right;
+  }
+
+  .session-when__date {
+    display: inline;
+    margin: 0 0 0 0.4rem;
+  }
+
+  .sessions-table .session-chevron {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The detail sheet
+   ---------------------------------------------------------------------------
+   One session, opened over the table rather than under it.
+
+   The detail used to render as another panel appended to the page, which meant
+   that choosing a row scrolled nothing and revealed nothing: the answer was
+   drawn a screenful below the question, and the person had to leave the table —
+   and their place in it — to read it. Coming back cost them the scroll position
+   and, on a fifty-row page, the row they were comparing against.
+
+   A sheet keeps the table exactly where it was. It is still mounted, still
+   scrolled to the same offset, and the row that opened the sheet stays marked
+   underneath it. Closing is one key.
+
+   It is a real modal — `role="dialog"`, `aria-modal`, focus moved in on open
+   and returned to the row on close, Escape closes, and the background page is
+   inert to the pointer behind the scrim. That is the honest description of what
+   it does: while it is open it is the only thing you are reading.
+   ------------------------------------------------------------------------- */
+
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  /* Dimmed rather than blurred. A blur costs a compositing layer over the whole
+     window for a decoration, and this panel runs on kiosk-grade hardware. */
+  background: rgb(20 19 18 / 32%);
+  animation: sheet-scrim-in 160ms ease;
+}
+
+.sheet {
+  position: fixed;
+  z-index: 31;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(38rem, 100%);
+  background: var(--card);
+  border-left: 1px solid var(--line);
+  /* The only real elevation in the panel, and it is earned: this surface is
+     genuinely in front of another one rather than merely distinct from it. */
+  box-shadow: -12px 0 32px rgb(27 25 23 / 12%);
+  animation: sheet-in 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes sheet-scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateX(1.5rem);
+    opacity: 0;
+  }
+}
+
+/* The header stays put while the body scrolls, for the same reason the table
+   header does: whatever you have scrolled to, you can still see what it is
+   about and still get out. */
+.sheet__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex: none;
+  padding: 1.1rem 1.4rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.sheet__subtitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.3rem 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.sheet__close {
+  flex: none;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.9rem;
+}
+
+.sheet__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.35rem 1.4rem 1.6rem;
+}
+
+/* Inside the sheet the section headings are the only structure, so they get a
+   rule above them rather than relying on space alone to separate five stacked
+   groups in a narrow column. */
+.sheet__body h3 {
+  margin: 1.4rem 0 0.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.sheet__body h3:first-child {
+  margin-top: 0.6rem;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* The identifiers, given somewhere to live now that they are not a column.
+   Selectable and complete: an operator quoting one into a search box or a
+   support ticket needs the whole string, not the eight characters a table cell
+   had room for. */
+.sheet__ids {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.9rem 0 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card-soft);
+}
+
+.sheet__id {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.sheet__id dt {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.sheet__id dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  word-break: break-all;
+  user-select: all;
+}
+
+.sheet__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.9rem 0 0;
+}
+
+/* The sheet's tables have no room for a scrolling pane and no header worth
+   sticking; they are short, and the sheet body is already the scroller. */
+.sheet__body .table {
+  font-size: 0.84rem;
+}
+
+@media (max-width: 48rem) {
+  /* On a phone the sheet is the screen. A 38rem panel with a sliver of dimmed
+     table beside it is neither one thing nor the other. */
+  .sheet {
+    width: 100%;
+    border-left: none;
   }
 }
 
@@ -1529,7 +1961,7 @@ code {
   border-radius: var(--radius-pill);
   background: var(--card-soft);
   color: var(--ink);
-  font-size: 0.74rem;
+  font-size: 0.78rem;
   font-weight: 500;
   white-space: nowrap;
 }
@@ -1563,6 +1995,12 @@ code {
   border-color: transparent;
   color: var(--ink-soft);
   font-weight: 400;
+  /* Once the pill is gone this is a table cell's text, so it takes the table's
+     size. Leaving it at the badge's smaller size made the ordinary states —
+     `Captured`, `Done`, `Completed`, which is most of what a healthy page
+     contains — both smaller and greyer than everything around them, and being
+     de-emphasised twice over is how "quiet" turns into "hard to read". */
+  font-size: inherit;
   padding-left: 0;
   padding-right: 0;
 }
@@ -2153,7 +2591,7 @@ code {
 }
 
 .enrollment-ticket__code code {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 1.05rem;
   letter-spacing: 0.02em;
 }

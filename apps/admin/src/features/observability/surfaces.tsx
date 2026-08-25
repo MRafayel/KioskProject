@@ -89,6 +89,17 @@ export interface KpiProps {
   onOpen?: (() => void) | undefined;
   /** Completes "Kiosk health: 2 of 3." for a screen reader. */
   openLabel?: string;
+  /**
+   * Turns the tile into a toggle that is currently on — a filter it is applying
+   * to whatever sits below it.
+   *
+   * Only meaningful with `onOpen`, and deliberately separate from `elevated`:
+   * one says this number needs a person, the other says you are looking at only
+   * these rows, and a tile is routinely both at once. Passing it switches the
+   * button's accessible role from "opens something" to `aria-pressed`, because
+   * that is what it has become.
+   */
+  pressed?: boolean | undefined;
 }
 
 /**
@@ -107,12 +118,14 @@ export function Kpi({
   tone,
   elevated = false,
   onOpen,
-  openLabel
+  openLabel,
+  pressed
 }: KpiProps) {
   const classes = [
     "kpi",
     elevated ? "kpi--elevated" : "",
     onOpen ? "is-navigable" : "",
+    pressed ? "is-pressed" : "",
     tone === "critical" ? "kpi--critical" : ""
   ]
     .filter(Boolean)
@@ -132,7 +145,7 @@ export function Kpi({
         {value}
         {of ? <span className="kpi__of"> {of}</span> : null}
       </p>
-      {foot ? <p className={tone ? "kpi__foot kpi__foot--problem" : "kpi__foot"}>{foot}</p> : null}
+      {foot ? <p className={footClass(tone, pressed)}>{foot}</p> : null}
     </>
   );
 
@@ -144,12 +157,22 @@ export function Kpi({
         type="button"
         className="kpi__open"
         onClick={onOpen}
+        // A toggle announces whether it is on; a link announces where it goes.
+        // Sending `aria-pressed` only when the caller has an answer keeps the
+        // navigating tiles on the overview reading as navigation.
+        aria-pressed={pressed === undefined ? undefined : pressed}
         aria-label={`${label}: ${textOf(value)}${of ? ` ${of}` : ""}. ${openLabel ?? "View details."}`}
       >
         {body}
       </button>
     </article>
   );
+}
+
+/** The footnote is the tile's quietest line and the one that says what is on. */
+function footClass(tone: KpiProps["tone"], pressed: boolean | undefined): string {
+  if (pressed) return "kpi__foot kpi__foot--pressed";
+  return tone ? "kpi__foot kpi__foot--problem" : "kpi__foot";
 }
 
 export function KpiRow({ children }: { children: ReactNode }) {

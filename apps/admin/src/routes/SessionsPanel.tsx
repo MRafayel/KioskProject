@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { adminSessionStateSchema, type AdminSessionSummary } from "@printing-kiosk/admin-access";
 
@@ -7,7 +7,6 @@ import { observabilityApi } from "../features/observability/api.js";
 import {
   Duration,
   Empty,
-  Identifier,
   Money,
   Panel,
   StateBadge,
@@ -37,6 +36,9 @@ const BAD_WORKFLOW = new Set(["FAILED", "RECOVERY_REQUIRED", "DEAD_LETTER", "ERR
 /** A payment that took the customer's money. */
 const PAID = new Set(["CAPTURED", "SUCCEEDED", "PAID"]);
 
+/** The verdict the "Charged, not printed" tile filters on. */
+const CHARGED_NOT_PRINTED = "Charged, not printed";
+
 type Level = "critical" | "warn" | "none";
 
 interface Assessment {
@@ -50,7 +52,7 @@ interface Assessment {
  *
  * The cross-state case is the reason this exists rather than living in the
  * markup. "Payment captured" and "print failed" are two ordinary-looking cells
- * eight columns apart, and the combination — the customer was charged and got
+ * four columns apart, and the combination — the customer was charged and got
  * nothing — is the single most expensive thing this table can show. Nobody
  * finds it by comparing columns, so the row says it in words.
  */
@@ -60,7 +62,7 @@ function assess(item: AdminSessionSummary): Assessment {
   const cleanupBad = BAD_WORKFLOW.has(item.cleanupStatus);
   const paid = item.paymentStatus !== null && PAID.has(item.paymentStatus);
 
-  if (paid && printBad) flags.push("Charged, not printed");
+  if (paid && printBad) flags.push(CHARGED_NOT_PRINTED);
   else if (printBad) flags.push("Print problem");
 
   // An undeleted document past its deadline is a privacy failure, and outranks
@@ -75,18 +77,54 @@ function assess(item: AdminSessionSummary): Assessment {
   return { level: "none", flags };
 }
 
+function isChargedNotPrinted(item: AdminSessionSummary): boolean {
+  return assess(item).flags.includes(CHARGED_NOT_PRINTED);
+}
+
+/**
+ * The four tiles above the table, and what each one filters to.
+ *
+ * Three of them are session states and go to the server, which is what makes
+ * them worth clicking: filtering to `FAILED` pages through every failed session
+ * there is, not the failed ones that happened to land on this page. The fourth
+ * is a verdict this file computes from two columns, no endpoint knows about it,
+ * and it can only ever narrow the rows already loaded — so it is marked as the
+ * different kind of thing it is rather than dressed up as the same one.
+ */
+type CardId = "RECOVERY_REQUIRED" | "FAILED" | "CHARGED" | "COMPLETED";
+
+/** The three tiles whose filter is a session state the server understands. */
+const STATE_CARDS = new Set<string>(["RECOVERY_REQUIRED", "FAILED", "COMPLETED"]);
+
+/**
+ * Which tile, if any, the current filter belongs to.
+ *
+ * The dropdown reaches states no tile stands for — `AWAITING_PAYMENT` is a
+ * perfectly good filter and has no card — so this returns null for those. The
+ * page is still filtered; it is just not filtered by anything up there, and
+ * pressing a tile that does not correspond to the filter would say otherwise.
+ */
+function activeCard(state: string, chargedOnly: boolean): CardId | null {
+  if (chargedOnly) return "CHARGED";
+  return STATE_CARDS.has(state) ? (state as CardId) : null;
+}
+
 /**
  * Sessions, and one session in full.
  *
- * The table is the investigation surface and is deliberately unchanged in what
- * it carries. What changed is what the page says before you reach it: a
- * sentence on whether these sessions are healthy, four counts, and a row that
- * marks itself when something about it needs a person.
+ * The table is the investigation surface. What sits above it is the same four
+ * counts as before, promoted from readouts into the filter controls for the
+ * rows beneath them — a number worth printing is a number worth clicking, and
+ * an operator who has just read "4 need recovery" wants those four, not a
+ * dropdown two controls away that would have got them there.
  *
  * Every number above the table is counted from the page below it and says so.
  * There is no endpoint that aggregates sessions, and inventing one in the
  * browser by implying these counts cover more than the rows they were counted
- * from would be worse than not having them.
+ * from would be worse than not having them. That is also why a tile whose count
+ * has been narrowed by somebody else's filter shows a dash instead of a number:
+ * "0 failed" and "we did not ask about failures" are different statements, and
+ * only one of them is true while the page is filtered to something else.
  *
  * The detail view is where the document-privacy rule is most visible: it shows
  * how many files there were, how big, how many pages, and what happened to
@@ -97,8 +135,19 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
   const session = useSession();
   // Opening state only; see PrintingPanel for why this is not kept in sync.
   const [state, setState] = useState<string>(initialState ?? "");
+  /** The client-side verdict filter. Never on at the same time as `state`. */
+  const [chargedOnly, setChargedOnly] = useState(false);
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const [selected, setSelected] = useState<string | null>(null);
+
+  /**
+   * Whatever opened the sheet, so closing it can hand focus back.
+   *
+   * Without this, closing drops focus to the document and the next `Tab` starts
+   * again from the top of the page — which for somebody working the table by
+   * keyboard means losing their row every time they read one.
+   */
+  const openerRef = useRef<HTMLButtonElement | null>(null);
 
   const cursor = cursors[cursors.length - 1];
   const load = useCallback(
@@ -117,11 +166,56 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
   const endedEarly = count((item) => ENDED_EARLY.has(item.state));
   const completed = count((item) => item.state === "COMPLETED");
   const charged = count(
-    (item) => assessments.get(item.id)?.flags.includes("Charged, not printed") ?? false
+    (item) => assessments.get(item.id)?.flags.includes(CHARGED_NOT_PRINTED) ?? false
   );
-  const attention = items.filter((item) => assessments.get(item.id)?.level === "critical").length;
 
-  const filtered = state !== "";
+  // The rows actually drawn. Only the verdict filter narrows them here; a state
+  // filter was applied by the server and these rows are already the answer.
+  const visible = chargedOnly ? items.filter(isChargedNotPrinted) : items;
+  const attention = visible.filter((item) => assessments.get(item.id)?.level === "critical").length;
+
+  const active = activeCard(state, chargedOnly);
+  const filtered = chargedOnly || state !== "";
+  /** The server narrowed the page, so any count of something else is unknown. */
+  const narrowed = state !== "";
+
+  const describeFilter = () => (chargedOnly ? "charged but not printed" : humanizeState(state));
+
+  const clearFilter = useCallback(() => {
+    setState("");
+    setChargedOnly(false);
+    setCursors([undefined]);
+  }, []);
+
+  /**
+   * The tiles behave as one segmented control: choosing a filter replaces the
+   * filter that was on, and choosing the one already on turns it off. Two of
+   * them at once would need the browser to reconcile a server filter with a
+   * client one, and the honest reading of "Failed" and "Charged, not printed"
+   * together — failed sessions, of which the charged ones, out of one page —
+   * is not something four cards can say.
+   */
+  const chooseCard = useCallback((card: CardId) => {
+    setCursors([undefined]);
+    if (card === "CHARGED") {
+      setState("");
+      setChargedOnly((current) => !current);
+      return;
+    }
+    setChargedOnly(false);
+    setState((current) => (current === card ? "" : card));
+  }, []);
+
+  const openSession = useCallback((id: string, opener: HTMLButtonElement | null) => {
+    openerRef.current = opener;
+    setSelected(id);
+  }, []);
+
+  const closeSession = useCallback(() => {
+    setSelected(null);
+    openerRef.current?.focus();
+    openerRef.current = null;
+  }, []);
 
   return (
     <>
@@ -135,19 +229,24 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
             <span className="page-head__dot" aria-hidden="true" />
             {list.data === null
               ? "Loading recent sessions…"
-              : items.length === 0
+              : visible.length === 0
                 ? filtered
-                  ? `No sessions in ${humanizeState(state)}`
+                  ? `No sessions ${describeFilter().toLowerCase()}`
                   : "No sessions recorded yet"
                 : attention === 0
                   ? "Recent sessions are operating normally"
-                  : `${attention} of these ${items.length} sessions need attention`}
+                  : `${attention} of these ${visible.length} sessions need attention`}
           </p>
           <p className="page-head__meta">
-            {items.length > 0 ? `Showing ${items.length} most recent` : "Nothing to show"}
-            {filtered ? ` in ${humanizeState(state)}` : ""}
+            {visible.length > 0 ? `Showing ${visible.length} most recent` : "Nothing to show"}
+            {filtered ? ` · ${describeFilter()}` : ""}
             {list.data?.scoped ? " · your assigned kiosks" : ""}
             {cursors.length > 1 ? ` · page ${cursors.length}` : ""}
+            {filtered ? (
+              <button type="button" className="button-link page-head__clear" onClick={clearFilter}>
+                Show all
+              </button>
+            ) : null}
           </p>
         </div>
 
@@ -162,7 +261,10 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
             <select
               value={state}
               onChange={(event) => {
+                // The dropdown and the tiles are the same filter reached two
+                // ways, so choosing here turns off whatever a tile had on.
                 setState(event.target.value);
+                setChargedOnly(false);
                 setCursors([undefined]);
               }}
             >
@@ -201,28 +303,48 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
 
       {items.length > 0 ? (
         <KpiRow>
-          <Kpi
+          <FilterKpi
+            card="RECOVERY_REQUIRED"
             label="Recovery required"
             value={recovery}
-            foot={recovery === 0 ? "None on this page" : "Waiting for a person"}
+            resting={recovery === 0 ? "None on this page" : "Waiting for a person"}
             tone={recovery > 0 ? "critical" : undefined}
-            elevated={recovery > 0}
+            elevated={recovery > 0 && active === null}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
           />
-          <Kpi
+          <FilterKpi
+            card="FAILED"
             label="Failed"
             value={failed}
-            foot={failed === 0 ? "None on this page" : "Ended in failure"}
+            resting={failed === 0 ? "None on this page" : "Ended in failure"}
             tone={failed > 0 ? "critical" : undefined}
-            elevated={recovery === 0 && failed > 0}
+            elevated={recovery === 0 && failed > 0 && active === null}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
           />
-          <Kpi
+          <FilterKpi
+            card="CHARGED"
             label="Charged, not printed"
             value={charged}
-            foot={charged === 0 ? "No money at risk here" : "Paid and the print did not land"}
+            resting={charged === 0 ? "No money at risk here" : "Paid and the print did not land"}
             tone={charged > 0 ? "critical" : undefined}
-            elevated={recovery === 0 && failed === 0 && charged > 0}
+            elevated={recovery === 0 && failed === 0 && charged > 0 && active === null}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
           />
-          <Kpi label="Completed" value={completed} foot={`${endedEarly} canceled or expired`} />
+          <FilterKpi
+            card="COMPLETED"
+            label="Completed"
+            value={completed}
+            resting={`${endedEarly} canceled or expired`}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
+          />
         </KpiRow>
       ) : null}
 
@@ -232,23 +354,18 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
         emptyMessage="No sessions to show."
         hint={
           items.length > 0
-            ? "Select a row to open the session in full. Counts above are for these rows only."
+            ? "Select any row to open the session beside the table. Counts above filter these rows."
             : undefined
         }
       >
-        {list.data && items.length === 0 ? (
+        {list.data && visible.length === 0 ? (
           <Empty>
             {filtered ? (
               <>
-                No sessions are in {humanizeState(state)}.{" "}
-                <button
-                  type="button"
-                  className="button-link"
-                  onClick={() => {
-                    setState("");
-                    setCursors([undefined]);
-                  }}
-                >
+                {chargedOnly
+                  ? "No session on this page was charged without printing."
+                  : `No sessions are in ${humanizeState(state)}.`}{" "}
+                <button type="button" className="button-link" onClick={clearFilter}>
                   Clear the filter
                 </button>
               </>
@@ -258,22 +375,15 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
           </Empty>
         ) : null}
 
-        {items.length > 0 ? (
+        {visible.length > 0 ? (
           <>
             <Table
               className="sessions-table"
-              columns={[
-                "Session",
-                "Kiosk",
-                "State",
-                "Files",
-                "Payment",
-                "Print",
-                "Deletion",
-                "Started"
-              ]}
+              pane
+              paneClassName="sessions-pane"
+              columns={["Started", "Kiosk", "State", "Files", "Payment", "Print", "Deletion"]}
             >
-              {items.map((item) => {
+              {visible.map((item) => {
                 const verdict = assessments.get(item.id) ?? { level: "none" as Level, flags: [] };
                 const classes = [
                   selected === item.id ? "is-selected" : "",
@@ -287,12 +397,43 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
                   <tr
                     key={item.id}
                     className={classes || undefined}
-                    onClick={() => setSelected(selected === item.id ? null : item.id)}
+                    // The pointer gets the whole row. The keyboard gets the
+                    // button inside it, which is where the accessible name and
+                    // the open state live; clicking anywhere else routes to the
+                    // same place and hands focus restoration the same element.
+                    onClick={(event) =>
+                      openSession(
+                        item.id,
+                        event.currentTarget.querySelector<HTMLButtonElement>(".session-open")
+                      )
+                    }
                   >
-                    <td data-label="Session">
-                      <button type="button" className="button-link">
-                        <Identifier value={item.id} />
+                    <td data-label="Started">
+                      <button
+                        type="button"
+                        className="session-open"
+                        aria-haspopup="dialog"
+                        aria-expanded={selected === item.id}
+                        aria-label={`Session on ${item.kioskId}, ${humanizeState(
+                          item.state
+                        )}, started ${new Date(item.createdAt).toLocaleString()}`}
+                        onClick={(event) => {
+                          // The row handler would otherwise run a second time
+                          // and toggle this straight back shut.
+                          event.stopPropagation();
+                          openSession(item.id, event.currentTarget);
+                        }}
+                      >
+                        <SessionWhen value={item.createdAt} />
                       </button>
+                    </td>
+                    <td data-label="Kiosk">{item.kioskId}</td>
+                    <td data-label="State">
+                      <StateBadge
+                        value={item.state}
+                        humanize
+                        quiet={!NEEDS_SOMEBODY.has(item.state) && !ENDED_EARLY.has(item.state)}
+                      />
                       {verdict.flags.length > 0 ? (
                         <span className="session-flags">
                           {verdict.flags.map((flag) => (
@@ -302,14 +443,6 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
                           ))}
                         </span>
                       ) : null}
-                    </td>
-                    <td data-label="Kiosk">{item.kioskId}</td>
-                    <td data-label="State">
-                      <StateBadge
-                        value={item.state}
-                        humanize
-                        quiet={!NEEDS_SOMEBODY.has(item.state) && !ENDED_EARLY.has(item.state)}
-                      />
                     </td>
                     <td data-label="Files">{item.documentCount}</td>
                     <td data-label="Payment">
@@ -334,9 +467,9 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
                         humanize
                         quiet={!BAD_WORKFLOW.has(item.cleanupStatus)}
                       />
-                    </td>
-                    <td data-label="Started">
-                      <When value={item.createdAt} />
+                      <span className="session-chevron" aria-hidden="true">
+                        {" ›"}
+                      </span>
                     </td>
                   </tr>
                 );
@@ -366,18 +499,119 @@ export function SessionsPanel({ initialState }: { initialState?: string | undefi
       </Panel>
 
       {selected ? (
-        <SessionDetail
+        <SessionSheet
           sessionId={selected}
           canSeeTimeline={session.can("session.timeline.read")}
           canSeeDocuments={session.can("document.metadata.read")}
-          onClose={() => setSelected(null)}
+          onClose={closeSession}
         />
       ) : null}
     </>
   );
 }
 
-function SessionDetail({
+/**
+ * One summary tile, wired as one position of a four-way filter.
+ *
+ * The wording changes with what is on, because the ring around a pressed tile
+ * is a colour and a shape and this screen is read by people who may get neither:
+ * the footnote says "showing only these" in words, and says why a count is a
+ * dash when somebody else's filter has made it unknowable.
+ */
+function FilterKpi({
+  card,
+  label,
+  value,
+  resting,
+  tone,
+  elevated,
+  active,
+  narrowed,
+  onChoose
+}: {
+  card: CardId;
+  label: string;
+  value: number;
+  /** The footnote when nothing is filtered — the tile's ordinary caption. */
+  resting: string;
+  tone?: "critical" | undefined;
+  elevated?: boolean;
+  active: CardId | null;
+  narrowed: boolean;
+  onChoose: (card: CardId) => void;
+}) {
+  const pressed = active === card;
+  // A count taken from a page the server filtered to something else is not this
+  // tile's count. Saying "0" there would be a claim nothing checked.
+  const unknown = narrowed && !pressed;
+
+  const foot = pressed
+    ? "Showing only these — select again to clear"
+    : unknown
+      ? "Not counted while filtered"
+      : resting;
+
+  return (
+    <Kpi
+      label={label}
+      value={unknown ? "—" : value}
+      foot={foot}
+      tone={unknown ? undefined : tone}
+      elevated={elevated ?? false}
+      pressed={pressed}
+      onOpen={() => onChoose(card)}
+      openLabel={
+        pressed
+          ? "Showing only these. Select to clear the filter."
+          : `Show only ${label.toLowerCase()} sessions.`
+      }
+    />
+  );
+}
+
+/**
+ * When a session started, clock first.
+ *
+ * Nearly every row on a page is from the same day or two, so the date is the
+ * part that repeats and the time is the part that distinguishes. Putting the
+ * clock on the readable line and dropping the date to metadata is what lets
+ * somebody find "the one just after four" by running down the column. The exact
+ * value, timezone and all, is on `title` and in the sheet.
+ */
+function SessionWhen({ value }: { value: string }) {
+  const parsed = new Date(value);
+  return (
+    <time className="session-when" dateTime={value} title={parsed.toLocaleString()}>
+      {parsed.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+      <span className="session-when__date">
+        {parsed.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}
+      </span>
+    </time>
+  );
+}
+
+/** What a focus trap considers a stop. */
+const FOCUSABLE =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * One session, opened over the table instead of appended below it.
+ *
+ * The previous detail rendered as another panel at the foot of the page, which
+ * made choosing a row an act with no visible result: the answer appeared a
+ * screenful further down, reading it meant leaving the table, and coming back
+ * cost the scroll position and whichever row was being compared against. On a
+ * fifty-row page that is the difference between an investigation and a scroll.
+ *
+ * The sheet leaves the table mounted and untouched underneath, so closing it
+ * returns to exactly the same rows at exactly the same offset, with the row
+ * that was opened still marked. Escape closes it, focus goes in on open and
+ * comes back out to the row on close, and `Tab` stays inside while it is there —
+ * because it claims `aria-modal`, and a dialog that says that while letting
+ * focus wander into the page behind it has lied to the only people relying on
+ * the claim.
+ */
+function SessionSheet({
   sessionId,
   canSeeTimeline,
   canSeeDocuments,
@@ -397,153 +631,291 @@ function SessionDetail({
   const loadDocuments = useCallback(() => observabilityApi.documents(sessionId), [sessionId]);
   const documents = useAdminData(loadDocuments, { enabled: canSeeDocuments });
 
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    closeRef.current?.focus();
+    // The page behind a modal should not scroll under it. Restored rather than
+    // cleared, so a future caller that had its own reason to lock is not undone.
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const stops = Array.from(sheetRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []);
+    if (stops.length === 0) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (!first || !last) return;
+
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const summary = detail.data?.session ?? null;
+  const verdict = summary ? assess(summary) : null;
+
   return (
-    <Panel
-      title="Session detail"
-      state={detail}
-      actions={
-        <button type="button" onClick={onClose}>
-          Close
-        </button>
-      }
-    >
-      {detail.data ? (
-        <>
-          <dl className="detail-grid">
-            <div>
-              <dt>Session</dt>
-              <dd>
-                <code>{detail.data.session.id}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Kiosk</dt>
-              <dd>{detail.data.session.kioskId}</dd>
-            </div>
-            <div>
-              <dt>State</dt>
-              <dd>
-                <StateBadge value={detail.data.session.state} />
-              </dd>
-            </div>
-            <div>
-              <dt>Ended because</dt>
-              <dd>
-                <StateBadge value={detail.data.session.terminalReason} />
-              </dd>
-            </div>
-            <div>
-              <dt>Documents deleted</dt>
-              <dd>
-                <When value={detail.data.session.filesDeletedAt} />
-              </dd>
-            </div>
-            <div>
-              <dt>Deletion due</dt>
-              <dd>
-                <When value={detail.data.session.cleanupDueAt} />
-              </dd>
-            </div>
-          </dl>
+    <>
+      {/* The scrim is the click-away target and the thing that stops the page
+          behind responding to a pointer. It is not a control, so it carries no
+          role and no name — Escape and the close button are the ways out that
+          announce themselves. */}
+      <div className="sheet-scrim" onClick={onClose} aria-hidden="true" />
 
-          {detail.data.settings ? (
-            <>
-              <h3>What was configured</h3>
-              <p className="panel__status">
-                {detail.data.settings.paperSize}, {detail.data.settings.colorMode.toLowerCase()} —{" "}
-                {detail.data.settings.selectedPages} pages selected across{" "}
-                {detail.data.documents.total} documents, {detail.data.settings.physicalSheets}{" "}
-                sheets.
-                {detail.data.settings.selectionsRedactedAt
-                  ? " Per-document digests have been destroyed by retention."
-                  : ""}
-              </p>
-            </>
+      <div
+        className="sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-sheet-title"
+        ref={sheetRef}
+        onKeyDown={onKeyDown}
+      >
+        <div className="sheet__head">
+          <div>
+            <h2 className="sheet__title" id="session-sheet-title">
+              Session detail
+            </h2>
+            <p className="sheet__subtitle">
+              {summary ? (
+                <>
+                  <StateBadge value={summary.state} humanize />
+                  <span>{summary.kioskId}</span>
+                  <span aria-hidden="true">·</span>
+                  <When value={summary.createdAt} />
+                </>
+              ) : (
+                <span>Loading…</span>
+              )}
+            </p>
+          </div>
+          <button type="button" className="sheet__close" ref={closeRef} onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="sheet__body">
+          {detail.error ? (
+            <div className="panel__error" role="alert">
+              <span className="panel__error-text">{detail.error}</span>
+              <button type="button" onClick={detail.reload}>
+                Try again
+              </button>
+            </div>
           ) : null}
 
-          {detail.data.money ? (
-            <>
-              <h3>Money</h3>
-              <p className="panel__status">
-                <Money
-                  minor={detail.data.money.totalMinor}
-                  currency={detail.data.money.currency}
-                  exponent={detail.data.money.currencyExponent}
-                />{" "}
-                — quote <StateBadge value={detail.data.money.quoteStatus} />, payment{" "}
-                <StateBadge value={detail.data.money.paymentStatus} />
-                {detail.data.money.refundStatus ? (
-                  <>
-                    , refund <StateBadge value={detail.data.money.refundStatus} />
-                  </>
-                ) : null}
-                .
-              </p>
-            </>
+          {detail.loading && !detail.data ? (
+            <p className="panel__status" role="status">
+              Loading…
+            </p>
           ) : null}
 
-          <h3>Documents</h3>
-          <p className="panel__hint">
-            Metadata only. The control plane holds no storage credential and no route that returns a
-            document, a page image or a filename.
-          </p>
-          {canSeeDocuments && documents.data ? (
-            documents.data.items.length === 0 ? (
-              <Empty>Nothing was uploaded.</Empty>
-            ) : (
-              <Table columns={["#", "Type", "Size", "Pages", "Scan", "State", "Deleted"]}>
-                {documents.data.items.map((file) => (
-                  <tr key={file.id}>
-                    <td>{file.ordinal + 1}</td>
-                    <td>{file.detectedMime ?? file.declaredMime ?? "—"}</td>
-                    <td>
-                      {file.sizeBytes === null ? "—" : `${Math.ceil(file.sizeBytes / 1024)} KB`}
-                    </td>
-                    <td>{file.pageCount ?? "—"}</td>
-                    <td>
-                      <StateBadge value={file.malwareScanStatus} />
-                    </td>
-                    <td>
-                      <StateBadge
-                        value={file.rejectionCode ?? file.processingErrorCode ?? file.status}
-                      />
-                    </td>
-                    <td>
-                      <When value={file.deletedAt} />
-                    </td>
-                  </tr>
-                ))}
-              </Table>
-            )
-          ) : (
-            <Empty>
-              {canSeeDocuments ? "Loading…" : "Your role cannot see document metadata."}
-            </Empty>
-          )}
+          {detail.data ? (
+            <>
+              {verdict && verdict.flags.length > 0 ? (
+                <div className="sheet__flags">
+                  {verdict.flags.map((flag) => (
+                    <StatusPill key={flag} tone="critical">
+                      {flag}
+                    </StatusPill>
+                  ))}
+                </div>
+              ) : null}
 
-          <h3>Timeline</h3>
-          {canSeeTimeline && timeline.data ? (
-            <ol className="timeline">
-              {timeline.data.items.map((entry) => (
-                <li key={entry.sequence}>
-                  <code>{entry.type}</code>
-                  <span className="key-list__meta">
-                    <When value={entry.occurredAt} />
-                    {entry.sincePreviousMilliseconds !== null ? (
+              {/* The identifiers, which used to occupy the table's leading
+                  column and be truncated to eight characters there. They belong
+                  here: they are what an operator quotes into a ticket or matches
+                  against a customer's phone screen, and neither use is served by
+                  an ellipsis. */}
+              <dl className="sheet__ids">
+                <div className="sheet__id">
+                  <dt>Session ID</dt>
+                  <dd>{detail.data.session.id}</dd>
+                </div>
+                <div className="sheet__id">
+                  <dt>Handoff code</dt>
+                  <dd>{detail.data.session.publicId}</dd>
+                </div>
+              </dl>
+
+              <h3>State</h3>
+              <dl className="detail-grid">
+                <div>
+                  <dt>Kiosk</dt>
+                  <dd>{detail.data.session.kioskId}</dd>
+                </div>
+                <div>
+                  <dt>State</dt>
+                  <dd>
+                    <StateBadge value={detail.data.session.state} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Started</dt>
+                  <dd>
+                    <When value={detail.data.session.createdAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Ended because</dt>
+                  <dd>
+                    <StateBadge value={detail.data.session.terminalReason} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Documents deleted</dt>
+                  <dd>
+                    <When value={detail.data.session.filesDeletedAt} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Deletion due</dt>
+                  <dd>
+                    <When value={detail.data.session.cleanupDueAt} />
+                  </dd>
+                </div>
+              </dl>
+
+              {/* The table has a Print column and the old detail had nothing to
+                  say about it, so the failure code behind a red cell was the one
+                  thing this view could not answer. It is in the payload already. */}
+              {detail.data.printJob ? (
+                <>
+                  <h3>Print</h3>
+                  <p className="panel__status">
+                    <StateBadge value={detail.data.printJob.status} humanize /> — confidence{" "}
+                    <StateBadge value={detail.data.printJob.resultConfidence} humanize />
+                    {detail.data.printJob.failureCode ? (
                       <>
-                        {" · +"}
-                        <Duration milliseconds={entry.sincePreviousMilliseconds} />
+                        , failure <StateBadge value={detail.data.printJob.failureCode} />
                       </>
                     ) : null}
-                  </span>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <Empty>{canSeeTimeline ? "Loading…" : "Your role cannot see the timeline."}</Empty>
-          )}
-        </>
-      ) : null}
-    </Panel>
+                    {detail.data.printJob.warningCode ? (
+                      <>
+                        , warning <StateBadge value={detail.data.printJob.warningCode} />
+                      </>
+                    ) : null}
+                    .
+                  </p>
+                </>
+              ) : null}
+
+              {detail.data.settings ? (
+                <>
+                  <h3>What was configured</h3>
+                  <p className="panel__status">
+                    {detail.data.settings.paperSize}, {detail.data.settings.colorMode.toLowerCase()}{" "}
+                    — {detail.data.settings.selectedPages} pages selected across{" "}
+                    {detail.data.documents.total} documents, {detail.data.settings.physicalSheets}{" "}
+                    sheets.
+                    {detail.data.settings.selectionsRedactedAt
+                      ? " Per-document digests have been destroyed by retention."
+                      : ""}
+                  </p>
+                </>
+              ) : null}
+
+              {detail.data.money ? (
+                <>
+                  <h3>Money</h3>
+                  <p className="panel__status">
+                    <Money
+                      minor={detail.data.money.totalMinor}
+                      currency={detail.data.money.currency}
+                      exponent={detail.data.money.currencyExponent}
+                    />{" "}
+                    — quote <StateBadge value={detail.data.money.quoteStatus} />, payment{" "}
+                    <StateBadge value={detail.data.money.paymentStatus} />
+                    {detail.data.money.refundStatus ? (
+                      <>
+                        , refund <StateBadge value={detail.data.money.refundStatus} />
+                      </>
+                    ) : null}
+                    .
+                  </p>
+                </>
+              ) : null}
+
+              <h3>Documents</h3>
+              <p className="panel__hint">
+                Metadata only. The control plane holds no storage credential and no route that
+                returns a document, a page image or a filename.
+              </p>
+              {canSeeDocuments && documents.data ? (
+                documents.data.items.length === 0 ? (
+                  <Empty>Nothing was uploaded.</Empty>
+                ) : (
+                  <Table columns={["#", "Type", "Size", "Pages", "Scan", "State", "Deleted"]}>
+                    {documents.data.items.map((file) => (
+                      <tr key={file.id}>
+                        <td>{file.ordinal + 1}</td>
+                        <td>{file.detectedMime ?? file.declaredMime ?? "—"}</td>
+                        <td>
+                          {file.sizeBytes === null ? "—" : `${Math.ceil(file.sizeBytes / 1024)} KB`}
+                        </td>
+                        <td>{file.pageCount ?? "—"}</td>
+                        <td>
+                          <StateBadge value={file.malwareScanStatus} />
+                        </td>
+                        <td>
+                          <StateBadge
+                            value={file.rejectionCode ?? file.processingErrorCode ?? file.status}
+                          />
+                        </td>
+                        <td>
+                          <When value={file.deletedAt} />
+                        </td>
+                      </tr>
+                    ))}
+                  </Table>
+                )
+              ) : (
+                <Empty>
+                  {canSeeDocuments ? "Loading…" : "Your role cannot see document metadata."}
+                </Empty>
+              )}
+
+              <h3>Timeline</h3>
+              {canSeeTimeline && timeline.data ? (
+                <ol className="timeline">
+                  {timeline.data.items.map((entry) => (
+                    <li key={entry.sequence}>
+                      <code>{entry.type}</code>
+                      <span className="key-list__meta">
+                        <When value={entry.occurredAt} />
+                        {entry.sincePreviousMilliseconds !== null ? (
+                          <>
+                            {" · +"}
+                            <Duration milliseconds={entry.sincePreviousMilliseconds} />
+                          </>
+                        ) : null}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <Empty>{canSeeTimeline ? "Loading…" : "Your role cannot see the timeline."}</Empty>
+              )}
+            </>
+          ) : null}
+        </div>
+      </div>
+    </>
   );
 }

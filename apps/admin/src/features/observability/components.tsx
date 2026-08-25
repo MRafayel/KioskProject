@@ -62,16 +62,35 @@ export function Table({
   columns,
   children,
   caption,
-  className
+  className,
+  pane = false,
+  paneClassName
 }: {
   columns: readonly string[];
   children: ReactNode;
   caption?: string;
   /** An extra class on the table, for a panel that restyles or stacks its own. */
   className?: string;
+  /**
+   * Give the table its own vertical scroll and stick the header to the top of
+   * it.
+   *
+   * Opt-in rather than the default because it is only an improvement for a long
+   * list. A four-row table in a scrolling box is a box with a scrollbar it never
+   * uses and a header pinned to rows nobody lost sight of; the cost — a second
+   * scrolling region on the page — is only worth paying where the rows actually
+   * outrun the screen.
+   */
+  pane?: boolean;
+  /** An extra class on the scrolling wrapper, for a panel that sizes its own. */
+  paneClassName?: string;
 }) {
+  const wrapper = ["table-scroll", pane ? "table-scroll--pane" : "", paneClassName ?? ""]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className="table-scroll">
+    <div className={wrapper}>
       <table className={className ? `table ${className}` : "table"}>
         {caption ? <caption>{caption}</caption> : null}
         <thead>
