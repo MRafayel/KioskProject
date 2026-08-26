@@ -1,5 +1,6 @@
 import {
   adminChangesResponseSchema,
+  adminMoneySummaryResponseSchema,
   adminErrorsResponseSchema,
   adminOverviewResponseSchema,
   adminPeopleResponseSchema,
@@ -47,7 +48,8 @@ import {
   type RevokeAdminSessionsBody,
   type RevokeAdminSessionsResponse,
   type RevokeOperatorAuthenticatorBody,
-  type RevokeOperatorAuthenticatorResponse
+  type RevokeOperatorAuthenticatorResponse,
+  type MoneyWindow
 } from "@printing-kiosk/admin-access";
 
 import { adminRequest, adminRequestParsed } from "../auth/api.js";
@@ -113,6 +115,29 @@ export const observabilityApi = {
     adminRequest<AdminPrintJobDetailResponse>(
       "GET",
       `/v1/admin/print-jobs/${encodeURIComponent(printJobId)}`
+    ),
+
+  /**
+   * The money dashboard: one window, the window before it, and its shape.
+   *
+   * Parsed rather than trusted, for the same reason the refund queue is. Every
+   * figure on that screen is a business reading somebody will act on or repeat —
+   * an amount taken, a success rate, a change against the previous period — and
+   * a response shape this build guessed at would be a percentage computed from a
+   * field that was not there.
+   *
+   * The offset is the caller's own clock. A day boundary is a local fact and the
+   * database stores instants, so the server is told where the days are rather
+   * than assuming UTC and labelling somebody's Tuesday as Monday.
+   */
+  moneySummary: (window: MoneyWindow) =>
+    adminRequestParsed(
+      adminMoneySummaryResponseSchema,
+      "GET",
+      `/v1/admin/money/summary${query({
+        window,
+        utcOffsetMinutes: -new Date().getTimezoneOffset()
+      })}`
     ),
 
   payments: (filters: ListFilters = {}) =>

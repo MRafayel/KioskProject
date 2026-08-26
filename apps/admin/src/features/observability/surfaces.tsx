@@ -51,11 +51,19 @@ export function Section({
   id,
   title,
   note,
+  actions,
   children
 }: {
   id: string;
   title: string;
   note?: ReactNode;
+  /**
+   * A control that governs everything under this heading — a window switcher,
+   * say. It belongs beside the title rather than inside the first card, because
+   * a control living in one card while changing all of them is a control nobody
+   * expects to have moved the card next to it.
+   */
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -65,6 +73,7 @@ export function Section({
           {title}
         </h2>
         {note ? <p className="section__note">{note}</p> : null}
+        {actions ? <div className="section__actions">{actions}</div> : null}
       </div>
       {children}
     </section>
@@ -727,6 +736,222 @@ function DistributionEntry({ row, total }: { row: DistributionRow; total: number
         {body}
       </button>
     </li>
+  );
+}
+
+/**
+ * Which way a number moving is the good way.
+ *
+ * Money taken rising is good; refunds raised rising is not. The direction has
+ * to be stated by the caller because nothing about the arithmetic knows it, and
+ * a dashboard that paints every rise green is one that congratulates you on a
+ * spike in failed payments.
+ */
+export type DeltaDirection = "up-is-good" | "up-is-bad";
+
+/**
+ * How a period compares with the one before it.
+ *
+ * The single most abusable component on a business dashboard, so its rules are
+ * narrow on purpose.
+ *
+ * **It refuses to divide by nothing.** With no activity in the previous period
+ * there is no percentage to state — "up from zero" is not a percentage, it is a
+ * fact about there being nothing to compare against, and it says exactly that.
+ *
+ * **The arrow is decoration.** The direction is in the words, because a glyph
+ * is the one part of this a screen reader may drop and direction is the whole
+ * point of the sentence.
+ *
+ * **Rates are compared in points, not percent.** A success rate going from 90%
+ * to 94% has risen four points, not four percent, and calling it four percent
+ * is wrong by an amount that grows as the rate falls.
+ */
+export function Delta({
+  current,
+  previous,
+  compared,
+  mode = "relative",
+  direction = "up-is-good"
+}: {
+  current: number;
+  previous: number;
+  /** Names the period compared against: "the previous 7 days". */
+  compared: string;
+  /** `points` for a comparison of two rates; `relative` for two magnitudes. */
+  mode?: "relative" | "points";
+  direction?: DeltaDirection;
+}) {
+  if (mode === "relative" && previous === 0) {
+    return (
+      <span className="delta delta--none">
+        {current === 0 ? `Nothing in this period or ${compared}` : `Nothing in ${compared}`}
+      </span>
+    );
+  }
+
+  const change = mode === "points" ? current - previous : ((current - previous) / previous) * 100;
+  const size = mode === "points" ? Math.abs(change).toFixed(1) : Math.abs(change).toFixed(1);
+  const unit = mode === "points" ? "points" : "%";
+
+  if (Math.abs(change) < 0.05) {
+    return <span className="delta delta--none">No change from {compared}</span>;
+  }
+
+  const rising = change > 0;
+  const good = rising === (direction === "up-is-good");
+  const word =
+    mode === "points"
+      ? rising
+        ? "higher than"
+        : "lower than"
+      : rising
+        ? "more than"
+        : "less than";
+
+  return (
+    <span className={good ? "delta delta--good" : "delta delta--warn"}>
+      <span className="delta__arrow" aria-hidden="true">
+        {rising ? "↑" : "↓"}
+      </span>
+      {size}
+      {unit === "%" ? "% " : " points "}
+      {word} {compared}
+    </span>
+  );
+}
+
+export interface TrendBar {
+  key: string;
+  /** The whole bar in one phrase, for a screen reader and for hover. */
+  description: string;
+  /** The height of the bar, in whatever unit the caption names. */
+  value: number;
+  /** The part of `value` that went wrong, drawn on top in the critical tone. */
+  bad?: number;
+  /** True when this bar covers less time than a whole one. */
+  partial?: boolean;
+}
+
+/**
+ * A trend, drawn as bars, from data the server aggregated.
+ *
+ * Deliberately not a chart library. It is a flex row of two-segment columns and
+ * a caption, which is a few hundred bytes against the two hundred kilobytes a
+ * charting dependency would add to a page that has exactly one chart on it.
+ *
+ * Three properties are what make it honest rather than decorative:
+ *
+ *  - **Every bar exists, including the empty ones.** A quiet Tuesday is a zero
+ *    with no height, not a gap. A gap reads as missing data, which is a
+ *    completely different and much worse claim.
+ *  - **A short bar is marked.** The first and last bar of a trailing window
+ *    cover less time than the rest, and an unmarked short bar reads as a
+ *    collapse in trade rather than as a partial hour.
+ *  - **The caption is mandatory**, and it carries the range and the unit. A bar
+ *    chart with no unit is a shape.
+ *
+ * The bars carry no text, so they are hidden from assistive technology and each
+ * one's own description is read instead.
+ */
+export function TrendBars({
+  bars,
+  caption,
+  axis
+}: {
+  bars: readonly TrendBar[];
+  /** The range and the unit, in words. Required, and never generic. */
+  caption: ReactNode;
+  /** Two or three labels along the bottom. Fewer than the bars, on purpose. */
+  axis: readonly string[];
+}) {
+  const peak = bars.reduce((highest, bar) => Math.max(highest, bar.value), 0);
+
+  return (
+    <figure className="trend">
+      <ul className="trend__bars">
+        {bars.map((bar) => {
+          const bad = Math.min(bar.bad ?? 0, bar.value);
+          const height = peak > 0 ? (bar.value / peak) * 100 : 0;
+          const badHeight = peak > 0 ? (bad / peak) * 100 : 0;
+
+          return (
+            <li
+              key={bar.key}
+              className={bar.partial ? "trend__bar is-partial" : "trend__bar"}
+              title={bar.description}
+            >
+              {/* What went through is the base of the bar and what did not sits
+                  on top of it. The stack is column-reverse, so the first child
+                  here is the one that lands at the bottom. */}
+              <span className="trend__stack" aria-hidden="true">
+                <span
+                  className="trend__fill"
+                  style={{ height: `${Math.max(height - badHeight, 0)}%` }}
+                />
+                {bad > 0 ? (
+                  <span
+                    className="trend__fill trend__fill--bad"
+                    style={{ height: `${badHeight}%` }}
+                  />
+                ) : null}
+              </span>
+              <span className="visually-hidden">{bar.description}</span>
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="trend__axis" aria-hidden="true">
+        {axis.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
+      </div>
+
+      <figcaption className="trend__caption">{caption}</figcaption>
+    </figure>
+  );
+}
+
+/**
+ * A small set of mutually exclusive choices, as one control.
+ *
+ * The same segmented control Money already uses for its three views, extracted
+ * so a window switcher and a series switcher do not each grow their own.
+ */
+export function Choices<Id extends string>({
+  label,
+  options,
+  value,
+  onChoose,
+  size
+}: {
+  /** Names the group for a screen reader: "Time window". */
+  label: string;
+  options: readonly { id: Id; label: string; hint?: string }[];
+  value: Id;
+  onChoose: (id: Id) => void;
+  size?: "small";
+}) {
+  return (
+    <div
+      className={size === "small" ? "segmented segmented--small" : "segmented"}
+      role="group"
+      aria-label={label}
+    >
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          className={option.id === value ? "segmented__option is-active" : "segmented__option"}
+          aria-pressed={option.id === value}
+          aria-label={option.hint ?? undefined}
+          onClick={() => onChoose(option.id)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }
 

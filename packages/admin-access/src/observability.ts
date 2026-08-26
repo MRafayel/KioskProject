@@ -830,6 +830,161 @@ export function suggestedRefundMinor(entry: {
 }
 
 // ---------------------------------------------------------------------------
+// The money summary
+// ---------------------------------------------------------------------------
+
+/**
+ * The two statuses that decide what a payment *is*, named once for both sides.
+ *
+ * The server sums captures and counts unfinished payments against these lists,
+ * and the panel derives its composition and its success rate from the same two.
+ * They were previously a set in the browser and a constant in the service, which
+ * is one definition of "went through" too many for a screen that prints a
+ * success rate.
+ */
+export const CAPTURED_PAYMENT_STATUSES = ["CAPTURED"] as const;
+export const UNFINISHED_PAYMENT_STATUSES = ["PENDING", "AUTHORIZED"] as const;
+
+/**
+ * How far back the money dashboard looks.
+ *
+ * Three windows and no free-text range, because every window here is compared
+ * against the one immediately before it and a caller-chosen span would let a
+ * page compare four days against a fortnight and call the difference a trend.
+ */
+export const MONEY_WINDOWS = ["DAY", "WEEK", "MONTH"] as const;
+export type MoneyWindow = (typeof MONEY_WINDOWS)[number];
+
+/**
+ * How long one bar on the trend covers.
+ *
+ * Named `interval` rather than `bucket` on the wire: `bucket` is a reserved word
+ * in this system's response vocabulary, reserved for object storage, and the
+ * security suite refuses any response carrying a field by that name.
+ */
+export const MONEY_INTERVALS = ["HOUR", "DAY"] as const;
+
+/**
+ * An amount of one currency.
+ *
+ * Amounts are always a list of these and never a single number, because two
+ * currencies added together is not a total of anything. In practice this system
+ * runs one currency and every list has one entry; the shape is what stops the
+ * day it does not from being a wrong figure nobody can see is wrong.
+ */
+export const currencyAmountSchema = z.object({
+  currency: z.string().length(3),
+  currencyExponent: z.number().int().nonnegative(),
+  amountMinor: z.number().int()
+});
+
+const moneyPeriodSchema = z.object({
+  from: isoTimestamp,
+  /** Exclusive. The current period ends now; the previous ends where it began. */
+  to: isoTimestamp,
+  /** Every payment started in this period, whatever became of it. */
+  started: z.number().int().nonnegative(),
+  /**
+   * One row per status present, counted by the database.
+   *
+   * Complete rather than summarised: a status this build has never met is
+   * returned under its own name instead of being folded into an "other" that
+   * would hide it. The panel derives captured, failed and unfinished from this.
+   */
+  byStatus: z.array(z.object({ status: operationalState, count: z.number().int().nonnegative() })),
+  /** What was captured in this period, kept apart by currency. */
+  capturedAmounts: z.array(currencyAmountSchema)
+});
+
+const moneyTrendPointSchema = z.object({
+  /** When this bar opens, cut on the caller's own clock. */
+  startsAt: isoTimestamp,
+  /** When it closes. The last bar closes at `generatedAt`, not at midnight. */
+  endsAt: isoTimestamp,
+  /**
+   * True when this bar covers less time than a whole one.
+   *
+   * The first and last bars of a trailing window nearly always do, and a short
+   * bar that is not marked reads as a fall in business rather than as a partial
+   * hour. The panel marks them and says so in the caption.
+   */
+  partial: z.boolean(),
+  started: z.number().int().nonnegative(),
+  captured: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  capturedAmounts: z.array(currencyAmountSchema)
+});
+
+const moneyRefundFlowSchema = z.object({
+  raised: z.number().int().nonnegative(),
+  raisedAmounts: z.array(currencyAmountSchema),
+  /** Refunds the provider actually returned inside this period. */
+  returned: z.number().int().nonnegative(),
+  returnedAmounts: z.array(currencyAmountSchema)
+});
+
+/**
+ * The money dashboard, computed by the database rather than by the browser.
+ *
+ * Everything here covers the whole window — this is the endpoint that exists so
+ * the panel can stop describing a page of fifty rows and start describing the
+ * business. Two properties hold and both are load-bearing:
+ *
+ *  - **`current` and `previous` are exactly the same length**, so the change
+ *    between them is a comparison rather than an artefact of one being longer.
+ *  - **`trend` tiles `current` exactly.** The bars sum to the period, so a
+ *    reader can check the headline against the chart and find them equal.
+ */
+export const adminMoneySummaryResponseSchema = z.object({
+  generatedAt: isoTimestamp,
+  scoped: z.boolean(),
+  window: z.enum(MONEY_WINDOWS),
+  /**
+   * Minutes added to UTC to reach the clock the buckets were cut on.
+   *
+   * Sent by the caller, because a day boundary is a local fact and the database
+   * stores instants. Assumed constant across the window, which is exact for a
+   * zone without daylight saving and out by an hour for one bar in a zone with
+   * it.
+   */
+  utcOffsetMinutes: z.number().int(),
+  interval: z.enum(MONEY_INTERVALS),
+  current: moneyPeriodSchema,
+  previous: moneyPeriodSchema,
+  trend: z.array(moneyTrendPointSchema),
+  /**
+   * True when the window held more payments than the trend read will take.
+   *
+   * The totals above are still exact — they are counted by the database — but
+   * the bars would be a prefix of the window presented as the whole of it, so
+   * the panel draws no chart at all rather than a misleading one.
+   */
+  trendTruncated: z.boolean(),
+  /** What is in flight right now, whatever period it started in. */
+  now: z.object({
+    open: z.number().int().nonnegative(),
+    /** Open and past the moment it should have resolved by. */
+    expired: z.number().int().nonnegative()
+  }),
+  /**
+   * Money owed back right now, in full.
+   *
+   * The one number on this endpoint that is a liability rather than a
+   * measurement, and the reason it is not inside a period: an obligation raised
+   * five weeks ago and still unreturned is owed today. Null for a role that may
+   * not read obligations.
+   */
+  liability: z
+    .object({
+      unsettled: z.number().int().nonnegative(),
+      amounts: z.array(currencyAmountSchema),
+      oldestOutstandingHours: z.number().int().nonnegative().nullable()
+    })
+    .nullable(),
+  refunds: z.object({ current: moneyRefundFlowSchema, previous: moneyRefundFlowSchema }).nullable()
+});
+
+// ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------
 
@@ -971,6 +1126,8 @@ export type AdminPaymentsResponse = z.infer<typeof adminPaymentsResponseSchema>;
 export type AdminRefundsResponse = z.infer<typeof adminRefundsResponseSchema>;
 export type AdminRefundQueueEntry = z.infer<typeof adminRefundQueueEntrySchema>;
 export type AdminRefundQueueResponse = z.infer<typeof adminRefundQueueResponseSchema>;
+export type AdminMoneySummaryResponse = z.infer<typeof adminMoneySummaryResponseSchema>;
+export type CurrencyAmount = z.infer<typeof currencyAmountSchema>;
 export type AdminRetentionResponse = z.infer<typeof adminRetentionResponseSchema>;
 export type AdminErrorsResponse = z.infer<typeof adminErrorsResponseSchema>;
 export type AdminAuditResponse = z.infer<typeof adminAuditResponseSchema>;

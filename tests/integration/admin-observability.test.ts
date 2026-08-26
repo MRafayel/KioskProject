@@ -122,6 +122,7 @@ const READ_ROUTES = [
   "/v1/admin/sessions",
   "/v1/admin/print-jobs",
   "/v1/admin/payments",
+  "/v1/admin/money/summary",
   "/v1/admin/refunds",
   "/v1/admin/retention",
   "/v1/admin/errors",
@@ -473,6 +474,111 @@ describe("operational answers", () => {
   });
 });
 
+/**
+ * The one read that describes the business rather than listing records.
+ *
+ * These tests are about the three properties the panel is entitled to assume,
+ * because each of them is a way a dashboard quietly lies: that the two periods
+ * are comparable, that the chart adds up to the headline above it, and that a
+ * liability is the whole liability rather than a page of it.
+ */
+describe("the money summary", () => {
+  it("compares two periods of exactly the same length", async () => {
+    const response = await get("/v1/admin/money/summary?window=DAY&utcOffsetMinutes=240", admin);
+    expect(response.statusCode).toBe(200);
+
+    const summary = response.json();
+    expect(summary.window).toBe("DAY");
+    expect(summary.interval).toBe("HOUR");
+
+    // The previous period ends exactly where the current one begins, and both
+    // span the same number of milliseconds. A dashboard whose "vs previous"
+    // compared a day and a half against two days would fall every morning.
+    expect(summary.previous.to).toBe(summary.current.from);
+    expect(Date.parse(summary.current.to) - Date.parse(summary.current.from)).toBe(
+      Date.parse(summary.previous.to) - Date.parse(summary.previous.from)
+    );
+    expect(summary.current.to).toBe(summary.generatedAt);
+  });
+
+  it("draws bars that add up to the totals printed above them", async () => {
+    const response = await get("/v1/admin/money/summary?window=DAY&utcOffsetMinutes=240", admin);
+    const summary = response.json();
+    expect(summary.trendTruncated).toBe(false);
+    expect(summary.trend).toHaveLength(24);
+
+    const captured = summary.current.byStatus
+      .filter((row: { status: string }) => row.status === "CAPTURED")
+      .reduce((total: number, row: { count: number }) => total + row.count, 0);
+    const started = summary.current.byStatus.reduce(
+      (total: number, row: { count: number }) => total + row.count,
+      0
+    );
+
+    expect(started).toBe(summary.current.started);
+    expect(sumBy(summary.trend, "started")).toBe(started);
+    expect(sumBy(summary.trend, "captured")).toBe(captured);
+
+    // And the money too, currency by currency.
+    const barAmd = summary.trend.reduce(
+      (total: number, point: { capturedAmounts: { currency: string; amountMinor: number }[] }) =>
+        total +
+        point.capturedAmounts
+          .filter((amount) => amount.currency === "AMD")
+          .reduce((sum, amount) => sum + amount.amountMinor, 0),
+      0
+    );
+    expect(barAmd).toBe(amdOf(summary.current.capturedAmounts));
+    expect(barAmd).toBeGreaterThanOrEqual(36_000);
+
+    // Only the ends of a trailing window are short, and they say so.
+    expect(summary.trend.at(-1).partial).toBe(true);
+    expect(summary.trend.slice(1, -1).every((point: { partial: boolean }) => !point.partial)).toBe(
+      true
+    );
+  });
+
+  it("reports the whole outstanding liability, not a page of it", async () => {
+    const response = await get("/v1/admin/money/summary?window=WEEK&utcOffsetMinutes=240", admin);
+    const summary = response.json();
+
+    // Two seeded kiosk worlds, one unreturned refund of 18,000 each.
+    expect(summary.liability.unsettled).toBeGreaterThanOrEqual(2);
+    expect(amdOf(summary.liability.amounts)).toBeGreaterThanOrEqual(36_000);
+    expect(summary.liability.oldestOutstandingHours).toBeGreaterThanOrEqual(2);
+    expect(summary.refunds.current.raised).toBeGreaterThanOrEqual(2);
+  });
+
+  it("withholds the refund halves from a role that may not read obligations", async () => {
+    const forOperator = await get("/v1/admin/money/summary", operatorOnA);
+    expect(forOperator.statusCode).toBe(200);
+
+    // Null rather than zero: "nothing is owed" and "you may not see what is
+    // owed" are different answers and only one of them is true here.
+    expect(forOperator.json().liability).toBeNull();
+    expect(forOperator.json().refunds).toBeNull();
+    // The payment half is theirs to read, and does not come back empty.
+    expect(forOperator.json().current.started).toBeGreaterThan(0);
+
+    expect((await get("/v1/admin/money/summary", admin)).json().liability).not.toBeNull();
+  });
+
+  it("counts only an Operator's own kiosks", async () => {
+    const forOperator = (await get("/v1/admin/money/summary?window=WEEK", operatorOnA)).json();
+    const forAdmin = (await get("/v1/admin/money/summary?window=WEEK", admin)).json();
+    const forUnscoped = (
+      await get("/v1/admin/money/summary?window=WEEK", operatorWithoutScope)
+    ).json();
+
+    expect(forOperator.scoped).toBe(true);
+    expect(forAdmin.scoped).toBe(false);
+    expect(forOperator.current.started).toBeLessThan(forAdmin.current.started);
+    // An Operator with no kiosk assigned sees no money, not everybody's.
+    expect(forUnscoped.current.started).toBe(0);
+    expect(forUnscoped.now.open).toBe(0);
+  });
+});
+
 describe("bounded queries", () => {
   it("pages without skipping or repeating a row", async () => {
     // Sessions are keyset-paged. Walk every page and check the union is exactly
@@ -543,6 +649,18 @@ describe("bounded queries", () => {
 
 function get(url: string, session: SeededSession) {
   return app.inject({ method: "GET", url, headers: { cookie: session.cookieHeader } });
+}
+
+/** One field of every trend bar, added up. */
+function sumBy(points: readonly Record<string, number>[], field: string): number {
+  return points.reduce((total, point) => total + (point[field] ?? 0), 0);
+}
+
+/** The seeded world runs in AMD, so the money assertions read one currency. */
+function amdOf(amounts: readonly { currency: string; amountMinor: number }[]): number {
+  return amounts
+    .filter((amount) => amount.currency === "AMD")
+    .reduce((total, amount) => total + amount.amountMinor, 0);
 }
 
 async function seedAdminWithSession(

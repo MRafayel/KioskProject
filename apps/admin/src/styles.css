@@ -3375,6 +3375,323 @@ code {
 }
 
 /* ---------------------------------------------------------------------------
+   Utility
+   ------------------------------------------------------------------------- */
+
+/* Read aloud, never drawn. Used for the description of a chart bar, which is a
+   rectangle to the eye and a sentence to a screen reader. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   The attention strip
+   ---------------------------------------------------------------------------
+   What replaced four permanent summary cards, and the reason it looks nothing
+   like them: it carries only what somebody has to act on, and when there is
+   nothing to act on it is not rendered at all. A calm morning costs no height
+   here, which is what makes anything appearing in it worth looking at.
+
+   It takes the accent, because in this panel the accent means "somebody has to
+   do something" and this is the only band on the page that is always that.
+   ------------------------------------------------------------------------- */
+
+.attention-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--radius-card);
+  background: var(--accent-soft);
+  animation: rise-in 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.attention-strip__lead {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding-left: 0.25rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+.attention-strip__items {
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One item, and the whole of it is the target. The number leads because it is
+   what gets read; the line under it says what the number is about. */
+.attention-strip__item {
+  display: grid;
+  gap: 0.05rem;
+  min-height: 0;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.attention-strip__item strong {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+button.attention-strip__item:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--card);
+}
+
+/* The one that costs a customer money while it waits. */
+.attention-strip__item.is-critical strong {
+  color: var(--critical);
+}
+
+/* An item with nowhere to go is not drawn as a control. */
+.attention-strip__item.is-static {
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.attention-strip__note {
+  font-size: 0.76rem;
+  color: var(--ink-soft);
+}
+
+/* ---------------------------------------------------------------------------
+   The dashboard grid
+   ---------------------------------------------------------------------------
+   One dominant card and two supporting ones. Three equal columns would say the
+   three questions are equally important, and they are not: what the business
+   took is the reading, how the payments finished and what is owed are the
+   follow-ups.
+
+   It steps down twice rather than once. At the middle width the dominant card
+   takes the full row and the two supporting ones share the next, which keeps
+   the two narrow cards narrow instead of stretching a five-row list across a
+   laptop.
+   ------------------------------------------------------------------------- */
+
+.dashboard-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr) minmax(0, 1fr);
+  /* Equal heights across the row. The cards hold different amounts of content
+     and `align-content: start` inside each one keeps that content at the top, so
+     what this buys is a straight bottom edge rather than stretched rows. A
+     ragged edge under three cards reads as three things that did not fit. */
+  align-items: stretch;
+}
+
+@media (max-width: 82rem) {
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .dashboard-grid > :first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 52rem) {
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dashboard-grid > :first-child {
+    grid-column: auto;
+  }
+}
+
+.dashboard-grid > .module {
+  animation: rise-in 260ms cubic-bezier(0.32, 0.72, 0, 1) backwards;
+}
+
+.dashboard-grid > :nth-child(2) {
+  animation-delay: 50ms;
+}
+
+.dashboard-grid > :nth-child(3) {
+  animation-delay: 100ms;
+}
+
+/* The window switcher sits with the heading it governs. */
+.section__actions {
+  margin-left: auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Change against the previous period
+   ---------------------------------------------------------------------------
+   Green is the good direction and amber is the worse one — which way that is
+   depends on the number and is decided by the caller, so a rise in failed
+   payments never reads as good news. Red is not used: a quieter week is not an
+   incident, and red on this page is reserved for what needs a person.
+
+   The arrow is decoration. The direction is in the words, because a glyph is
+   the part of this a screen reader may drop and direction is the whole point.
+   ------------------------------------------------------------------------- */
+
+.delta {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: 0;
+  color: var(--ink-soft);
+}
+
+.delta--good {
+  color: var(--good);
+}
+
+.delta--warn {
+  color: var(--warn);
+}
+
+.delta--none {
+  color: var(--ink-dim);
+  font-weight: 400;
+}
+
+.delta__arrow {
+  margin-right: 0.2rem;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+   The trend
+   ---------------------------------------------------------------------------
+   The one chart in the panel, and it is a flex row of rectangles. A charting
+   dependency would cost more bytes than the rest of this application for a
+   single bar chart, and would still need every rule below written by hand:
+   which bars are short, what the unit is, and what each bar says out loud.
+
+   Every bar exists, including the empty ones. A missing bar reads as missing
+   data, which is a different and much worse claim than "nothing happened".
+   ------------------------------------------------------------------------- */
+
+.trend {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.9rem 0 0;
+}
+
+.trend__bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 7rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trend__bar {
+  display: flex;
+  align-items: flex-end;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.trend__bar:hover {
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+/* Stacked from the bottom: what went through, then what did not, on top of it. */
+.trend__stack {
+  display: flex;
+  flex-direction: column-reverse;
+  width: 100%;
+  height: 100%;
+  justify-content: flex-start;
+}
+
+/* Ink, not accent. In this panel the accent means "somebody has to do
+   something" — it is spent on the attention strip above and on the controls that
+   lead somewhere. A week of takings is not that, and painting the largest thing
+   on the page in the colour of an alarm would leave the alarm with nowhere to
+   go. Failures inside a bar keep the critical red, which does mean what it
+   always means here. */
+.trend__fill {
+  display: block;
+  width: 100%;
+  min-height: 1px;
+  border-radius: 2px 2px 0 0;
+  background: color-mix(in srgb, var(--ink) 80%, transparent);
+  transition: height 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.trend__fill--bad {
+  background: var(--critical);
+  border-radius: 2px 2px 0 0;
+}
+
+/* A bar covering less time than the others. Hatched rather than merely paler,
+   so it survives greyscale and a bad monitor — and the caption says what the
+   hatching means, because a texture on its own explains nothing. */
+.trend__bar.is-partial .trend__fill {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgb(255 255 255 / 55%) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.trend__axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The range and the unit. Not optional: a bar chart without a unit is a shape. */
+.trend__caption {
+  margin: 0.15rem 0 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--ink-dim);
+}
+
+/* A compact segmented control, for a switcher that lives inside a card head. */
+.segmented--small .segmented__option {
+  min-height: 1.7rem;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.78rem;
+}
+
+.segmented--small {
+  padding: 0.15rem;
+}
+
+/* ---------------------------------------------------------------------------
    The insight band
    ---------------------------------------------------------------------------
    One wide card carrying the reading, one narrow card carrying the breakdown
@@ -3627,9 +3944,30 @@ code {
 }
 
 .fact__value {
-  font-size: 0.95rem;
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 500;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+}
+
+/* The money beside a count, on the same line and one step quieter: the count is
+   what the label named, the amount is what it was worth. */
+.fact__aside {
+  margin-left: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+/* A fact carrying a change under it needs room to breathe, and the row needs to
+   stop being a row of two words and start being a row of small readings. */
+.fact-row {
+  gap: 0.75rem 1.75rem;
+}
+
+.fact {
+  flex: 1 1 8rem;
 }
 
 /* ---------------------------------------------------------------------------

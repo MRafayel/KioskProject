@@ -273,6 +273,10 @@ const ENDPOINTS: readonly AdminEndpoint[] = [
     gate: "print.read"
   },
   { method: "GET", path: "/v1/admin/payments", gate: "payment.read" },
+  // Aggregates of the payment ledger, so it names the ledger's own capability.
+  // The refund halves of its answer are withheld inside the handler from a role
+  // without `refund.obligation.read`, the way a provider reference is.
+  { method: "GET", path: "/v1/admin/money/summary", gate: "payment.read" },
   { method: "GET", path: "/v1/admin/refunds", gate: "refund.obligation.read" },
   { method: "GET", path: "/v1/admin/refund-queue", gate: "refund.obligation.read" },
   { method: "GET", path: "/v1/admin/retention", gate: "document.retention.read" },

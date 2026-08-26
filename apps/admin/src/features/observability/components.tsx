@@ -287,19 +287,42 @@ export function Money({
   currency: string;
   exponent: number;
 }) {
+  return <span className="money">{formatMoney(minor, currency, exponent)}</span>;
+}
+
+/**
+ * The same amount as a plain string, for somewhere a span cannot go.
+ *
+ * A chart's hover text and a screen reader's description of a bar both need
+ * text rather than an element, and neither may be allowed to format money
+ * differently from the table underneath it.
+ *
+ * The whole part is grouped and the fractional part is not, which is what every
+ * locale does and what makes a six-figure total readable at a glance. Grouping
+ * is applied to a string of digits rather than to a number, so nothing here ever
+ * puts an amount through a float.
+ */
+export function formatMoney(minor: number, currency: string, exponent: number): string {
   const sign = minor < 0 ? "-" : "";
   const digits = Math.abs(minor)
     .toString()
     .padStart(exponent + 1, "0");
   const whole = digits.slice(0, digits.length - exponent) || "0";
   const fraction = exponent > 0 ? `.${digits.slice(digits.length - exponent)}` : "";
-  return (
-    <span className="money">
-      {sign}
-      {whole}
-      {fraction} {currency}
-    </span>
-  );
+  return `${sign}${group(whole)}${fraction} ${currency}`;
+}
+
+/**
+ * Digits in threes from the right, without ever touching a Number.
+ *
+ * A comma, to agree with the dot used for the fractional part above. A
+ * space-grouped amount beside a dot decimal is readable; a comma-grouped one
+ * additionally cannot be misread as a decimal comma, and it survives being
+ * copied out of the page into a spreadsheet, which a narrow no-break space
+ * does not.
+ */
+function group(digits: string): string {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
 }
 
 /** A UUID, shortened for a table but complete on hover and on copy. */

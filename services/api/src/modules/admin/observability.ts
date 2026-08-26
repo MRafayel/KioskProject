@@ -1,5 +1,7 @@
 import {
   ADMIN_PAGE_SIZE,
+  CAPTURED_PAYMENT_STATUSES,
+  UNFINISHED_PAYMENT_STATUSES,
   adminDeviceDetailSchema,
   classifyKioskLiveness,
   decodeAdminCursor,
@@ -15,6 +17,7 @@ import {
   type AdminDocumentsResponse,
   type AdminErrorsResponse,
   type AdminKiosksResponse,
+  type AdminMoneySummaryResponse,
   type AdminOverviewResponse,
   type AdminPaymentsResponse,
   type AdminPeopleResponse,
@@ -30,7 +33,8 @@ import {
   type AdminRetentionResponse,
   type AdminSessionDetailResponse,
   type AdminSessionsResponse,
-  type AdminTimelineResponse
+  type AdminTimelineResponse,
+  type MoneyWindow
 } from "@printing-kiosk/admin-access";
 import { isTerminalSessionState, SESSION_STATES, type SessionState } from "@printing-kiosk/domain";
 
@@ -106,9 +110,29 @@ const MAX_ACKNOWLEDGEMENTS = 400;
 /** Distinct operator scopes are few; this only stops the map growing forever. */
 const MAX_CACHED_OVERVIEWS = 32;
 
+/**
+ * How many payment rows the trend read will take before giving up on drawing.
+ *
+ * The totals beside it are counted by the database and are unaffected by this;
+ * the only thing the ceiling protects is a `findMany` over a month of a
+ * business far larger than this one. Above it the panel draws no chart rather
+ * than a chart of the first twenty thousand payments labelled as the month.
+ */
+const MAX_TREND_ROWS = 20_000;
+
+/** How wide each window is, and how finely it is cut. */
+const MONEY_WINDOW_SHAPE: Readonly<
+  Record<MoneyWindow, { interval: "HOUR" | "DAY"; bars: number; barMilliseconds: number }>
+> = {
+  DAY: { interval: "HOUR", bars: 24, barMilliseconds: 3_600_000 },
+  WEEK: { interval: "DAY", bars: 7, barMilliseconds: 86_400_000 },
+  MONTH: { interval: "DAY", bars: 30, barMilliseconds: 86_400_000 }
+};
+
 const LIVE_SESSION_STATES = SESSION_STATES.filter((state) => !isTerminalSessionState(state));
 const OPEN_PRINT_STATUSES = ["QUEUED", "DISPATCHED", "PRINTING"] as const;
-const OPEN_PAYMENT_STATUSES = ["PENDING", "AUTHORIZED"] as const;
+/** Shared with the panel, so "unfinished" is one definition rather than two. */
+const OPEN_PAYMENT_STATUSES = UNFINISHED_PAYMENT_STATUSES;
 const ACTIVE_CLEANUP_STATUSES = ["PENDING", "IN_PROGRESS", "DEAD_LETTER"] as const;
 /** Agent command states that mean something went wrong, rather than finished. */
 const FAILED_COMMAND_STATUSES = ["FAILED", "EXPIRED"] as const;
@@ -1290,6 +1314,233 @@ export class AdminObservabilityService {
     };
   }
 
+  /**
+   * The money dashboard: one window, the window before it, and the shape of it.
+   *
+   * This is the only read in the file that exists to describe the business
+   * rather than to list records, and it is here because the alternative was a
+   * browser dividing one page of fifty rows by another and calling the result a
+   * success rate. Every number it returns is counted or summed by the database
+   * over the whole window.
+   *
+   * Three decisions are worth stating, because each one is a way this could
+   * have been subtly wrong.
+   *
+   * **Everything is bucketed by when the payment started.** Not by when it was
+   * captured. One basis for every series is what makes a bucket's success rate
+   * meaningful — "of the payments started on Tuesday, this many went through" —
+   * and a kiosk captures seconds after it creates, so the difference is a
+   * rounding error at a day boundary rather than a distortion.
+   *
+   * **The two periods are exactly the same length.** The current one ends now,
+   * not at midnight, and the previous one is the identical span immediately
+   * before it. Comparing a day-and-a-half against two days would produce a fall
+   * every morning that nobody could explain.
+   *
+   * **The bars tile the window exactly.** The first and last are short, and are
+   * marked as short, rather than being dropped or silently drawn as though they
+   * were whole. The sum of the bars is the period total, so the chart can be
+   * checked against the headline above it.
+   */
+  public async moneySummary(
+    scope: AdminReadScope,
+    filters: {
+      window: MoneyWindow;
+      /** Minutes added to UTC to reach the clock the caller reads. */
+      utcOffsetMinutes: number;
+      /** `refund.obligation.read`. Without it the refund halves are withheld. */
+      includeRefunds: boolean;
+    }
+  ): Promise<AdminMoneySummaryResponse> {
+    const now = this.options.clock.now();
+    const shape = MONEY_WINDOW_SHAPE[filters.window];
+    const offsetMilliseconds = filters.utcOffsetMinutes * 60_000;
+
+    // The bucket the present moment falls in, cut on the caller's clock, and
+    // then as many whole buckets back as the window is wide.
+    const latestBarStart = truncateToInterval(now, shape.interval, offsetMilliseconds);
+    const currentFrom = new Date(
+      latestBarStart.getTime() - (shape.bars - 1) * shape.barMilliseconds
+    );
+    const length = now.getTime() - currentFrom.getTime();
+    const previousFrom = new Date(currentFrom.getTime() - length);
+
+    const paymentScope = scopedViaSessionFilter(scope);
+    const inWindow = (from: Date, to: Date) => ({ createdAt: { gte: from, lt: to } });
+
+    const [
+      currentStatuses,
+      currentCaptured,
+      previousStatuses,
+      previousCaptured,
+      trendRows,
+      openNow,
+      expiredNow
+    ] = await Promise.all([
+      this.options.database.payment.groupBy({
+        by: ["status"],
+        where: { ...paymentScope, ...inWindow(currentFrom, now) },
+        _count: { _all: true }
+      }),
+      this.options.database.payment.groupBy({
+        by: ["currency", "currencyExponent"],
+        where: {
+          ...paymentScope,
+          ...inWindow(currentFrom, now),
+          status: { in: [...CAPTURED_PAYMENT_STATUSES] }
+        },
+        _sum: { amountMinor: true }
+      }),
+      this.options.database.payment.groupBy({
+        by: ["status"],
+        where: { ...paymentScope, ...inWindow(previousFrom, currentFrom) },
+        _count: { _all: true }
+      }),
+      this.options.database.payment.groupBy({
+        by: ["currency", "currencyExponent"],
+        where: {
+          ...paymentScope,
+          ...inWindow(previousFrom, currentFrom),
+          status: { in: [...CAPTURED_PAYMENT_STATUSES] }
+        },
+        _sum: { amountMinor: true }
+      }),
+      // The one row-reading query here, and the only one that can be outrun by a
+      // busy window. Ordered so that a truncated read is a prefix rather than an
+      // arbitrary sample — though a truncated read is not drawn at all.
+      this.options.database.payment.findMany({
+        where: { ...paymentScope, ...inWindow(currentFrom, now) },
+        orderBy: { createdAt: "asc" },
+        take: MAX_TREND_ROWS + 1,
+        select: {
+          createdAt: true,
+          status: true,
+          amountMinor: true,
+          currency: true,
+          currencyExponent: true
+        }
+      }),
+      this.options.database.payment.count({
+        where: { ...paymentScope, status: { in: [...OPEN_PAYMENT_STATUSES] } }
+      }),
+      this.options.database.payment.count({
+        where: {
+          ...paymentScope,
+          status: { in: [...OPEN_PAYMENT_STATUSES] },
+          expiresAt: { lt: now }
+        }
+      })
+    ]);
+
+    const trendTruncated = trendRows.length > MAX_TREND_ROWS;
+
+    return {
+      generatedAt: now.toISOString(),
+      scoped: scope.kioskIds !== null,
+      window: filters.window,
+      utcOffsetMinutes: filters.utcOffsetMinutes,
+      interval: shape.interval,
+      current: {
+        from: currentFrom.toISOString(),
+        to: now.toISOString(),
+        started: sumCounts(currentStatuses),
+        byStatus: currentStatuses.map((row) => ({ status: row.status, count: row._count._all })),
+        capturedAmounts: toCurrencyAmounts(currentCaptured)
+      },
+      previous: {
+        from: previousFrom.toISOString(),
+        to: currentFrom.toISOString(),
+        started: sumCounts(previousStatuses),
+        byStatus: previousStatuses.map((row) => ({ status: row.status, count: row._count._all })),
+        capturedAmounts: toCurrencyAmounts(previousCaptured)
+      },
+      trend: trendTruncated
+        ? []
+        : barsOf(trendRows, {
+            from: currentFrom,
+            to: now,
+            first: currentFrom.getTime(),
+            step: shape.barMilliseconds,
+            count: shape.bars
+          }),
+      trendTruncated,
+      now: { open: openNow, expired: expiredNow },
+      ...(await this.moneyRefunds(scope, filters.includeRefunds, {
+        now,
+        currentFrom,
+        previousFrom
+      }))
+    };
+  }
+
+  /**
+   * The refund halves of the summary, or two nulls.
+   *
+   * Withheld rather than zeroed for a role without `refund.obligation.read`:
+   * "nothing is owed" and "you may not see what is owed" are different answers
+   * and a zero would be the wrong one.
+   */
+  private async moneyRefunds(
+    scope: AdminReadScope,
+    include: boolean,
+    at: { now: Date; currentFrom: Date; previousFrom: Date }
+  ): Promise<Pick<AdminMoneySummaryResponse, "liability" | "refunds">> {
+    if (!include) return { liability: null, refunds: null };
+
+    const refundScope = scopedViaSessionFilter(scope);
+    const raisedIn = (from: Date, to: Date) => ({ createdAt: { gte: from, lt: to } });
+    const returnedIn = (from: Date, to: Date) => ({ completedAt: { gte: from, lt: to } });
+
+    // Written out rather than spread from a shared options object: Prisma infers
+    // the shape of an aggregate from the literal it is handed, and a spread
+    // widens `_count` back to a union the callers below cannot read.
+    const totalsBy = (where: RefundTotalsFilter) =>
+      this.options.database.refund.groupBy({
+        by: ["currency", "currencyExponent"],
+        where,
+        _sum: { amountMinor: true },
+        _count: { _all: true }
+      });
+
+    const [outstanding, oldest, raisedNow, returnedNow, raisedBefore, returnedBefore] =
+      await Promise.all([
+        totalsBy({ ...refundScope, completedAt: null }),
+        this.options.database.refund.findFirst({
+          where: { ...refundScope, completedAt: null },
+          orderBy: { createdAt: "asc" },
+          select: { createdAt: true }
+        }),
+        totalsBy({ ...refundScope, ...raisedIn(at.currentFrom, at.now) }),
+        totalsBy({ ...refundScope, ...returnedIn(at.currentFrom, at.now) }),
+        totalsBy({ ...refundScope, ...raisedIn(at.previousFrom, at.currentFrom) }),
+        totalsBy({ ...refundScope, ...returnedIn(at.previousFrom, at.currentFrom) })
+      ]);
+
+    return {
+      liability: {
+        unsettled: sumCounts(outstanding),
+        amounts: toCurrencyAmounts(outstanding),
+        oldestOutstandingHours: oldest
+          ? Math.max(0, Math.floor((at.now.getTime() - oldest.createdAt.getTime()) / 3_600_000))
+          : null
+      },
+      refunds: {
+        current: {
+          raised: sumCounts(raisedNow),
+          raisedAmounts: toCurrencyAmounts(raisedNow),
+          returned: sumCounts(returnedNow),
+          returnedAmounts: toCurrencyAmounts(returnedNow)
+        },
+        previous: {
+          raised: sumCounts(raisedBefore),
+          raisedAmounts: toCurrencyAmounts(raisedBefore),
+          returned: sumCounts(returnedBefore),
+          returnedAmounts: toCurrencyAmounts(returnedBefore)
+        }
+      }
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Retention
   // -------------------------------------------------------------------------
@@ -1956,6 +2207,143 @@ function scopedKioskFilter(scope: AdminReadScope, requested?: string): { kioskId
  * `kiosk_id` themselves use the filter above. It matters that both exist: a
  * scope that only worked on some tables would be a scope with holes in it.
  */
+// ---------------------------------------------------------------------------
+// The money summary's arithmetic
+// ---------------------------------------------------------------------------
+
+/**
+ * The three ways the summary narrows the refund ledger.
+ *
+ * Spelled out rather than taken from Prisma's generated `RefundWhereInput`,
+ * which would drag the whole write-capable filter surface into a file whose
+ * point is that it cannot write.
+ */
+interface RefundTotalsFilter {
+  session?: { kioskId: KioskSelector };
+  completedAt?: null | { gte: Date; lt: Date };
+  createdAt?: { gte: Date; lt: Date };
+}
+
+/**
+ * The start of the bucket an instant falls in, on a clock `offset` from UTC.
+ *
+ * Shifting the instant, truncating in UTC and shifting back is the same
+ * operation as truncating in the local zone, and it needs no timezone database
+ * in the API process. It is exact wherever the offset holds for the whole
+ * window, which is everywhere without daylight saving.
+ */
+function truncateToInterval(at: Date, interval: "HOUR" | "DAY", offsetMilliseconds: number): Date {
+  const shifted = new Date(at.getTime() + offsetMilliseconds);
+  const truncated =
+    interval === "HOUR"
+      ? Date.UTC(
+          shifted.getUTCFullYear(),
+          shifted.getUTCMonth(),
+          shifted.getUTCDate(),
+          shifted.getUTCHours()
+        )
+      : Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+  return new Date(truncated - offsetMilliseconds);
+}
+
+/**
+ * The payments of one window, laid into the bars that tile it.
+ *
+ * Every bar is created empty first, so a quiet Tuesday is a zero on the chart
+ * rather than a gap in it — a missing bar reads as missing data, which is a
+ * different and much worse claim than "nothing happened".
+ *
+ * The first and last bars are clipped to the window and marked `partial`. Both
+ * are ordinary: a trailing window opens part-way through a bucket and closes
+ * part-way through the present one.
+ */
+function barsOf(
+  rows: readonly {
+    createdAt: Date;
+    status: string;
+    amountMinor: number;
+    currency: string;
+    currencyExponent: number;
+  }[],
+  span: { from: Date; to: Date; first: number; step: number; count: number }
+): AdminMoneySummaryResponse["trend"] {
+  const buckets = Array.from({ length: span.count }, (_unused, index) => {
+    const opens = span.first + index * span.step;
+    const closes = opens + span.step;
+    return {
+      opens: Math.max(opens, span.from.getTime()),
+      closes: Math.min(closes, span.to.getTime()),
+      whole: opens >= span.from.getTime() && closes <= span.to.getTime(),
+      started: 0,
+      captured: 0,
+      failed: 0,
+      amounts: new Map<string, { currencyExponent: number; amountMinor: number }>()
+    };
+  });
+
+  for (const row of rows) {
+    const index = Math.min(
+      Math.max(Math.floor((row.createdAt.getTime() - span.first) / span.step), 0),
+      span.count - 1
+    );
+    const bucket = buckets[index];
+    if (!bucket) continue;
+
+    bucket.started += 1;
+    if (row.status === "FAILED") bucket.failed += 1;
+    if (CAPTURED.has(row.status)) {
+      bucket.captured += 1;
+      const total = bucket.amounts.get(row.currency) ?? {
+        currencyExponent: row.currencyExponent,
+        amountMinor: 0
+      };
+      total.amountMinor += row.amountMinor;
+      bucket.amounts.set(row.currency, total);
+    }
+  }
+
+  return buckets.map((bucket) => ({
+    startsAt: new Date(bucket.opens).toISOString(),
+    endsAt: new Date(bucket.closes).toISOString(),
+    partial: !bucket.whole,
+    started: bucket.started,
+    captured: bucket.captured,
+    failed: bucket.failed,
+    capturedAmounts: [...bucket.amounts.entries()]
+      .map(([currency, total]) => ({ currency, ...total }))
+      .sort((left, right) => left.currency.localeCompare(right.currency))
+  }));
+}
+
+const CAPTURED = new Set<string>(CAPTURED_PAYMENT_STATUSES);
+
+/**
+ * Grouped rows turned into one amount per currency, never added across them.
+ *
+ * A currency with a zero sum is kept rather than dropped: the group only exists
+ * because rows exist, and a currency that took nothing is a different fact from
+ * a currency nobody used.
+ */
+function toCurrencyAmounts(
+  rows: readonly {
+    currency: string;
+    currencyExponent: number;
+    _sum?: { amountMinor?: number | null } | undefined;
+  }[]
+): AdminMoneySummaryResponse["current"]["capturedAmounts"] {
+  return rows
+    .map((row) => ({
+      currency: row.currency,
+      currencyExponent: row.currencyExponent,
+      amountMinor: row._sum?.amountMinor ?? 0
+    }))
+    .sort((left, right) => left.currency.localeCompare(right.currency));
+}
+
+function sumCounts(rows: readonly { _count: { _all: number } }[]): number {
+  return rows.reduce((total, row) => total + row._count._all, 0);
+}
+
 function scopedViaSessionFilter(
   scope: AdminReadScope,
   requested?: string

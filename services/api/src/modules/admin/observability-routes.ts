@@ -2,10 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import {
+  MONEY_WINDOWS,
   adminAuditResponseSchema,
   adminDocumentsResponseSchema,
   adminErrorsResponseSchema,
   adminKiosksResponseSchema,
+  adminMoneySummaryResponseSchema,
   adminOverviewResponseSchema,
   adminPaymentsResponseSchema,
   adminPeopleResponseSchema,
@@ -90,6 +92,19 @@ const refundsQuerySchema = z.object({
 
 /** The refund queue takes no filter: everything on it is waiting for somebody. */
 const cursorQuerySchema = z.object({ cursor: cursorSchema });
+
+/**
+ * The money dashboard's window, and the clock its days are cut on.
+ *
+ * The offset is bounded to the range real zones occupy. It decides nothing but
+ * where a bar begins, and a caller sending a silly one only mislabels their own
+ * chart — but an unbounded integer would reach `date` arithmetic, so it is
+ * bounded here rather than trusted downstream.
+ */
+const moneySummaryQuerySchema = z.object({
+  window: z.enum(MONEY_WINDOWS).default("WEEK"),
+  utcOffsetMinutes: z.coerce.number().int().min(-840).max(840).default(0)
+});
 
 const retentionQuerySchema = z.object({
   cursor: cursorSchema,
@@ -246,6 +261,32 @@ export function registerAdminObservabilityRoutes(
   // ---------------------------------------------------------------------------
   // Money
   // ---------------------------------------------------------------------------
+
+  /**
+   * The business reading: one window, the window before it, and the shape of it.
+   *
+   * Read under `payment.read`, because what it aggregates is the payment ledger
+   * and everybody who may read a payment may read a count of payments. The
+   * refund halves — what is owed right now, and what was raised and returned —
+   * are withheld inside the handler from a role without
+   * `refund.obligation.read`, the same way a provider reference is: the shape of
+   * the answer stays one thing and the content follows the role.
+   *
+   * It discloses no record. Every field is a count, a sum or a boundary, so
+   * there is nothing here to scope-check beyond the kiosk scope every other read
+   * on this surface applies.
+   */
+  app.get("/v1/admin/money/summary", readRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "payment.read");
+    await throttleAccount(request, admin.sessionId);
+    const query = moneySummaryQuerySchema.parse(request.query ?? {});
+    const summary = await dependencies.observability.moneySummary(scopeForAdmin(admin), {
+      window: query.window,
+      utcOffsetMinutes: query.utcOffsetMinutes,
+      includeRefunds: hasCapability(admin.role, "refund.obligation.read")
+    });
+    return sendNoStore(reply, adminMoneySummaryResponseSchema.parse(summary));
+  });
 
   app.get("/v1/admin/payments", readRoute, async (request, reply) => {
     const admin = await authorizeAdmin(request, dependencies, "payment.read");
