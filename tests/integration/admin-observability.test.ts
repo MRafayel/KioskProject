@@ -506,6 +506,7 @@ describe("bounded queries", () => {
     for (const url of [
       "/v1/admin/sessions?state=NOT_A_STATE",
       "/v1/admin/print-jobs?status=not lower case",
+      "/v1/admin/print-jobs?recoveryResolved=maybe",
       "/v1/admin/errors?windowHours=100000",
       `/v1/admin/sessions/not-a-uuid`
     ]) {
@@ -519,6 +520,19 @@ describe("bounded queries", () => {
     expect(response.statusCode).toBe(200);
     for (const item of response.json().items) {
       expect(item.state).toBe("RECOVERY_REQUIRED");
+    }
+  });
+
+  it("filters print recovery to jobs without a recorded answer", async () => {
+    const response = await get(
+      "/v1/admin/print-jobs?status=RECOVERY_REQUIRED&recoveryResolved=false",
+      admin
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.json().items.length).toBeGreaterThan(0);
+    for (const item of response.json().items) {
+      expect(item.status).toBe("RECOVERY_REQUIRED");
+      expect(item.recoveryResolved).toBe(false);
     }
   });
 });

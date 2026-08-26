@@ -834,6 +834,7 @@ export class AdminObservabilityService {
     filters: {
       kioskId?: string | undefined;
       status?: string | undefined;
+      recoveryResolved?: "true" | "false" | undefined;
       cursor?: string | undefined;
     }
   ): Promise<AdminPrintJobsResponse> {
@@ -844,6 +845,12 @@ export class AdminObservabilityService {
       where: {
         ...scopedKioskFilter(scope, filters.kioskId),
         ...(filters.status ? { status: filters.status } : {}),
+        ...(filters.recoveryResolved === undefined
+          ? {}
+          : {
+              recoveryResolution:
+                filters.recoveryResolved === "true" ? { isNot: null } : { is: null }
+            }),
         ...keysetWhere("createdAt", cursor)
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],

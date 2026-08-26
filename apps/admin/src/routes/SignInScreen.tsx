@@ -91,7 +91,7 @@ export function SignInScreen() {
           disabled={busy}
           onClick={() => void session.refresh()}
         >
-          Retry session check
+          Retry sign-in check
         </button>
       ) : null}
 
@@ -365,7 +365,7 @@ function ResetPanel() {
         setConfirmPassword("");
         setMessage({
           kind: "success",
-          text: "Password changed, and every session was signed out. Sign in above with the new password."
+          text: "Password changed and all account sign-ins ended. Sign in above with the new password."
         });
       } catch (error) {
         setMessage({ kind: "error", text: describeFailure(error) });

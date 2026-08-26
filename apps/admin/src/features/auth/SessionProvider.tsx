@@ -234,7 +234,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           locked: null,
           status: "signed-in",
           error:
-            "Your browser session changed to a different admin account. Review the account shown, then retry.",
+            "Your browser sign-in changed to a different admin account. Review the account shown, then retry.",
           errorCanRetry: false
         });
         return false;
@@ -254,7 +254,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       setState((current) => ({
         ...current,
-        error: "Could not verify which admin session is active. No changes were made.",
+        error: "Could not verify which admin sign-in is active. No changes were made.",
         errorCanRetry: true
       }));
       return false;
@@ -286,7 +286,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // revoked by the server and may still represent a live session.
         setState((current) => ({
           ...current,
-          error: "Could not sign out. Your session may still be active; try again.",
+          error: "Could not sign out. Your sign-in may still be active; try again.",
           errorCanRetry: false
         }));
       }
@@ -448,7 +448,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const expire = () => {
       generation.current += 1;
       setActivity("idle");
-      setState(signedOut("Your session expired. Sign in again."));
+      setState(signedOut("Your sign-in expired. Sign in again."));
     };
     if (delay <= 0) {
       expire();

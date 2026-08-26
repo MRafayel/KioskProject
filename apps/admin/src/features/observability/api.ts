@@ -78,6 +78,7 @@ export interface ListFilters extends Record<string, string | undefined> {
   kioskId?: string | undefined;
   state?: string | undefined;
   status?: string | undefined;
+  recoveryResolved?: "true" | "false" | undefined;
   cursor?: string | undefined;
 }
 
@@ -147,7 +148,7 @@ export const observabilityApi = {
       `/v1/admin/errors${query({ windowHours })}`
     ),
 
-  audit: (filters: { sessionId?: string; cursor?: string } = {}) =>
+  audit: (filters: { sessionId?: string | undefined; cursor?: string | undefined } = {}) =>
     adminRequest<AdminAuditResponse>("GET", `/v1/admin/audit${query(filters)}`),
 
   /**

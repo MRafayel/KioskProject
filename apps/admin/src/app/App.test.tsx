@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { fireEvent, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,8 +61,19 @@ afterEach(() => {
  * The keys panel is one part of the Security section now. Every test that
  * manages a key has to get there first, exactly as an operator does.
  */
+/**
+ * People and Security are no longer rail entries: both live in the account
+ * area, which is reached by pressing your own name at the foot of the rail.
+ * Every test that manages a key or reads the roster now walks the route an
+ * operator walks.
+ */
+async function openAccount(user: ReturnType<typeof userEvent.setup>, tab: string) {
+  await user.click(await screen.findByRole("button", { name: /Ada Admin/ }));
+  await user.click(await screen.findByRole("button", { name: tab }));
+}
+
 async function openSecurityKeys(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "Security" }));
+  await openAccount(user, "Security");
 }
 
 describe("admin Phase 1 workflows", () => {
@@ -77,7 +88,7 @@ describe("admin Phase 1 workflows", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Could not reach the control plane."
     );
-    await user.click(screen.getByRole("button", { name: "Retry session check" }));
+    await user.click(screen.getByRole("button", { name: "Retry sign-in check" }));
 
     expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeVisible();
     expect(adminApi.me).toHaveBeenCalledTimes(2);
@@ -89,9 +100,11 @@ describe("admin Phase 1 workflows", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "Overview", level: 1 });
+    // Signing out lives in the account area now, beside the expiry it ends.
+    await openAccount(user, "My profile");
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Your session may still be active");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Your sign-in may still be active");
     expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
@@ -139,7 +152,7 @@ describe("admin Phase 1 workflows", () => {
     await user.click(screen.getByRole("button", { name: "Enrol security key" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "browser session changed to a different admin account"
+      "browser sign-in changed to a different admin account"
     );
     expect(screen.getByText(/Grace Operator/)).toBeVisible();
     expect(adminApi.beginEnrolment).not.toHaveBeenCalled();
@@ -164,7 +177,7 @@ describe("admin Phase 1 workflows", () => {
     await user.click(screen.getByRole("button", { name: "Enrol security key" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "browser session changed to a different admin account"
+      "browser sign-in changed to a different admin account"
     );
     expect(screen.getByText(/Grace Operator/)).toBeVisible();
     expect(adminApi.beginEnrolment).toHaveBeenCalledOnce();
@@ -244,7 +257,7 @@ describe("admin Phase 1 workflows", () => {
     await user.click(screen.getByRole("button", { name: "Confirm retirement" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "browser session changed to a different admin account"
+      "browser sign-in changed to a different admin account"
     );
     expect(screen.getByText(/Grace Operator/)).toBeVisible();
     expect(adminApi.revokeAuthenticator).not.toHaveBeenCalled();
@@ -352,7 +365,7 @@ describe("admin Phase 1 workflows", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Session locked" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Control plane locked" })).toBeVisible();
     // Not the sign-in screen: the session still stands.
     expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
 
@@ -386,6 +399,57 @@ function identity(steppedUp = false): AdminIdentityResponse {
 }
 
 describe("admin Phase 2 operational sections", () => {
+  it("distinguishes print sessions and pricing from the current account sign-in", async () => {
+    vi.mocked(adminApi.me).mockResolvedValue({
+      ...identity(),
+      capabilities: [...identity().capabilities, "session.read", "change.read", "pricing.publish"]
+    });
+    vi.spyOn(observabilityApi, "sessions").mockResolvedValue({
+      items: [],
+      nextCursor: null,
+      scoped: false
+    });
+    vi.spyOn(observabilityApi, "changes").mockResolvedValue({
+      changes: [],
+      current: {
+        version: "2026-08",
+        currency: "AMD",
+        currencyExponent: 0,
+        unitAmountMinor: 50,
+        duplexAdjustmentBasisPoints: 0,
+        serviceFeeMinor: 100,
+        minimumAmountMinor: 100,
+        taxBasisPoints: 0,
+        publishedAt: "2026-08-01T08:00:00.000Z",
+        baselineDigest: "a".repeat(64)
+      }
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
+    expect(screen.getByRole("button", { name: "Print sessions" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pricing" })).toBeVisible();
+    // The sign-in expiry and the scope disclaimer are no longer drawn under
+    // every panel; both moved into the account area.
+    expect(screen.queryByText(/Signed in until/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/This sign-in expires at/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/records observations and acknowledgements/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Print sessions" }));
+    expect(await screen.findByRole("heading", { name: "Print sessions", level: 1 })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Pricing" }));
+    expect(await screen.findByRole("heading", { name: "Pricing", level: 1 })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Current pricing", level: 2 })).toBeVisible();
+    expect(screen.getByText(/Enter every proposed value/)).toBeVisible();
+    expect(screen.getByLabelText("Per printed side (minor units)")).not.toHaveAttribute(
+      "placeholder"
+    );
+  });
+
   it("puts the worklist first and names what each number means", async () => {
     render(<App />);
 
@@ -403,7 +467,7 @@ describe("admin Phase 2 operational sections", () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/Nothing is waiting on a person/)).toBeVisible();
+    expect(await screen.findByText(/No tracked issue type needs attention/)).toBeVisible();
   });
 
   it("shows the Windows agent and approved USB printer readiness", async () => {
@@ -483,7 +547,24 @@ describe("admin Phase 2 operational sections", () => {
     // section, can hand out a new invitation code, and is not offered a
     // suspension. The server refuses all three regardless — the integration
     // suite covers that; this covers the door not opening onto a refusal.
-    vi.spyOn(observabilityApi, "people").mockResolvedValue(people());
+    const roster = people();
+    vi.spyOn(observabilityApi, "people").mockResolvedValue({
+      ...roster,
+      items: roster.items.map((person) => ({
+        ...person,
+        usableAuthenticators: 1,
+        authenticators: [
+          {
+            id: keyId(7),
+            label: "Counter key",
+            attachment: "cross-platform" as const,
+            backupEligible: false,
+            createdAt: "2026-07-01T08:00:00.000Z",
+            lastUsedAt: null
+          }
+        ]
+      }))
+    });
     vi.mocked(adminApi.me).mockResolvedValue({
       ...identity(),
       role: "TECHNICAL_ADMIN",
@@ -500,12 +581,20 @@ describe("admin Phase 2 operational sections", () => {
     const user = userEvent.setup();
 
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: "People" }));
+    await openAccount(user, "People");
 
+    expect(await screen.findByRole("heading", { name: "Operators", level: 2 })).toBeVisible();
+    expect(screen.getByText(/This roster contains Operator accounts only/)).toBeVisible();
     expect(await screen.findByText("Sam Operator")).toBeVisible();
+    expect(screen.getByText(/No active sign-ins/)).toBeVisible();
     expect(screen.getByRole("button", { name: "New invitation code" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Change status" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kiosks" })).not.toBeInTheDocument();
+    const keys = screen.getByRole("button", { name: "Security keys (1)" });
+    expect(keys).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Counter key")).not.toBeInTheDocument();
+    await user.click(keys);
+    expect(screen.getByText("Counter key")).toBeVisible();
   });
 
   it("hides the people section entirely from an Operator", async () => {
@@ -515,10 +604,47 @@ describe("admin Phase 2 operational sections", () => {
       capabilities: ["dashboard.read", "audit.read.self", "authenticator.manage.self"]
     });
 
+    const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole("heading", { name: "Overview", level: 1 });
+    // Gone from the rail for everybody now, so the meaningful assertion is that
+    // the tab inside the account area is absent for a role without the grant.
+    await user.click(screen.getByRole("button", { name: /Ada Admin/ }));
+    await screen.findByRole("heading", { name: "Account settings", level: 1 });
     expect(screen.queryByRole("button", { name: "People" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "My profile" })).toBeVisible();
+  });
+
+  it("moves People and Security under the account area and off the rail", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
+
+    // Neither is a rail entry any more. The only "Security"/"People" controls
+    // that exist are the tabs inside the account area, which is not open yet.
+    const rail = screen.getByRole("navigation", { name: "Sections" });
+    expect(within(rail).queryByRole("button", { name: "People" })).not.toBeInTheDocument();
+    expect(within(rail).queryByRole("button", { name: "Security" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Ada Admin/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Account settings", level: 1 })
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "My profile" })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+    expect(screen.getByRole("button", { name: "Security" })).toBeVisible();
+
+    // The expiry the page footer used to repeat under every panel.
+    expect(screen.getByText(/This sign-in expires at/)).toBeVisible();
+    expect(screen.queryByText(/records observations and acknowledgements/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Security" }));
+    expect(await screen.findByRole("heading", { name: "Your security keys" })).toBeVisible();
   });
 
   it("keeps a failed panel recoverable without losing the session", async () => {
@@ -531,8 +657,9 @@ describe("admin Phase 2 operational sections", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Could not reach the control plane."
     );
-    // Still signed in: a panel failing is not a session failing.
-    expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
+    // Still signed in: a panel failing is not a session failing. The rail's
+    // identity button is what proves it now that sign-out has moved inside.
+    expect(screen.getByRole("button", { name: /Ada Admin/ })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByText("Document deletions that gave up")).toBeVisible();

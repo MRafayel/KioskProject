@@ -1,140 +1,432 @@
 import { useCallback, useState } from "react";
 
+import type { AdminPrintJobsResponse } from "@printing-kiosk/admin-access";
+
 import { useSession } from "../features/auth/SessionProvider.js";
 import { observabilityApi } from "../features/observability/api.js";
 import {
   Empty,
-  Identifier,
+  Pagination,
   Panel,
+  RowWhen,
   StateBadge,
   Table,
-  When
+  When,
+  humanizeState
 } from "../features/observability/components.js";
+import {
+  FilterKpi,
+  KpiRow,
+  RowOpen,
+  Sheet,
+  StatusPill
+} from "../features/observability/surfaces.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
+import { usePageTrail } from "../features/observability/usePageTrail.js";
+import { useDetailSheet } from "../features/observability/useDetailSheet.js";
 import {
   RecordedResolution,
   RecoveryCorrectionForm,
   RecoveryResolutionForm
 } from "./RecoveryResolutionForm.js";
 
+type PrintJob = AdminPrintJobsResponse["items"][number];
+
+const STATUSES = [
+  "QUEUED",
+  "DISPATCHED",
+  "PRINTING",
+  "COMPLETED",
+  "FAILED",
+  "RECOVERY_REQUIRED"
+] as const;
+
+/**
+ * The tiles above the table, and what each one filters to.
+ *
+ * Three are print-job statuses the server understands. `UNANSWERED` is not a
+ * status — it is `RECOVERY_REQUIRED` with no recorded recovery resolution —
+ * so the request sends both conditions. That keeps the worklist server-backed
+ * and prevents answered jobs from displacing unresolved ones on a bounded page.
+ */
+type CardId = "UNANSWERED" | "RECOVERY_REQUIRED" | "FAILED" | "COMPLETED";
+
+const STATUS_CARDS = new Set<string>(["RECOVERY_REQUIRED", "FAILED", "COMPLETED"]);
+
+function activeCard(status: string, unansweredOnly: boolean): CardId | null {
+  if (unansweredOnly) return "UNANSWERED";
+  return STATUS_CARDS.has(status) ? (status as CardId) : null;
+}
+
+/** A print that is waiting for a person to say what came out of the tray. */
+function isUnanswered(job: PrintJob): boolean {
+  return job.status === "RECOVERY_REQUIRED" && !job.recoveryResolved;
+}
+
+/**
+ * What is wrong with one print job, decided once and said on the row.
+ *
+ * `UNCONFIRMED` is the one worth naming in words. It means the queue accepted
+ * the job and nothing ever confirmed that paper came out — not a failure, not a
+ * success, and the single state a dashboard is most tempted to round up. The
+ * system refuses to guess and so does this row.
+ */
+function flagsFor(job: PrintJob): string[] {
+  const flags: string[] = [];
+  if (isUnanswered(job)) flags.push("Unresolved recovery");
+  if (job.overdue) flags.push("Overdue");
+  if (job.resultConfidence === "UNCONFIRMED") flags.push("Never confirmed");
+  return flags;
+}
+
+function levelFor(job: PrintJob): "critical" | "warn" | "none" {
+  if (isUnanswered(job) || job.status === "FAILED") return "critical";
+  if (job.status === "RECOVERY_REQUIRED" || job.overdue || job.resultConfidence === "UNCONFIRMED")
+    return "warn";
+  return "none";
+}
+
 /**
  * Print jobs, and what the device actually said.
+ *
+ * Built as Sessions is built, and for the same reason: this is the same kind of
+ * screen — a worklist of records, some of which need a person — so it gets the
+ * same table, the same filter tiles and the same detail sheet rather than a
+ * second dialect of all three.
  *
  * `UNCONFIRMED` is shown as itself and never rounded up to a success. The
  * system refuses to guess whether paper came out, and a dashboard that quietly
  * decided otherwise would undo the one property that makes a paid print
  * trustworthy.
  */
-export function PrintingPanel({ initialStatus }: { initialStatus?: string | undefined } = {}) {
+export function PrintingPanel({
+  initialStatus,
+  initialUnresolved = false
+}: {
+  initialStatus?: string | undefined;
+  initialUnresolved?: boolean | undefined;
+} = {}) {
   const session = useSession();
   // Opening state only. The shell remounts this panel when the reason for
   // arriving changes, so a filter chosen on the overview shows up here without
   // taking the control away from the person once they are looking at it.
-  const [status, setStatus] = useState(initialStatus ?? "");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [status, setStatus] = useState(initialUnresolved ? "" : (initialStatus ?? ""));
+  /** A first-class worklist filter, kept mutually exclusive with `status`. */
+  const [unansweredOnly, setUnansweredOnly] = useState(initialUnresolved);
 
+  const sheet = useDetailSheet();
+  const selected = sheet.selected;
+
+  const pages = usePageTrail();
+  const cursor = pages.cursor;
   const load = useCallback(
-    () => observabilityApi.printJobs({ status: status || undefined }),
-    [status]
+    () =>
+      observabilityApi.printJobs({
+        status: unansweredOnly ? "RECOVERY_REQUIRED" : status || undefined,
+        recoveryResolved: unansweredOnly ? "false" : undefined,
+        cursor
+      }),
+    [status, unansweredOnly, cursor]
   );
   const list = useAdminData(load, { refreshMilliseconds: 15_000 });
+  const nextCursor = list.data?.nextCursor ?? null;
+
+  const items = list.data?.items ?? [];
+  const count = (predicate: (job: PrintJob) => boolean) => items.filter(predicate).length;
+
+  const unanswered = count(isUnanswered);
+  const recovery = count((job) => job.status === "RECOVERY_REQUIRED");
+  const failed = count((job) => job.status === "FAILED");
+  const completed = count((job) => job.status === "COMPLETED");
+  const unconfirmed = count((job) => job.resultConfidence === "UNCONFIRMED");
+
+  const visible = unansweredOnly ? items.filter(isUnanswered) : items;
+  const attention = visible.filter((job) => levelFor(job) === "critical").length;
+
+  const active = activeCard(status, unansweredOnly);
+  const filtered = unansweredOnly || status !== "";
+  const narrowed = unansweredOnly || status !== "";
+
+  const describeFilter = () =>
+    unansweredOnly ? "with unresolved recovery" : humanizeState(status);
+
+  const clearFilter = useCallback(() => {
+    setStatus("");
+    setUnansweredOnly(false);
+    pages.reset();
+  }, [pages]);
+
+  /** One segmented control: choosing a filter replaces whatever was on. */
+  const chooseCard = useCallback((card: CardId) => {
+    if (card === "UNANSWERED") {
+      setStatus("");
+      setUnansweredOnly((current) => !current);
+      pages.reset();
+      return;
+    }
+    setUnansweredOnly(false);
+    setStatus((current) => (current === card ? "" : card));
+    pages.reset();
+  }, []);
 
   return (
     <>
-      <Panel
-        title="Recent print jobs"
-        state={list}
-        hint={list.data?.scoped ? "Showing jobs on the kiosks assigned to you." : undefined}
-        actions={
-          <>
-            <label className="inline-field">
-              Status
-              <select value={status} onChange={(event) => setStatus(event.target.value)}>
-                <option value="">Any</option>
-                {[
-                  "QUEUED",
-                  "DISPATCHED",
-                  "PRINTING",
-                  "COMPLETED",
-                  "FAILED",
-                  "RECOVERY_REQUIRED"
-                ].map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={list.reload} disabled={list.loading}>
-              Refresh
-            </button>
-          </>
-        }
-      >
-        {list.data && list.data.items.length === 0 ? <Empty>No print jobs match.</Empty> : null}
+      <header className="page-head">
+        <div className="page-head__lead">
+          <p
+            className={`page-head__summary page-head__summary--${
+              list.data === null ? "calm" : attention === 0 ? "calm" : "critical"
+            }`}
+          >
+            <span className="page-head__dot" aria-hidden="true" />
+            {list.data === null
+              ? "Loading recent print jobs…"
+              : visible.length === 0
+                ? filtered
+                  ? `No print jobs ${describeFilter().toLowerCase()}`
+                  : "No print jobs recorded yet"
+                : attention === 0
+                  ? "Recent prints are landing normally"
+                  : `${attention} of these ${visible.length} print jobs need review`}
+          </p>
+          <p className="page-head__meta">
+            {visible.length > 0 ? `Showing ${visible.length} most recent` : "Nothing to show"}
+            {filtered ? ` · ${describeFilter()}` : ""}
+            {list.data?.scoped ? " · your assigned kiosks" : ""}
+            {filtered ? (
+              <button type="button" className="button-link page-head__clear" onClick={clearFilter}>
+                Show all
+              </button>
+            ) : null}
+          </p>
+        </div>
 
-        {list.data && list.data.items.length > 0 ? (
-          <Table columns={["Job", "Kiosk", "Status", "Result", "Sheets", "Attempts", "Created"]}>
-            {list.data.items.map((job) => (
-              <tr
-                key={job.id}
-                className={selected === job.id ? "is-selected" : undefined}
-                onClick={() => setSelected(selected === job.id ? null : job.id)}
-              >
-                <td>
-                  <button type="button" className="button-link">
-                    <Identifier value={job.id} />
-                  </button>
-                </td>
-                <td>{job.kioskId}</td>
-                <td>
-                  <StateBadge value={job.status} />
-                  {job.overdue ? <span className="badge badge--bad">overdue</span> : null}
-                  {/* Which of these still needs a person is the question this
-                      screen exists to answer, so it is on the row rather than
-                      one click further in. */}
-                  {job.status === "RECOVERY_REQUIRED" ? (
-                    <span
-                      className={job.recoveryResolved ? "badge badge--good" : "badge badge--bad"}
+        <div className="page-head__actions">
+          {list.loading && list.data ? (
+            <span className="page-head__refreshing" role="status">
+              Refreshing…
+            </span>
+          ) : null}
+          <label className="inline-field">
+            Status
+            <select
+              value={unansweredOnly ? "UNRESOLVED" : status}
+              onChange={(event) => {
+                // The dropdown and the tiles are the same filter reached two
+                // ways, so choosing here turns off whatever a tile had on.
+                const next = event.target.value;
+                setStatus(next === "UNRESOLVED" ? "" : next);
+                setUnansweredOnly(next === "UNRESOLVED");
+                pages.reset();
+              }}
+            >
+              <option value="">Any</option>
+              <option value="UNRESOLVED">Unresolved recovery</option>
+              {STATUSES.map((value) => (
+                <option key={value} value={value}>
+                  {humanizeState(value)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="button-primary"
+            onClick={list.reload}
+            disabled={list.loading}
+          >
+            Refresh
+          </button>
+        </div>
+      </header>
+
+      {items.length > 0 ? (
+        <KpiRow>
+          <FilterKpi
+            noun="print jobs"
+            card="UNANSWERED"
+            label="Unresolved recovery"
+            value={unanswered}
+            resting={
+              unanswered === 0
+                ? "Every recovery has an observation"
+                : "No observation has been recorded yet"
+            }
+            tone={unanswered > 0 ? "critical" : undefined}
+            elevated={unanswered > 0 && active === null}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
+          />
+          <FilterKpi
+            noun="print jobs"
+            card="RECOVERY_REQUIRED"
+            label="Recovery-state jobs"
+            value={recovery}
+            resting={recovery === 0 ? "None on this page" : "Resolved and unresolved together"}
+            tone={recovery > 0 ? "warn" : undefined}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
+          />
+          <FilterKpi
+            noun="print jobs"
+            card="FAILED"
+            label="Failed print jobs"
+            value={failed}
+            resting={failed === 0 ? "None on this page" : "The print did not land"}
+            tone={failed > 0 ? "critical" : undefined}
+            elevated={unanswered === 0 && failed > 0 && active === null}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
+          />
+          <FilterKpi
+            noun="print jobs"
+            card="COMPLETED"
+            label="Completed print jobs"
+            value={completed}
+            resting={`${unconfirmed} never confirmed`}
+            active={active}
+            narrowed={narrowed}
+            onChoose={chooseCard}
+          />
+        </KpiRow>
+      ) : null}
+
+      <Panel title="Recent print jobs" state={list} emptyMessage="No print jobs to show.">
+        {list.data && visible.length === 0 ? (
+          <Empty>
+            {filtered ? (
+              <>
+                {unansweredOnly
+                  ? "Every recovery-state job on this page has an observation."
+                  : `No print jobs are ${humanizeState(status).toLowerCase()}.`}{" "}
+                <button type="button" className="button-link" onClick={clearFilter}>
+                  Clear the filter
+                </button>
+              </>
+            ) : (
+              "No print jobs have been recorded yet."
+            )}
+          </Empty>
+        ) : null}
+
+        {visible.length > 0 ? (
+          <Table
+            className="data-table data-table--interactive"
+            pane
+            paneClassName="data-pane"
+            columns={["Created", "Kiosk", "Status", "Result", "Sheets", "Attempts"]}
+          >
+            {visible.map((job) => {
+              const level = levelFor(job);
+              const flags = flagsFor(job);
+              const classes = [
+                selected === job.id ? "is-selected" : "",
+                level === "critical" ? "is-alarming-row" : "",
+                level === "warn" ? "is-quiet-row" : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
+
+              return (
+                <tr
+                  key={job.id}
+                  className={classes || undefined}
+                  onClick={(event) =>
+                    sheet.open(
+                      job.id,
+                      event.currentTarget.querySelector<HTMLButtonElement>(".row-open")
+                    )
+                  }
+                >
+                  <td data-label="Created">
+                    <RowOpen
+                      open={selected === job.id}
+                      onOpen={(opener) => sheet.open(job.id, opener)}
+                      label={`Print job on ${job.kioskId}, ${humanizeState(
+                        job.status
+                      )}, created ${new Date(job.createdAt).toLocaleString()}`}
                     >
-                      {job.recoveryResolved ? "answered" : "needs a person"}
+                      <RowWhen value={job.createdAt} />
+                    </RowOpen>
+                  </td>
+                  <td data-label="Kiosk">{job.kioskId}</td>
+                  <td data-label="Status">
+                    <StateBadge
+                      value={job.status}
+                      humanize
+                      quiet={job.status === "COMPLETED" || job.status === "PRINTING"}
+                    />
+                    {flags.length > 0 ? (
+                      <span className="row-flags">
+                        {flags.map((flag) => (
+                          <StatusPill key={flag} tone={flag === "Overdue" ? "warn" : "critical"}>
+                            {flag}
+                          </StatusPill>
+                        ))}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td data-label="Result">
+                    <StateBadge
+                      value={job.resultConfidence}
+                      humanize
+                      quiet={job.resultConfidence === "CONFIRMED"}
+                    />
+                    {job.failureCode ? (
+                      <span className="key-list__meta">{job.failureCode}</span>
+                    ) : null}
+                  </td>
+                  <td data-label="Sheets">
+                    {job.sheetsProduced ?? "—"} / {job.physicalSheets}
+                  </td>
+                  <td data-label="Attempts">
+                    {job.dispatchAttempts}
+                    <span className="row-chevron" aria-hidden="true">
+                      {" ›"}
                     </span>
-                  ) : null}
-                </td>
-                <td>
-                  <StateBadge value={job.resultConfidence} />
-                  {job.failureCode ? (
-                    <span className="key-list__meta">{job.failureCode}</span>
-                  ) : null}
-                </td>
-                <td>
-                  {job.sheetsProduced ?? "—"} / {job.physicalSheets}
-                </td>
-                <td>{job.dispatchAttempts}</td>
-                <td>
-                  <When value={job.createdAt} />
-                </td>
-              </tr>
-            ))}
+                  </td>
+                </tr>
+              );
+            })}
           </Table>
         ) : null}
+
+        <Pagination
+          label="Print job pages"
+          page={pages.page}
+          pageCount={pages.pageCount}
+          hasNext={pages.hasNext(nextCursor)}
+          onGo={(target) => pages.go(target, nextCursor)}
+        />
       </Panel>
 
       {selected ? (
-        <PrintJobDetail
+        <PrintJobSheet
           printJobId={selected}
           canSeeDiagnostics={session.can("print.diagnostics.read")}
           canResolveRecovery={session.can("print.recovery.resolve")}
           canCorrectRecovery={session.can("print.recovery.correct")}
           onResolved={list.reload}
-          onClose={() => setSelected(null)}
+          onClose={sheet.close}
         />
       ) : null}
     </>
   );
 }
 
-function PrintJobDetail({
+/**
+ * One print job, opened over the table.
+ *
+ * This one holds a form as well as a record: recording what an operator saw at
+ * the tray is the only write on this screen, and it now happens in the sheet
+ * rather than a screenful below the row that prompted it. Recording it reloads
+ * the list behind, so the row's "needs a person" flag clears while the sheet is
+ * still open and the operator can see that their answer landed.
+ */
+function PrintJobSheet({
   printJobId,
   canSeeDiagnostics,
   canResolveRecovery,
@@ -151,53 +443,106 @@ function PrintJobDetail({
 }) {
   const load = useCallback(() => observabilityApi.printJob(printJobId), [printJobId]);
   const detail = useAdminData(load);
+  const job = detail.data?.job ?? null;
 
   return (
-    <Panel
+    <Sheet
       title="Print job detail"
-      state={detail}
-      actions={
-        <button type="button" onClick={onClose}>
-          Close
-        </button>
+      onClose={onClose}
+      subtitle={
+        job ? (
+          <>
+            <StateBadge value={job.status} humanize />
+            <span>{job.kioskId}</span>
+            <span aria-hidden="true">·</span>
+            <When value={job.createdAt} />
+          </>
+        ) : (
+          <span>Loading…</span>
+        )
       }
     >
-      {detail.data ? (
+      {detail.error ? (
+        <div className="panel__error" role="alert">
+          <span className="panel__error-text">{detail.error}</span>
+          <button type="button" onClick={detail.reload}>
+            Try again
+          </button>
+        </div>
+      ) : null}
+
+      {detail.loading && !detail.data ? (
+        <p className="panel__status" role="status">
+          Loading…
+        </p>
+      ) : null}
+
+      {detail.data && job ? (
         <>
+          {flagsFor(job).length > 0 ? (
+            <div className="sheet__flags">
+              {flagsFor(job).map((flag) => (
+                <StatusPill key={flag} tone={flag === "Overdue" ? "warn" : "critical"}>
+                  {flag}
+                </StatusPill>
+              ))}
+            </div>
+          ) : null}
+
+          {/* The identifiers, which used to be a truncated leading column. An
+              operator quoting one into a ticket needs the whole string. */}
+          <dl className="sheet__ids">
+            <div className="sheet__id">
+              <dt>Print job ID</dt>
+              <dd>{job.id}</dd>
+            </div>
+            <div className="sheet__id">
+              <dt>Print session ID</dt>
+              <dd>{job.sessionId}</dd>
+            </div>
+          </dl>
+
+          <h3>What happened</h3>
           <dl className="detail-grid">
             <div>
-              <dt>Session</dt>
+              <dt>Result</dt>
               <dd>
-                <code>{detail.data.job.sessionId}</code>
+                <StateBadge value={job.resultConfidence} humanize />
+              </dd>
+            </div>
+            <div>
+              <dt>Sheets</dt>
+              <dd>
+                {job.sheetsProduced ?? "—"} of {job.physicalSheets} paid for
               </dd>
             </div>
             <div>
               <dt>Dispatched</dt>
               <dd>
-                <When value={detail.data.job.dispatchedAt} />
+                <When value={job.dispatchedAt} />
               </dd>
             </div>
             <div>
               <dt>Started</dt>
               <dd>
-                <When value={detail.data.job.startedAt} />
+                <When value={job.startedAt} />
               </dd>
             </div>
             <div>
               <dt>Settled</dt>
               <dd>
-                <When value={detail.data.job.completedAt ?? detail.data.job.failedAt} />
+                <When value={job.completedAt ?? job.failedAt} />
               </dd>
             </div>
             <div>
               <dt>Manifest redacted</dt>
               <dd>
-                <When value={detail.data.job.manifestRedactedAt} />
+                <When value={job.manifestRedactedAt} />
               </dd>
             </div>
           </dl>
 
-          {detail.data.job.status === "RECOVERY_REQUIRED" || detail.data.resolution ? (
+          {job.status === "RECOVERY_REQUIRED" || detail.data.resolution ? (
             <>
               <h3>Recovery</h3>
               {detail.data.resolution ? (
@@ -223,8 +568,8 @@ function PrintJobDetail({
               ) : canResolveRecovery ? (
                 <RecoveryResolutionForm
                   printJobId={printJobId}
-                  deviceSheets={detail.data.job.sheetsProduced}
-                  paidSheets={detail.data.job.physicalSheets}
+                  deviceSheets={job.sheetsProduced}
+                  paidSheets={job.physicalSheets}
                   onRecorded={() => {
                     detail.reload();
                     onResolved();
@@ -288,6 +633,6 @@ function PrintJobDetail({
           )}
         </>
       ) : null}
-    </Panel>
+    </Sheet>
   );
 }

@@ -114,14 +114,23 @@
 }
 
 /* Motion is decorative everywhere in this panel — a hover tint, a revealed
-   affordance. None of it communicates state, so all of it can go. */
+   affordance, a sheet arriving from the edge it lives on. None of it
+   communicates state, so all of it can go and nothing is lost.
+
+   `animation-delay` is zeroed alongside the durations, and that is not
+   incidental. The staggered entrances below use `animation-fill-mode: backwards`
+   to hold a tile invisible until its turn, so a delay left standing while the
+   duration collapses to nothing would leave real content hidden for a tenth of
+   a second at a time — an accessibility preference turned into a flicker. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
 }
@@ -427,15 +436,19 @@ code {
   background: rgb(0 0 0 / 45%);
 }
 
+/* `--surface-card` was never defined, so this resolved to nothing and the
+   step-up prompt rendered as unbacked text floating on the scrim. */
 .modal {
   display: grid;
   gap: 0.6rem;
   width: min(24rem, 100%);
   padding: 1.25rem;
-  background: var(--surface-card);
+  background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
+  box-shadow: var(--shadow-lift);
   text-align: left;
+  animation: sheet-rise 200ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .modal h2 {
@@ -527,19 +540,6 @@ code {
   color: var(--rail-ink-soft);
 }
 
-.shell__signout {
-  width: 100%;
-  border-color: var(--rail-line);
-  background: transparent;
-  color: var(--rail-ink-soft);
-}
-
-.shell__signout:hover:not(:disabled) {
-  border-color: var(--rail-ink-soft);
-  background: var(--rail-lift);
-  color: var(--rail-ink);
-}
-
 /* Square-ish rather than a pill: the active tab carries a marker bar down its
    left edge, and a pill radius cuts the bar into a crescent. */
 .nav-tab {
@@ -591,8 +591,13 @@ code {
   gap: 1rem;
   min-width: 0;
   /* The rail is flush to the window, so the breathing room the shell used to
-     provide now belongs to the content beside it. */
-  padding: 1.5rem 1.75rem 1rem;
+     provide now belongs to the content beside it.
+
+     The bottom padding used to sit under a footer strip carrying the sign-in
+     expiry on every screen. Both are gone — the expiry lives in the account
+     area now — and the space they held goes to the tables above, which is the
+     only thing on these pages that can use it. */
+  padding: 1.5rem 1.75rem 1.5rem;
   max-width: 88rem;
 }
 
@@ -640,12 +645,6 @@ code {
   color: var(--critical);
 }
 
-.shell__footer {
-  padding: 0 0.25rem 0.5rem;
-  color: var(--ink-dim);
-  font-size: 0.8rem;
-}
-
 /* ---------------------------------------------------------------------------
    Panels
    ------------------------------------------------------------------------- */
@@ -666,12 +665,26 @@ code {
   letter-spacing: -0.01em;
 }
 
-.panel__heading {
+/* `__header` is the same thing under an older name, used by Changes, People and
+   the refund queue. It had no rule at all, so on those three panels the title
+   and its button stacked into two lines where every other panel puts them on
+   one. Aliasing is the honest fix: they are the same element doing the same
+   job, and renaming the markup in three files to make a stylesheet tidier would
+   be churn for its own sake. */
+.panel__heading,
+.panel__header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
+}
+
+.panel__header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .panel h3 {
@@ -1177,6 +1190,28 @@ code {
   font-weight: 500;
 }
 
+/* The same-looking tiles have three deliberately different jobs. Keep the cue
+   short and quiet, but visible without hover so a touch or keyboard user knows
+   whether this tile filters, opens another page, or is only information. */
+.kpi__behavior {
+  margin: 0.45rem 0 0;
+  padding-top: 0.4rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink-dim);
+}
+
+.kpi__behavior--action,
+.kpi__behavior--active {
+  color: var(--accent-strong);
+}
+
+.kpi__behavior--active::before {
+  content: "✓ ";
+}
+
 /* The way back to everything, stated on the line that says what is being shown.
    Deliberately not a fifth tile: "All" is not a number, and drawing it as one
    would put a count beside it that nothing counted. */
@@ -1197,6 +1232,35 @@ code {
   display: grid;
   gap: 0.75rem;
   grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+}
+
+/* The triage list and snapshot stay visible. Domain-by-domain counts are useful
+   follow-up information, so a native disclosure keeps them close without
+   making every routine visit scan the same facts twice. */
+.overview-disclosure {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.overview-disclosure__summary {
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.overview-disclosure__summary:hover {
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+.overview-disclosure[open] .overview-disclosure__summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.overview-disclosure .module-grid {
+  padding: 0.85rem;
 }
 
 .module {
@@ -1560,30 +1624,43 @@ code {
 }
 
 /* ---------------------------------------------------------------------------
-   Sessions
+   Operational tables
    ---------------------------------------------------------------------------
-   The table stays the investigation surface. What is added is hierarchy: a row
-   needing a person marks itself and names the reason, and the states that are
-   simply normal step back so they stop competing for the same attention.
+   Sessions, Printing, Retention, Errors, Audit and Kiosks are the same kind of
+   screen — a worklist of records, some of which need a person — so they are one
+   set of rules rather than six. A row needing somebody marks itself and names
+   the reason, the states that are simply normal step back, and below the
+   breakpoint every one of them becomes a stack of cards instead of a sideways
+   scroll nobody performs.
+
+   `--interactive` is the half that only applies where a row opens something.
+   A table nobody can click should not spend a pointer cursor advertising that
+   it can.
    ------------------------------------------------------------------------- */
 
-.sessions-table {
+.data-table {
   font-size: 0.9rem;
 }
 
-/* The Sessions page is primarily an investigation table. With its former hint
-   removed, let the pane use that vertical space (and a little more of taller
-   displays) so more sessions remain visible at once. */
-.sessions-pane {
-  max-height: clamp(24rem, 64vh, 50rem);
+/**
+ * Tall enough to be worth scrolling inside on a laptop, never so tall on a
+ * large display that the sticky header leaves the screen before the pane does.
+ *
+ * The viewport fraction went up when the footer strip came off. That row was
+ * roughly 2.5rem of chrome under every table, holding a time that mattered
+ * twice a day; handing it back to the rows means three or four more sessions
+ * visible before anybody scrolls, which is what the space is worth here.
+ */
+.data-pane {
+  max-height: clamp(26rem, 70vh, 56rem);
 }
 
-.sessions-table tbody tr {
+.data-table--interactive tbody tr {
   cursor: pointer;
   transition: background 110ms ease;
 }
 
-.sessions-table td {
+.data-table td {
   padding-top: 0.5rem;
   padding-bottom: 0.5rem;
 }
@@ -1602,7 +1679,7 @@ code {
  * is drawn as the cell's own text rather than as a link. Two affordances, one
  * target — nobody has to aim at a word any more.
  */
-.session-open {
+.row-open {
   display: block;
   width: 100%;
   min-height: 0;
@@ -1616,14 +1693,14 @@ code {
   cursor: pointer;
 }
 
-.session-open:hover:not(:disabled) {
+.row-open:hover:not(:disabled) {
   border: none;
   background: transparent;
 }
 
 /* The focus ring belongs around the whole cell rather than around two lines of
    text, so keyboard focus and pointer hover point at the same thing. */
-.session-open:focus-visible {
+.row-open:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 3px;
 }
@@ -1631,13 +1708,13 @@ code {
 /* Time first, date under it. The clock is what distinguishes rows from the same
    afternoon, which is nearly all of them, so it takes the readable weight and
    the date drops to metadata. The full ISO value stays on `title`. */
-.session-when {
+.row-when {
   display: block;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
 }
 
-.session-when__date {
+.row-when__date {
   display: block;
   margin-top: 0.05rem;
   font-size: 0.76rem;
@@ -1649,28 +1726,28 @@ code {
    It sits under the state badge rather than beside it: stacked, a two-word
    verdict costs no column width, and "Recovery required / charged, not printed"
    reads as one finding about one session instead of two separate cells. */
-.session-flags {
+.row-flags {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
   margin-top: 0.2rem;
 }
 
-.session-flags .status-pill {
+.row-flags .status-pill {
   font-size: 0.68rem;
 }
 
 /* A hint of where the row goes, revealed on hover or focus and never taking
    layout when it is hidden. */
-.sessions-table .session-chevron {
+.data-table .row-chevron {
   color: var(--ink-dim);
   opacity: 0;
   transition: opacity 110ms ease;
 }
 
-.sessions-table tbody tr:hover .session-chevron,
-.sessions-table tbody tr.is-selected .session-chevron,
-.session-open:focus-visible .session-chevron {
+.data-table tbody tr:hover .row-chevron,
+.data-table tbody tr.is-selected .row-chevron,
+.row-open:focus-visible .row-chevron {
   opacity: 1;
 }
 
@@ -1683,22 +1760,22 @@ code {
   /* The pane's own scroll goes with the header it existed to hold up. Nesting a
      scrolling box inside a scrolling page is unpleasant on a touch screen, and
      there is no longer a sticky header down here to justify it. */
-  .sessions-pane {
+  .data-pane {
     max-height: none;
     overflow: visible;
     border: none;
     background: transparent;
   }
 
-  .sessions-table,
-  .sessions-table thead,
-  .sessions-table tbody,
-  .sessions-table tr,
-  .sessions-table td {
+  .data-table,
+  .data-table thead,
+  .data-table tbody,
+  .data-table tr,
+  .data-table td {
     display: block;
   }
 
-  .sessions-table thead {
+  .data-table thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1707,7 +1784,7 @@ code {
     white-space: nowrap;
   }
 
-  .sessions-table tbody tr {
+  .data-table tbody tr {
     margin-bottom: 0.7rem;
     padding: 0.35rem 0.15rem;
     border: 1px solid var(--line);
@@ -1715,24 +1792,24 @@ code {
     background: var(--card);
   }
 
-  .sessions-table tbody tr.is-alarming-row {
+  .data-table tbody tr.is-alarming-row {
     border-color: color-mix(in srgb, var(--critical) 45%, transparent);
     background: var(--critical-soft);
   }
 
-  .sessions-table tbody tr.is-selected {
+  .data-table tbody tr.is-selected {
     border-color: var(--accent);
     background: var(--accent-soft);
   }
 
   /* The inset bar was drawn on the first cell of a table row and there is no
      longer a row for it to sit on. */
-  .sessions-table tbody tr.is-alarming-row td:first-child,
-  .sessions-table tbody tr.is-quiet-row td:first-child {
+  .data-table tbody tr.is-alarming-row td:first-child,
+  .data-table tbody tr.is-quiet-row td:first-child {
     box-shadow: none;
   }
 
-  .sessions-table td {
+  .data-table td {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
@@ -1743,7 +1820,7 @@ code {
     text-align: right;
   }
 
-  .sessions-table td::before {
+  .data-table td::before {
     content: attr(data-label);
     flex: none;
     font-size: 0.72rem;
@@ -1754,22 +1831,22 @@ code {
     text-align: left;
   }
 
-  .session-flags {
+  .row-flags {
     justify-content: flex-end;
   }
 
   /* The leading cell is a button filling a card-width row now, and a card row
      has space for the whole timestamp on one line. */
-  .sessions-table .session-open {
+  .data-table .row-open {
     text-align: right;
   }
 
-  .session-when__date {
+  .row-when__date {
     display: inline;
     margin: 0 0 0 0.4rem;
   }
 
-  .sessions-table .session-chevron {
+  .data-table .row-chevron {
     display: none;
   }
 }
@@ -2287,11 +2364,6 @@ code {
     margin-bottom: 0;
   }
 
-  .shell__signout {
-    width: auto;
-    margin-left: auto;
-  }
-
   /* The active marker sits on the leading edge of a tab in a column. In a
      wrapped row the tabs are short and the bar crowds the label, so the active
      state falls back to the lifted surface and the heavier text — both of which
@@ -2613,6 +2685,43 @@ code {
   display: grid;
   gap: 0.75rem;
   margin: 1rem 0 0;
+  justify-items: start;
+}
+
+.change-form > label,
+.change-form__reason {
+  display: grid;
+  gap: 0.3rem;
+  width: 100%;
+  max-width: 22rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+/* The five integers are read together and compared against the tariff in force,
+   so they sit side by side rather than as five stacked lines somebody has to
+   scroll between to see the shape of the change. */
+.change-form__numbers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.change-form__numbers label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.change-form__numbers input {
+  font-variant-numeric: tabular-nums;
+}
+
+.change-form__reason {
+  max-width: 34rem;
+  margin-top: 1rem;
 }
 
 @media (max-width: 60rem) {
@@ -2647,4 +2756,949 @@ code {
   .acknowledge input {
     min-width: 0;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Motion
+   ---------------------------------------------------------------------------
+   One place for every animation in the panel, so the vocabulary stays small
+   enough to be consistent: things arrive by fading up a few pixels, things
+   revealed in place fade down out of nothing, and nothing else moves.
+
+   Three rules hold throughout.
+
+   **Only `opacity` and `transform` are animated.** Both are handled by the
+   compositor, so a table of fifty rows entering costs no layout and no paint —
+   which is the entire reason a dashboard can afford entrance animation at all.
+   Animating height, width or margin here would be the same effect at a hundred
+   times the cost, on hardware that is also driving a kiosk.
+
+   **Nothing animates that carries meaning.** A state badge changing colour, a
+   count changing value and an error appearing are all instant. Motion is for
+   "this is new" and "this is the same thing moved", never for "this is
+   important" — an operator should never have to wait out a transition to learn
+   that a print failed.
+
+   **Everything here is decorative by construction**, which is what makes the
+   reduced-motion block at the top of this file a complete answer rather than a
+   partial one: delete every rule below and the panel says exactly the same
+   things in exactly the same places.
+   ------------------------------------------------------------------------- */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The shared entrance: up a little, in from nothing. Six pixels is deliberately
+   small — enough that the eye registers arrival, not enough to read as a slide. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes sheet-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+}
+
+/* Revealed in place — an inline form opening inside a cell. It comes *down*
+   rather than up, because it belongs to the control above it and moving away
+   from that control is what makes the relationship legible. */
+@keyframes reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* A panel arriving. The section is keyed by destination in the shell, so this
+   runs once per navigation rather than on every poll. */
+.panel,
+.page-head {
+  animation: rise-in 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/**
+ * The summary tiles, entering in sequence.
+ *
+ * `backwards` fill is what holds each tile invisible through its delay; without
+ * it the row would flash complete and then animate, which is worse than not
+ * animating. The reduced-motion block zeroes these delays for exactly that
+ * reason.
+ *
+ * Four tiles at 40ms apart is 120ms of stagger in total — under the threshold
+ * where a person starts waiting for the last one to arrive.
+ */
+.kpi {
+  animation: rise-in 260ms cubic-bezier(0.32, 0.72, 0, 1) backwards;
+}
+
+.kpi-row > :nth-child(2) {
+  animation-delay: 40ms;
+}
+
+.kpi-row > :nth-child(3) {
+  animation-delay: 80ms;
+}
+
+.kpi-row > :nth-child(4) {
+  animation-delay: 120ms;
+}
+
+/* The pressed ring and the elevated tint both arrive rather than snapping, so
+   choosing a filter feels like pressing something. Transform is listed because
+   the hover lift below uses it. */
+.kpi {
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    background 140ms ease,
+    transform 140ms ease;
+}
+
+.kpi.is-navigable:hover {
+  transform: translateY(-1px);
+}
+
+.kpi.is-navigable:active {
+  transform: translateY(0);
+  transition-duration: 60ms;
+}
+
+/**
+ * Rows entering.
+ *
+ * React reconciles these by key, so a poll that returns the same records
+ * re-renders without recreating the elements and nothing animates — the
+ * animation only runs for rows that are genuinely new, which is exactly when a
+ * filter changes or a page turns. That is the property that makes this free:
+ * the common case is no animation at all.
+ */
+.data-table tbody tr {
+  animation: fade-in 200ms ease;
+}
+
+/* An inline form opening inside a row or a card. */
+.reveal {
+  animation: reveal-in 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Empty states, error banners and the "nothing to show" line. These replace
+   content rather than arriving beside it, so they fade without moving — a
+   message that slides into the space its predecessor just left reads as the
+   same element changing its mind. */
+.panel__status,
+.panel__error {
+  animation: fade-in 200ms ease;
+}
+
+/**
+ * The refresh indicator.
+ *
+ * A slow pulse rather than a spinner. It says "still working" without claiming
+ * to know how far along anything is, and it is the one animation in the panel
+ * that repeats — which is why it is this quiet: something blinking in the
+ * corner of an operations screen for twenty seconds at a time has to be
+ * ignorable.
+ */
+@keyframes breathe {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.page-head__refreshing {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+/* Badges and pills settle rather than snap when a state changes under a poll. */
+.badge,
+.status-pill {
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+/* The row marker and the selected tint. Both are pointer feedback on a surface
+   the pointer is already over, so they are the fastest things here. */
+.table tbody tr {
+  transition: background 110ms ease;
+}
+
+.button-link,
+.button-quiet {
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+/* ---------------------------------------------------------------------------
+   Card lists
+   ---------------------------------------------------------------------------
+   People, Security and the refund queue are lists of records like every other
+   panel, but each record carries controls and a form, so they are cards rather
+   than rows. They should still feel like the same application: the same
+   entrance, the same hover, the same border and radius as a table row that has
+   grown big enough to need its own box.
+   ------------------------------------------------------------------------- */
+
+.people__item,
+.refund-queue__item,
+.key-list__item {
+  animation: rise-in 220ms cubic-bezier(0.32, 0.72, 0, 1) backwards;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+/* A short stagger over the first few, then nothing — a list of thirty people
+   should not take a second and a half to finish arriving. */
+.people > :nth-child(2),
+.refund-queue > :nth-child(2),
+.key-list > :nth-child(2) {
+  animation-delay: 40ms;
+}
+
+.people > :nth-child(3),
+.refund-queue > :nth-child(3),
+.key-list > :nth-child(3) {
+  animation-delay: 80ms;
+}
+
+.people > :nth-child(n + 4),
+.refund-queue > :nth-child(n + 4),
+.key-list > :nth-child(n + 4) {
+  animation-delay: 110ms;
+}
+
+/* The forms inside these cards open in place, so they take the same reveal as
+   the ones inside a table cell. */
+.people__item .inline-form,
+.key-list__item .inline-form,
+.resolve {
+  animation: reveal-in 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---------------------------------------------------------------------------
+   Pagination
+   ---------------------------------------------------------------------------
+   Numbered pages, centred in their own row under the table.
+
+   The numbers are square-ish rather than pills. A pill the width of one digit
+   is a circle, and a row of circles beside two arrows reads as a media player;
+   the control radius keeps them reading as a set of small pages.
+   ------------------------------------------------------------------------- */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+  /* The row has a height of its own so the control is centred vertically in it
+     as well as horizontally, and so a table that gains or loses its pagination
+     does not change height under the reader. */
+  min-height: 3rem;
+}
+
+.pagination__pages {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pagination__page,
+.pagination__arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 2.25rem square clears the 24px minimum target size with room to spare, and
+     stays a comfortable pointer target on a kiosk-side touchscreen. */
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  padding: 0 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pagination__page:hover:not(:disabled),
+.pagination__arrow:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--card-lift);
+  color: var(--ink);
+}
+
+/* The page you are on. Marked three ways — a filled surface, the accent border
+   and heavier text — because on a row of near-identical digits a single tint is
+   the easiest thing in this interface to lose. `aria-current` says the same. */
+.pagination__page.is-current {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.pagination__arrow {
+  font-size: 1rem;
+  color: var(--ink-soft);
+}
+
+.pagination__arrow:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Stands for the pages between two numbers. Not a target, so it takes no
+   hover, no border and none of the width a button would claim. */
+.pagination__gap {
+  min-width: 1.25rem;
+  text-align: center;
+  color: var(--ink-dim);
+  user-select: none;
+}
+
+@media (max-width: 30rem) {
+  /* On a narrow screen the arrows and the current page are what get used, so
+     the window closes to the current number and its immediate neighbours
+     rather than wrapping onto a second line. */
+  .pagination__pages {
+    gap: 0.15rem;
+  }
+
+  .pagination__page,
+  .pagination__arrow {
+    min-width: 2rem;
+    padding: 0 0.35rem;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The rail's identity block
+   ---------------------------------------------------------------------------
+   Your own name is now the door to everything about your account, so it has to
+   read as pressable. It takes the same treatment as a nav tab — the same
+   radius, the same lift on hover, the same accent bar when it is the current
+   section — because that is exactly what it has become.
+   ------------------------------------------------------------------------- */
+
+.shell__identity {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--rail-ink);
+  text-align: left;
+}
+
+.shell__identity:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--rail-lift);
+}
+
+.shell__identity.is-active {
+  background: var(--rail-lift);
+  border-color: var(--rail-line);
+  padding-left: 1.05rem;
+}
+
+.shell__identity.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0.35rem;
+  top: 0.55rem;
+  bottom: 0.55rem;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+/* Initials rather than a photograph. There is no avatar upload in this system
+   and there should not be — a photo is a storage surface, a moderation problem
+   and a piece of personal data, bought for decoration on a five-person tool. */
+.shell__avatar,
+.account__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent-deep);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.shell__identity-text {
+  display: grid;
+  min-width: 0;
+}
+
+.shell__identity .shell__account-name,
+.shell__identity .shell__account-role {
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell__identity .shell__account-name {
+  font-size: 0.9rem;
+}
+
+.shell__identity-chevron {
+  margin-left: auto;
+  color: var(--rail-ink-soft);
+  transition: transform 140ms ease;
+}
+
+.shell__identity:hover .shell__identity-chevron {
+  transform: translateX(2px);
+}
+
+/* ---------------------------------------------------------------------------
+   The account area
+   ---------------------------------------------------------------------------
+   Profile, People and Security, side by side under one heading. The sub-nav is
+   a column on wide screens and a row of chips on narrow ones — the same list
+   either way, laid out to suit the space rather than reflowing into a stack of
+   full-width bars nobody wants to scroll past to reach the content.
+   ------------------------------------------------------------------------- */
+
+.account {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.account__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  position: sticky;
+  top: 1.5rem;
+}
+
+.account__tab {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-soft);
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.account__tab:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--card-lift);
+  color: var(--ink);
+}
+
+.account__tab.is-active {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.account__body {
+  display: grid;
+  align-content: start;
+  gap: 1.15rem;
+  min-width: 0;
+}
+
+/* The identity header inside the profile panel: a larger avatar, the name, and
+   the role. No edit control, because nothing here is editable from a browser. */
+.account__identity {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.account__avatar {
+  width: 2.75rem;
+  height: 2.75rem;
+  font-size: 0.95rem;
+}
+
+.account__name {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.account__role {
+  margin: 0.1rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 52rem) {
+  .account {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+
+  /* A row of chips across the top, scrolling sideways if it has to. Three
+     labels never will, but the rule costs nothing and means a fourth tab does
+     not break the layout. */
+  .account__nav {
+    position: static;
+    flex-direction: row;
+    gap: 0.35rem;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+
+  .account__tab {
+    flex: none;
+    border-radius: var(--radius-pill);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Segmented control
+   ---------------------------------------------------------------------------
+   Money holds three things that must not be merged — a decision queue, a
+   payment ledger, and the refunds still owed — and only one of them is ever
+   what somebody came for. Tabs would imply they are facets of one record;
+   stacking them put the payment history underneath a form somebody was typing
+   an amount into. A segmented control says what it is: three views, one open.
+
+   The count beside a segment is the reason to press it. It appears only when
+   there is something there, so a quiet day shows three plain words.
+   ------------------------------------------------------------------------- */
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--card-soft);
+  /* Narrow screens scroll it sideways rather than wrapping three segments onto
+     two lines, which would break the one-control-one-row reading. */
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.segmented__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: none;
+  min-height: 2.1rem;
+  padding: 0.35rem 0.9rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+.segmented__option:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--card-lift);
+  color: var(--ink);
+}
+
+/* The open view. A raised card rather than an accent fill: the accent is spent
+   on "somebody has to do something" everywhere else in this panel, and which
+   of three views you are reading is not that. */
+.segmented__option.is-active {
+  background: var(--card);
+  border-color: var(--line-strong);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow-card);
+}
+
+.segmented__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.35rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent-deep);
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Money
+   ------------------------------------------------------------------------- */
+
+/* The decision rows carry a form, so they get a little more room than a table
+   row and their two columns hold their proportions until there is genuinely no
+   space left. */
+.refund-queue__item .row-flags {
+  display: inline-flex;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+/* ---------------------------------------------------------------------------
+   The insight band
+   ---------------------------------------------------------------------------
+   One wide card carrying the reading, one narrow card carrying the breakdown
+   that explains it. Not two equal columns: they are not equal, and a fifty-fifty
+   split would say they were. The wide one leads with a single large number and
+   shows its working underneath; the narrow one is the follow-up question.
+
+   Below the breakpoint they stack in that order, so the reading still comes
+   first on a phone.
+   ------------------------------------------------------------------------- */
+
+.insight-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  align-items: start;
+}
+
+@media (max-width: 62rem) {
+  .insight-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The insight cards arrive with the same six-pixel rise as everything else, a
+   beat behind the tiles above them so the page resolves top to bottom. */
+.insight-grid > .module {
+  animation: rise-in 260ms cubic-bezier(0.32, 0.72, 0, 1) backwards;
+  animation-delay: 60ms;
+}
+
+.insight-grid > .module:nth-child(2) {
+  animation-delay: 100ms;
+}
+
+/* ---------------------------------------------------------------------------
+   The headline reading
+   ---------------------------------------------------------------------------
+   The one number a card exists to say. Larger than a KPI tile's, because this
+   one is alone on a card rather than one of four across the top, and because
+   everything under it is the working behind it.
+   ------------------------------------------------------------------------- */
+
+.headline {
+  display: grid;
+  gap: 0.1rem;
+  margin: 0.1rem 0 0.35rem;
+}
+
+.headline__label {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.headline__value {
+  margin: 0;
+  font-size: 3rem;
+  font-weight: 300;
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.headline__value--critical {
+  color: var(--critical);
+}
+
+.headline__value--warn {
+  color: var(--warn);
+}
+
+.headline__note {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 40rem) {
+  .headline__value {
+    font-size: 2.4rem;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Distribution
+   ---------------------------------------------------------------------------
+   A list read downwards, each row to scale. The bar is the accelerant; the
+   count and the share beside it are the content, which is why the bar carries
+   no text of its own and is hidden from assistive technology.
+
+   The fill is tinted by the same tone vocabulary as everything else on this
+   screen — green captured, amber waiting, red failed — so a row's colour never
+   means something here that it does not mean two panels away. Neutral is ink
+   rather than accent: orange is spent on "somebody has to do something", and
+   most of what this draws is only information.
+   ------------------------------------------------------------------------- */
+
+.distribution__rows {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.distribution__inner {
+  display: grid;
+  gap: 0.3rem;
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  text-align: left;
+  background: transparent;
+  color: inherit;
+}
+
+.distribution__open {
+  min-height: 0;
+  font: inherit;
+}
+
+.distribution__row.is-navigable .distribution__inner:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--card-lift);
+}
+
+/* The row currently filtering the table below it. A ring rather than another
+   fill, for the same reason a pressed KPI tile takes one: the row already has a
+   colour and it means something else. `aria-pressed` says the same thing, and
+   the card's own note says it in words. */
+.distribution__row.is-pressed .distribution__inner {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+}
+
+.distribution__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.distribution__label {
+  font-size: 0.86rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.distribution__figures {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.distribution__figures strong {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The share is the derived number, so it reads as the quieter of the two. */
+.distribution__share {
+  min-width: 2.4rem;
+  text-align: right;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.distribution__track {
+  display: block;
+  height: 0.4rem;
+  border-radius: var(--radius-pill);
+  background: var(--card-lift);
+  overflow: hidden;
+}
+
+.distribution__fill {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--ink) 42%, transparent);
+  /* Same trade the composition bar already makes: a two-element bar growing to
+     its length costs a layout on two boxes and nothing else, and the numbers
+     beside it change instantly either way. */
+  transition: width 320ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.distribution__fill--good {
+  background: var(--good);
+}
+
+.distribution__fill--warn {
+  background: var(--warn);
+}
+
+.distribution__fill--critical {
+  background: var(--critical);
+}
+
+.distribution__note {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+/* What every share on the list is a share of, in words. Not decoration: without
+   it the percentages above are a claim about the business rather than about
+   fifty rows. */
+.distribution__scope {
+  margin: 0.6rem 0 0;
+  padding-top: 0.55rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+}
+
+/* A pair of small facts under a headline — an amount and the window it covers.
+   Two columns while there is room, stacked when there is not. */
+.fact-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.5rem;
+  margin: 0;
+  padding: 0.7rem 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.fact {
+  display: grid;
+  gap: 0.05rem;
+  min-width: 0;
+}
+
+.fact__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.fact__value {
+  font-size: 0.95rem;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Composition bar
+   ---------------------------------------------------------------------------
+   The only chart in the panel, and it is two rectangles. It earns its place
+   because the two numbers behind it are server-side totals covering the whole
+   queue rather than the page — a bar drawn from one page of rows would be a
+   picture of a sample presented as a picture of the whole.
+   ------------------------------------------------------------------------- */
+
+.proportion {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.85rem 0 0;
+}
+
+.proportion__bar {
+  display: flex;
+  gap: 2px;
+  height: 0.5rem;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.proportion__segment {
+  display: block;
+  min-width: 0.25rem;
+  border-radius: var(--radius-pill);
+  transition: flex-grow 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.proportion__segment--warn,
+.proportion__key--warn {
+  background: var(--warn);
+}
+
+.proportion__segment--critical,
+.proportion__key--critical {
+  background: var(--critical);
+}
+
+.proportion__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.proportion__legend li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.proportion__legend strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A marker rather than a swatch: small enough to read as a key, large enough
+   to see. The word beside it is what actually carries the meaning. */
+.proportion__key {
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: none;
+  border-radius: var(--radius-pill);
 }

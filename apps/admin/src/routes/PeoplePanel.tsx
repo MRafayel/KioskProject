@@ -25,7 +25,7 @@ import { useAdminData } from "../features/observability/useAdminData.js";
  * into their account, and still cannot decide whether they may work or where.
  *
  * The screen is written to make three things hard to do by accident. Suspending
- * somebody says how many sessions it will end before it ends them. Retiring a
+ * somebody says how many active sign-ins it will end before it ends them. Retiring a
  * key is refused, visibly, when it would leave an account without the second
  * factor its role signs in with. And a one-time code — an invitation or a
  * password reset — is shown exactly once, on a panel that says so, next to the
@@ -73,7 +73,7 @@ export function PeoplePanel() {
   return (
     <section className="panel">
       <header className="panel__header">
-        <h2>People</h2>
+        <h2>Operators</h2>
         <div className="panel__actions">
           {canInvite ? (
             <button type="button" onClick={() => setInviting((current) => !current)}>
@@ -86,12 +86,16 @@ export function PeoplePanel() {
         </div>
       </header>
 
-      {canManage ? null : (
-        <p className="panel__hint">
-          Your role can bring somebody in, help them back into their account, and retire a key.
-          Suspending an account and changing which kiosks somebody covers are held by Admins.
-        </p>
-      )}
+      <p className="panel__hint">
+        This roster contains Operator accounts only.
+        {canManage ? null : (
+          <>
+            {" "}
+            Your role can bring somebody in, help them back into their account, and retire a key.
+            Suspending an account and changing which kiosks somebody covers are held by Admins.
+          </>
+        )}
+      </p>
 
       {inviting && canInvite ? (
         <InvitationForm
@@ -326,7 +330,7 @@ function PersonRow({
   onChanged: () => void;
 }) {
   const [open, setOpen] = useState<
-    "status" | "kiosks" | "sessions" | "invitation" | "reset" | null
+    "status" | "kiosks" | "sessions" | "keys" | "invitation" | "reset" | null
   >(null);
   const status = STATUS_LABELS[person.status] ?? { label: person.status, hint: "" };
   const belowMinimum = person.usableAuthenticators < person.minimumAuthenticators;
@@ -365,8 +369,8 @@ function PersonRow({
         </p>
         <p className="key-list__meta">
           {person.activeSessions === 0
-            ? "No live sessions."
-            : `${person.activeSessions} live session(s).`}{" "}
+            ? "No active sign-ins."
+            : `${activeSignInCount(person.activeSessions)}.`}{" "}
           {person.kioskIds.length === 0
             ? "No kiosks assigned, so this account can act on none."
             : `Covers ${person.kioskIds.join(", ")}.`}
@@ -423,6 +427,17 @@ function PersonRow({
             Sign out everywhere
           </button>
         ) : null}
+        {canManageKeys && person.authenticators.length > 0 ? (
+          <button
+            type="button"
+            className="button-quiet"
+            aria-expanded={open === "keys"}
+            aria-controls={`operator-keys-${person.adminUserId}`}
+            onClick={() => setOpen(open === "keys" ? null : "keys")}
+          >
+            Security keys ({person.authenticators.length})
+          </button>
+        ) : null}
       </div>
 
       {open === "invitation" ? (
@@ -470,8 +485,8 @@ function PersonRow({
         />
       ) : null}
 
-      {canManageKeys && person.authenticators.length > 0 ? (
-        <ul className="people__keys">
+      {canManageKeys && person.authenticators.length > 0 && open === "keys" ? (
+        <ul className="people__keys" id={`operator-keys-${person.adminUserId}`}>
           {person.authenticators.map((key) => (
             <KeyRow key={key.id} person={person} authenticator={key} onChanged={onChanged} />
           ))}
@@ -486,7 +501,7 @@ function PersonRow({
  *
  * The consequence is stated before the button rather than after it. Whichever
  * of the three is chosen, the sentence under the selector describes what will
- * actually happen to the sessions that are open right now.
+ * actually happen to the sign-ins that are active right now.
  */
 function StatusForm({
   person,
@@ -685,7 +700,7 @@ function KioskForm({
   );
 }
 
-/** Ending every live session without touching the account. */
+/** Ending every active sign-in without touching the account. */
 function SessionsForm({
   person,
   onClose,
@@ -722,8 +737,9 @@ function SessionsForm({
     >
       <h3>Sign {person.displayName} out everywhere</h3>
       <p className="resolve__optional">
-        Ends {person.activeSessions} live session(s). The account is untouched — they can sign back
-        in with a key they still hold. Suspend the account instead if that is not what you want.
+        Ends {activeSignInCount(person.activeSessions)}. The account is untouched — they can sign
+        back in with a key they still hold. Suspend the account instead if that is not what you
+        want.
       </p>
 
       <label className="resolve__field">
@@ -733,7 +749,7 @@ function SessionsForm({
           onChange={(event) => setReason(event.target.value)}
           rows={2}
           maxLength={280}
-          placeholder="Laptop left on a train; signing the session out as a precaution."
+          placeholder="Laptop left on a train; signing the account out as a precaution."
         />
         <small className="resolve__optional">
           {trimmed.length < 8 ? "A few words at least." : `${trimmed.length}/280`}
@@ -748,7 +764,7 @@ function SessionsForm({
 
       <div className="resolve__actions">
         <button type="submit" disabled={!ready}>
-          {action.state.running ? "Ending…" : "End every session"}
+          {action.state.running ? "Ending…" : "End every sign-in"}
         </button>
         <button type="button" className="button-quiet" onClick={onClose}>
           Cancel
@@ -866,7 +882,7 @@ function OneTimeCodeForm({
       <p className="resolve__optional">
         {isInvitation
           ? "Replaces any code already outstanding for this account. Works only while the account is still being set up."
-          : "Issues a short-lived, single-use code. You never see or choose the password that results, and completing it ends every session the account holds."}
+          : "Issues a short-lived, single-use code. You never see or choose the password that results, and completing it signs the account out everywhere."}
       </p>
 
       <label className="resolve__field">
@@ -1030,11 +1046,15 @@ function describeStatusChange(status: AdminStatusAction, person: AdminPerson): s
   if (status === "ACTIVE") {
     return "Gives access back. Their existing keys still work; nothing is re-enrolled.";
   }
-  const sessions =
+  const signIns =
     person.activeSessions === 0
-      ? "They have no live sessions."
-      : `Ends ${person.activeSessions} live session(s) immediately.`;
+      ? "They have no active sign-ins."
+      : `Ends ${activeSignInCount(person.activeSessions)} immediately.`;
   return status === "SUSPENDED"
-    ? `Stops them signing in, reversibly. ${sessions}`
-    : `Shuts the account down permanently — this cannot be undone. ${sessions}`;
+    ? `Stops them signing in, reversibly. ${signIns}`
+    : `Shuts the account down permanently — this cannot be undone. ${signIns}`;
+}
+
+function activeSignInCount(count: number): string {
+  return `${count} active sign-in${count === 1 ? "" : "s"}`;
 }

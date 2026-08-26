@@ -83,7 +83,7 @@ describe("the sessions table", () => {
     const open = await screen.findByRole("button", { name: /Completed, started/ });
     await user.click(open);
 
-    const sheet = await screen.findByRole("dialog", { name: "Session detail" });
+    const sheet = await screen.findByRole("dialog", { name: "Print session detail" });
     expect(within(sheet).getByText(sessionId(1))).toBeInTheDocument();
     expect(within(sheet).getByText("kiosk-handoff-1")).toBeInTheDocument();
 
@@ -111,7 +111,7 @@ describe("the summary tiles", () => {
     const user = userEvent.setup();
     render(<SessionsPanel />);
 
-    const failed = await screen.findByRole("button", { name: /^Failed: 1\./ });
+    const failed = await screen.findByRole("button", { name: /^Failed print sessions: 1\./ });
     expect(failed).toHaveAttribute("aria-pressed", "false");
 
     await user.click(failed);
@@ -122,25 +122,25 @@ describe("the summary tiles", () => {
         expect.objectContaining({ state: "FAILED" })
       )
     );
-    const activeFailed = await screen.findByRole("button", { name: /^Failed:/ });
+    const activeFailed = await screen.findByRole("button", { name: /^Failed print sessions:/ });
     expect(activeFailed).toHaveAttribute("aria-pressed", "true");
     expect(activeFailed.closest(".kpi")).toHaveClass("is-pressed");
     expect(screen.getByLabelText("State")).toHaveValue("FAILED");
     expect(sessionRows()).toHaveLength(1);
     expect(sessionRows()[0]).toHaveAccessibleName(/Failed, started/);
 
-    await user.click(screen.getByRole("button", { name: /^Recovery required:/ }));
+    await user.click(screen.getByRole("button", { name: /^Ended in recovery:/ }));
     await waitFor(() => expect(screen.getByLabelText("State")).toHaveValue("RECOVERY_REQUIRED"));
-    expect(screen.getByRole("button", { name: /^Recovery required:/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: /^Ended in recovery:/ })).toHaveAttribute(
       "aria-pressed",
       "true"
     );
     expect(sessionRows()).toHaveLength(1);
     expect(sessionRows()[0]).toHaveAccessibleName(/Recovery required, started/);
 
-    await user.click(screen.getByRole("button", { name: /^Completed:/ }));
+    await user.click(screen.getByRole("button", { name: /^Completed print sessions:/ }));
     await waitFor(() => expect(screen.getByLabelText("State")).toHaveValue("COMPLETED"));
-    expect(screen.getByRole("button", { name: /^Completed:/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: /^Completed print sessions:/ })).toHaveAttribute(
       "aria-pressed",
       "true"
     );
@@ -188,7 +188,7 @@ describe("the summary tiles", () => {
     );
     await waitFor(() => expect(sessionRows()).toHaveLength(1));
     expect(sessionRows()[0]).toHaveAccessibleName(/Failed, started/);
-    expect(screen.getByRole("button", { name: /^Failed:/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: /^Failed print sessions:/ })).toHaveAttribute(
       "aria-pressed",
       "true"
     );
@@ -200,7 +200,7 @@ describe("the summary tiles", () => {
 });
 
 function sessionRows(): HTMLButtonElement[] {
-  return screen.getAllByRole("button", { name: /^Session on / });
+  return screen.getAllByRole("button", { name: /^Print session on / });
 }
 
 function sessionId(ordinal: number): string {

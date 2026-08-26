@@ -37,29 +37,27 @@ import { useAdminData } from "../features/observability/useAdminData.js";
  *
  * The ranking below is deliberate and is the whole design:
  *
- *  1. **A sentence.** "2 items need attention", or that nothing does.
+ *  1. **A sentence.** "2 issue types need attention", or that nothing does.
  *  2. **The worklist.** Each entry names a state the system deliberately
- *     refuses to resolve on its own — an undeleted document, an unconfirmed
- *     print, an unsettled refund — because those are the only numbers on this
- *     page that are actually somebody's job.
- *  3. **Four headline numbers**, one of which lifts above the others when it
+ *     refuses to resolve on its own — an undeleted document, an unresolved
+ *     print recovery, an unsettled refund — because those are the only numbers
+ *     on this page that are actually somebody's job.
+ *  3. **Three headline numbers**, one of which lifts above the others when it
  *     has something to say.
  *  4. **Modules**, each led by a plain sentence, with healthy zeros present but
  *     quiet.
  *
  * Nothing here is a dead end. A person who notices a number is one keystroke
- * from the rows behind it, already filtered, because the gap between spotting a
- * problem and finding it is where an operations dashboard usually fails.
- *
- * Every number on this page comes from one cached read. Nothing is derived that
- * the server did not send, and nothing is estimated.
+ * from the relevant page, with the most specific opening filter that page
+ * supports, because the gap between spotting a problem and finding it is where
+ * an operations dashboard usually fails.
  */
 
 interface AttentionEntry {
   label: string;
   /** One line on what the state actually means, for somebody who has not met it. */
   detail: string;
-  /** The rows behind this count, and the filter that isolates them. */
+  /** The relevant page, and the most specific opening filter it supports. */
   destination: AdminDestination;
   /** The visible action on the card. */
   action: string;
@@ -76,30 +74,30 @@ const ATTENTION: Readonly<Record<AdminAttentionCode, AttentionEntry>> = {
   RETENTION_DEAD_LETTERED: {
     label: "Document deletions that gave up",
     detail: "Retention stopped retrying and the documents still exist.",
-    destination: { section: "retention", retentionProblemsOnly: true },
+    destination: { section: "retention", retentionFilter: "GAVE_UP" },
     action: "Review retention",
-    openLabel: "Show the retention runs that failed."
+    openLabel: "Show retention runs that gave up."
   },
   RETENTION_OVERDUE: {
     label: "Sessions past their deletion deadline",
     detail: "Documents are being kept longer than the policy allows.",
-    destination: { section: "retention", retentionProblemsOnly: true },
+    destination: { section: "retention", retentionFilter: "OVERDUE" },
     action: "Review retention",
-    openLabel: "Show the retention runs that failed."
+    openLabel: "Show overdue retention runs."
   },
   PRINT_RECOVERY_REQUIRED: {
-    label: "Paid prints awaiting a human decision",
-    detail: "Somebody paid and the system will not decide whether they got their paper.",
-    destination: { section: "printing", printStatus: "RECOVERY_REQUIRED" },
+    label: "Unresolved print recoveries",
+    detail: "These recovery-state print jobs do not yet have a recorded human answer.",
+    destination: { section: "printing", printUnresolvedOnly: true },
     action: "Review printing",
-    openLabel: "Show the prints waiting for a person."
+    openLabel: "Show unresolved print recoveries."
   },
   REFUND_UNSETTLED: {
-    label: "Refunds owed and not yet returned",
-    detail: "The obligation is recorded and the money has not gone back yet.",
+    label: "Unsettled refunds",
+    detail: "The refund obligation is recorded but has not been completed yet.",
     destination: { section: "money", moneyFocus: "refunds" },
     action: "Review refunds",
-    openLabel: "Show the money owed back."
+    openLabel: "Show unsettled refunds."
   },
   PRINT_OVERDUE: {
     label: "Print jobs past their deadline",
@@ -118,7 +116,7 @@ const ATTENTION: Readonly<Record<AdminAttentionCode, AttentionEntry>> = {
   KIOSK_OFFLINE: {
     label: "Kiosks not heard from",
     detail: "No heartbeat inside the expected window.",
-    destination: { section: "kiosks" },
+    destination: { section: "kiosks", kioskFilter: "OFFLINE" },
     action: "View kiosks",
     openLabel: "Show kiosk status."
   },
@@ -194,7 +192,7 @@ export function OverviewScreen() {
             <span className="page-head__dot" aria-hidden="true" />
             {attention.length === 0
               ? "All systems operating normally"
-              : `${attention.length} ${attention.length === 1 ? "item needs" : "items need"} attention`}
+              : `${attention.length} ${attention.length === 1 ? "issue type needs" : "issue types need"} attention`}
           </p>
           <p className="page-head__meta">
             Updated {new Date(overview.generatedAt).toLocaleTimeString()}
@@ -238,10 +236,10 @@ export function OverviewScreen() {
       <Section id="overview-attention" title="Needs attention">
         {attention.length === 0 ? (
           <div className="module">
-            <HealthyNote>Nothing is waiting on a person.</HealthyNote>
+            <HealthyNote>No tracked issue type needs attention.</HealthyNote>
             <p className="module__summary">
-              Documents are being deleted on time, no paid print is unresolved, and no refund is
-              outstanding.
+              Document deletions are on schedule, no print recovery is unresolved, and there are no
+              unsettled refunds.
             </p>
           </div>
         ) : (
@@ -298,14 +296,17 @@ export function OverviewScreen() {
         <Snapshot overview={overview} opener={opener} />
       </Section>
 
-      <Section id="overview-detail" title="Operational detail">
-        <ModuleGrid>
-          <Kiosks overview={overview} opener={opener} />
-          <Sessions overview={overview} opener={opener} />
-          <Printing overview={overview} opener={opener} />
-          <Documents overview={overview} opener={opener} />
-          <MoneyModule overview={overview} opener={opener} />
-        </ModuleGrid>
+      <Section id="overview-detail" title="Detailed status">
+        <details className="overview-disclosure">
+          <summary className="overview-disclosure__summary">Show status by area</summary>
+          <ModuleGrid>
+            <Kiosks overview={overview} opener={opener} />
+            <Sessions overview={overview} opener={opener} />
+            <Printing overview={overview} opener={opener} />
+            <Documents overview={overview} opener={opener} />
+            <MoneyModule overview={overview} opener={opener} />
+          </ModuleGrid>
+        </details>
       </Section>
 
       {session.identity && session.identity.kioskScopes.length === 0 && overview.scoped ? (
@@ -314,11 +315,6 @@ export function OverviewScreen() {
           to assign one.
         </p>
       ) : null}
-
-      <p className="page-head__meta">
-        Counts are cached for a few seconds so that a wall of open dashboards cannot compete with
-        printing for the database.
-      </p>
     </>
   );
 }
@@ -331,26 +327,19 @@ interface ModuleProps {
 }
 
 /**
- * The four numbers worth knowing first.
+ * The three numbers worth knowing first.
  *
  * One of them lifts above the others, and which one is decided by what is
- * actually wrong rather than fixed in advance. Money owed back outranks a kiosk
- * that stopped answering, which outranks a queue of unscanned uploads — the
- * same ordering the worklist uses. On a quiet morning nothing lifts, which is
- * the point: permanent emphasis is emphasis nobody sees.
+ * actually wrong rather than fixed in advance. A kiosk that stopped answering
+ * outranks a queue of unscanned uploads. On a quiet morning nothing lifts,
+ * which is the point: permanent emphasis is emphasis nobody sees.
  */
 function Snapshot({ overview, opener }: ModuleProps) {
-  const { kiosks, sessions, documents, money } = overview;
+  const { kiosks, sessions, documents } = overview;
   const unhealthyKiosks = kiosks.offline + kiosks.degraded;
 
-  const elevated: "refunds" | "kiosks" | "documents" | null =
-    money.unsettledRefunds > 0
-      ? "refunds"
-      : unhealthyKiosks > 0
-        ? "kiosks"
-        : documents.awaitingScan > 0
-          ? "documents"
-          : null;
+  const elevated: "kiosks" | "documents" | null =
+    unhealthyKiosks > 0 ? "kiosks" : documents.awaitingScan > 0 ? "documents" : null;
 
   return (
     <KpiRow>
@@ -372,25 +361,15 @@ function Snapshot({ overview, opener }: ModuleProps) {
       />
 
       <Kpi
-        label="Live sessions"
+        label="Active print sessions"
         value={sessions.live}
         foot={
           sessions.live === 0
-            ? "Nothing live right now"
+            ? "No active print sessions"
             : `${sessions.awaitingPayment} awaiting payment, ${sessions.printing} printing`
         }
         onOpen={opener({ section: "sessions" })}
-        openLabel="Show sessions."
-      />
-
-      <Kpi
-        label="Outstanding refunds"
-        value={money.unsettledRefunds}
-        foot={money.unsettledRefunds === 0 ? "Nothing owed back" : "Money owed and not returned"}
-        tone={money.unsettledRefunds > 0 ? "warn" : undefined}
-        elevated={elevated === "refunds"}
-        onOpen={opener({ section: "money", moneyFocus: "refunds" })}
-        openLabel="Show the money owed back."
+        openLabel="Show print sessions."
       />
 
       <Kpi
@@ -418,7 +397,8 @@ function Snapshot({ overview, opener }: ModuleProps) {
 function Kiosks({ overview, opener }: ModuleProps) {
   const { kiosks } = overview;
   const open = opener({ section: "kiosks" });
-  const unhealthy = kiosks.offline + kiosks.degraded;
+  const openOffline = opener({ section: "kiosks", kioskFilter: "OFFLINE" });
+  const openDegraded = opener({ section: "kiosks", kioskFilter: "DEGRADED" });
 
   const summary =
     kiosks.total === 0
@@ -449,19 +429,12 @@ function Kiosks({ overview, opener }: ModuleProps) {
       {kiosks.total === 0 ? null : (
         <StatList>
           <Stat
-            label="Online"
-            value={kiosks.online}
-            quiet={unhealthy === 0}
-            onOpen={open}
-            openLabel="Show kiosk status."
-          />
-          <Stat
             label="Degraded"
             value={kiosks.degraded}
             problem={kiosks.degraded > 0}
             quiet={kiosks.degraded === 0}
-            onOpen={open}
-            openLabel="Show kiosk status."
+            onOpen={openDegraded}
+            openLabel="Show degraded kiosks."
           />
           <Stat
             label="Offline"
@@ -469,8 +442,8 @@ function Kiosks({ overview, opener }: ModuleProps) {
             problem={kiosks.offline > 0}
             critical={kiosks.offline > 0}
             quiet={kiosks.offline === 0}
-            onOpen={open}
-            openLabel="Show kiosk status."
+            onOpen={openOffline}
+            openLabel="Show offline kiosks."
           />
           <Stat
             label="Not active"
@@ -479,7 +452,6 @@ function Kiosks({ overview, opener }: ModuleProps) {
             onOpen={open}
             openLabel="Show kiosk status."
           />
-          <Stat label="Total" value={kiosks.total} onOpen={open} openLabel="Show every kiosk." />
         </StatList>
       )}
     </Module>
@@ -487,9 +459,9 @@ function Kiosks({ overview, opener }: ModuleProps) {
 }
 
 /**
- * Sessions, where a zero has to look like a fact rather than a failure.
+ * Print sessions, where a zero has to look like a fact rather than a failure.
  *
- * "No live sessions right now" is a different statement from a blank card, and
+ * "No active print sessions" is a different statement from a blank card, and
  * on a screen somebody checks at 03:00 the difference matters: one says the
  * shop is quiet, the other says the dashboard is broken.
  */
@@ -498,17 +470,14 @@ function Sessions({ overview, opener }: ModuleProps) {
 
   return (
     <Module
-      title="Sessions"
+      title="Print sessions"
       summary={
         sessions.live === 0
-          ? "No live sessions right now."
-          : `${sessions.live} live right now${sessions.recoveryRequired > 0 ? `, ${sessions.recoveryRequired} needing recovery` : ""}`
+          ? "No active print sessions."
+          : `${sessions.live} active print ${sessions.live === 1 ? "session" : "sessions"}.`
       }
-      summaryTone={sessions.recoveryRequired > 0 ? "warn" : undefined}
       pill={
-        sessions.recoveryRequired > 0 ? (
-          <StatusPill tone="warn">Recovery</StatusPill>
-        ) : sessions.live > 0 ? (
+        sessions.live > 0 ? (
           <StatusPill tone="good">Active</StatusPill>
         ) : (
           <StatusPill>Idle</StatusPill>
@@ -516,13 +485,6 @@ function Sessions({ overview, opener }: ModuleProps) {
       }
     >
       <StatList>
-        <Stat
-          label="Live"
-          value={sessions.live}
-          quiet={sessions.live === 0}
-          onOpen={opener({ section: "sessions" })}
-          openLabel="Show sessions."
-        />
         <Stat
           label="Awaiting payment"
           value={sessions.awaitingPayment}
@@ -538,12 +500,11 @@ function Sessions({ overview, opener }: ModuleProps) {
           openLabel="Show sessions that are printing."
         />
         <Stat
-          label="Recovery required"
+          label="Sessions ended in recovery"
           value={sessions.recoveryRequired}
-          problem={sessions.recoveryRequired > 0}
           quiet={sessions.recoveryRequired === 0}
           onOpen={opener({ section: "sessions", sessionState: "RECOVERY_REQUIRED" })}
-          openLabel="Show sessions needing recovery."
+          openLabel="Show sessions that ended in recovery."
         />
       </StatList>
     </Module>
@@ -562,21 +523,29 @@ function Printing({ overview, opener }: ModuleProps) {
   const { printing } = overview;
   const needsSomebody =
     printing.recoveryUnresolved +
-    printing.overdue +
-    printing.failedRecently +
-    printing.unconfirmedRecently;
+      printing.overdue +
+      printing.failedRecently +
+      printing.unconfirmedRecently >
+    0;
+
+  const summary =
+    printing.recoveryUnresolved > 0 && printing.overdue > 0
+      ? `${printing.recoveryUnresolved} unresolved print ${printing.recoveryUnresolved === 1 ? "recovery" : "recoveries"}; ${printing.overdue} overdue.`
+      : printing.recoveryUnresolved > 0
+        ? `${printing.recoveryUnresolved} unresolved print ${printing.recoveryUnresolved === 1 ? "recovery" : "recoveries"}.`
+        : printing.overdue > 0
+          ? `${printing.overdue} print ${printing.overdue === 1 ? "job is" : "jobs are"} overdue.`
+          : printing.failedRecently > 0 || printing.unconfirmedRecently > 0
+            ? "Recent print outcomes include failures or unconfirmed results."
+            : undefined;
 
   return (
     <Module
       title="Printing"
-      summary={
-        needsSomebody > 0
-          ? `${printing.recoveryUnresolved} waiting for a person, ${printing.overdue} overdue`
-          : undefined
-      }
+      summary={summary}
       summaryTone={printing.recoveryUnresolved > 0 ? "critical" : "warn"}
       pill={
-        needsSomebody > 0 ? (
+        needsSomebody ? (
           <StatusPill tone={printing.recoveryUnresolved > 0 ? "critical" : "warn"}>
             Needs work
           </StatusPill>
@@ -585,7 +554,7 @@ function Printing({ overview, opener }: ModuleProps) {
         )
       }
     >
-      {needsSomebody === 0 ? (
+      {!needsSomebody ? (
         <>
           <HealthyNote>No print jobs need attention.</HealthyNote>
           <StatList>
@@ -596,6 +565,15 @@ function Printing({ overview, opener }: ModuleProps) {
               onOpen={opener({ section: "printing" })}
               openLabel="Show print jobs."
             />
+            {printing.recoveryRequired > 0 ? (
+              <Stat
+                label="Recovery-state print jobs"
+                value={printing.recoveryRequired}
+                quiet
+                onOpen={opener({ section: "printing", printStatus: "RECOVERY_REQUIRED" })}
+                openLabel="Show recovery-state print jobs."
+              />
+            ) : null}
           </StatList>
         </>
       ) : (
@@ -612,20 +590,20 @@ function Printing({ overview, opener }: ModuleProps) {
               recording an observation feel like doing the job rather than
               filing a form. */}
           <Stat
-            label="Waiting for a person"
+            label="Unresolved print recoveries"
             value={printing.recoveryUnresolved}
             problem={printing.recoveryUnresolved > 0}
             critical={printing.recoveryUnresolved > 0}
             quiet={printing.recoveryUnresolved === 0}
-            onOpen={opener({ section: "printing", printStatus: "RECOVERY_REQUIRED" })}
-            openLabel="Show the prints waiting for a person."
+            onOpen={opener({ section: "printing", printUnresolvedOnly: true })}
+            openLabel="Show unresolved print recoveries."
           />
           <Stat
-            label="In recovery"
+            label="Recovery-state print jobs"
             value={printing.recoveryRequired}
             quiet={printing.recoveryRequired === 0}
             onOpen={opener({ section: "printing", printStatus: "RECOVERY_REQUIRED" })}
-            openLabel="Show prints in recovery."
+            openLabel="Show recovery-state print jobs."
           />
           <Stat
             label="Overdue"
@@ -661,41 +639,46 @@ function Printing({ overview, opener }: ModuleProps) {
  * Documents and retention in one module rather than six tiles.
  *
  * The actionable states lead — an upload that failed, a deletion that is late
- * or has given up — and the two that are merely in flight sit underneath them,
- * quiet. There is no link on a document count and there should not be: the
- * panel may see that a file was processed, never what was in it.
+ * or has given up. The two document counts that are merely in flight already
+ * appear together in the snapshot, so this module does not repeat them.
  */
 function Documents({ overview, opener }: ModuleProps) {
   const { documents, retention } = overview;
   const actionable = documents.failed + retention.overdue + retention.deadLettered;
-  const retentionProblems = opener({ section: "retention", retentionProblemsOnly: true });
+  const overdueRetention = opener({ section: "retention", retentionFilter: "OVERDUE" });
+  const stoppedRetention = opener({ section: "retention", retentionFilter: "GAVE_UP" });
+
+  const summary =
+    actionable === 0
+      ? "Nothing has failed, and every deletion is on schedule."
+      : documents.failed > 0 && (retention.overdue > 0 || retention.deadLettered > 0)
+        ? "Upload processing and document deletions both need attention."
+        : documents.failed > 0
+          ? `${documents.failed} ${documents.failed === 1 ? "upload has" : "uploads have"} failed processing.`
+          : retention.deadLettered > 0 && retention.overdue > 0
+            ? "Some deletions are overdue; others exhausted every retry."
+            : retention.deadLettered > 0
+              ? `${retention.deadLettered} ${retention.deadLettered === 1 ? "deletion has" : "deletions have"} exhausted every retry.`
+              : `${retention.overdue} ${retention.overdue === 1 ? "deletion is" : "deletions are"} overdue.`;
 
   return (
     <Module
       title="Documents and retention"
-      summary={
-        actionable === 0
-          ? "Nothing has failed, and every deletion is on schedule."
-          : `${retention.overdue + retention.deadLettered} deletions need attention`
-      }
+      summary={summary}
       summaryTone={retention.deadLettered > 0 ? "critical" : actionable > 0 ? "warn" : undefined}
       pill={
         retention.deadLettered > 0 ? (
           <StatusPill tone="critical">Gave up</StatusPill>
-        ) : actionable > 0 ? (
+        ) : retention.overdue > 0 ? (
           <StatusPill tone="warn">Late</StatusPill>
+        ) : documents.failed > 0 ? (
+          <StatusPill tone="warn">Failed</StatusPill>
         ) : (
           <StatusPill tone="good">On schedule</StatusPill>
         )
       }
     >
       <StatList>
-        <Stat
-          label="Awaiting scan"
-          value={documents.awaitingScan}
-          problem={documents.awaitingScan > 0}
-          quiet={documents.awaitingScan === 0}
-        />
         <Stat
           label="Failed"
           value={documents.failed}
@@ -709,8 +692,8 @@ function Documents({ overview, opener }: ModuleProps) {
           value={retention.overdue}
           problem={retention.overdue > 0}
           quiet={retention.overdue === 0}
-          onOpen={retentionProblems}
-          openLabel="Show the retention runs that failed."
+          onOpen={overdueRetention}
+          openLabel="Show overdue retention runs."
         />
         <Stat
           label="Deletion gave up"
@@ -718,16 +701,15 @@ function Documents({ overview, opener }: ModuleProps) {
           problem={retention.deadLettered > 0}
           critical={retention.deadLettered > 0}
           quiet={retention.deadLettered === 0}
-          onOpen={retentionProblems}
-          openLabel="Show the retention runs that failed."
+          onOpen={stoppedRetention}
+          openLabel="Show retention runs that gave up."
         />
-        <Stat label="Processing" value={documents.processing} quiet />
         <Stat
           label="Deletion pending"
           value={retention.pending}
           quiet
-          onOpen={opener({ section: "retention", retentionProblemsOnly: false })}
-          openLabel="Show every retention run."
+          onOpen={opener({ section: "retention", retentionFilter: "PENDING" })}
+          openLabel="Show pending retention runs."
         />
       </StatList>
     </Module>
@@ -751,13 +733,17 @@ function MoneyModule({ overview, opener }: ModuleProps) {
       title="Money"
       summary={
         money.unsettledRefunds > 0
-          ? `${money.unsettledRefunds} ${money.unsettledRefunds === 1 ? "refund" : "refunds"} owed and not yet returned`
-          : "Nothing is owed and no payment is stuck."
+          ? "Some refunds remain unsettled."
+          : money.expiredPayments > 0
+            ? "No unsettled refunds, but some payment intents have expired."
+            : "No unsettled refunds or expired payment intents."
       }
-      summaryTone={money.unsettledRefunds > 0 ? "warn" : undefined}
+      summaryTone={money.unsettledRefunds > 0 || money.expiredPayments > 0 ? "warn" : undefined}
       pill={
         money.unsettledRefunds > 0 ? (
-          <StatusPill tone="warn">Owed</StatusPill>
+          <StatusPill tone="warn">Unsettled</StatusPill>
+        ) : money.expiredPayments > 0 ? (
+          <StatusPill tone="warn">Payment issue</StatusPill>
         ) : (
           <StatusPill tone="good">Settled</StatusPill>
         )
@@ -770,7 +756,7 @@ function MoneyModule({ overview, opener }: ModuleProps) {
           problem={money.unsettledRefunds > 0}
           quiet={money.unsettledRefunds === 0}
           onOpen={opener({ section: "money", moneyFocus: "refunds" })}
-          openLabel="Show the money owed back."
+          openLabel="Show unsettled refunds."
         />
         <Stat
           label="Open payments"

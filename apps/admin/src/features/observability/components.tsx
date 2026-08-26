@@ -36,7 +36,10 @@ export function Panel({
 
       {state.error ? (
         <div className="panel__error" role="alert">
-          <span className="panel__error-text">{state.error}</span>
+          <span className="panel__error-text">
+            {state.error}
+            {state.data ? " Showing the last information that loaded." : ""}
+          </span>
           <button type="button" onClick={state.reload}>
             Try again
           </button>
@@ -306,4 +309,153 @@ export function Identifier({ value }: { value: string }) {
       {value.length > 12 ? `${value.slice(0, 8)}…` : value}
     </code>
   );
+}
+
+/**
+ * When something happened, clock first, for a table's leading column.
+ *
+ * Nearly every row on a page is from the same day or two, so the date is the
+ * part that repeats and the time is the part that distinguishes. Putting the
+ * clock on the readable line and dropping the date to metadata is what lets
+ * somebody find "the one just after four" by running down the column — which is
+ * the entire reason these tables lead with a timestamp rather than with an
+ * identifier nobody reads. The exact value stays on `title`, and `When` remains
+ * for anywhere a full timestamp in one line is what is wanted.
+ */
+export function RowWhen({ value }: { value: string }) {
+  const parsed = new Date(value);
+  return (
+    <time className="row-when" dateTime={value} title={parsed.toLocaleString()}>
+      {parsed.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+      <span className="row-when__date">
+        {parsed.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}
+      </span>
+    </time>
+  );
+}
+
+/**
+ * Numbered pagination over a cursor API.
+ *
+ * These endpoints are keyset-paged: a response carries the rows and an opaque
+ * cursor for the next page, and never a total. So this control cannot offer
+ * "page 7 of 40" — nothing in the system knows what 40 would be, and inventing
+ * it by guessing from a page size would put a number on screen that no query
+ * produced.
+ *
+ * What it can do honestly is number the pages that have been reached. The
+ * caller keeps the trail of cursors it has discovered; every page in that trail
+ * is one click away in either direction, and the forward arrow stays live while
+ * a next cursor exists, which is the system's own answer to "is there more".
+ * The result behaves like numbered pagination in the direction people actually
+ * use it — back to the page they were on two minutes ago — without claiming
+ * knowledge of an end nobody has asked the database for.
+ *
+ * `hasNext` and the trail length are deliberately separate. Being on page 3 of 5
+ * known pages with no further cursor is a different fact from being on page 3 of
+ * 3 with more to come, and the arrow has to be right in both.
+ */
+export function Pagination({
+  page,
+  pageCount,
+  hasNext,
+  onGo,
+  label = "Pages"
+}: {
+  /** The current page, 1-based. */
+  page: number;
+  /** How many pages have been reached so far. Never fewer than `page`. */
+  pageCount: number;
+  /** Whether a cursor exists beyond the last known page. */
+  hasNext: boolean;
+  onGo: (page: number) => void;
+  /** Names the control for a screen reader: "Session pages". */
+  label?: string;
+}) {
+  // One page and nothing beyond it is not pagination, it is a row of furniture
+  // around a number that cannot change.
+  if (pageCount <= 1 && !hasNext) return null;
+
+  const canGoBack = page > 1;
+  const canGoForward = page < pageCount || hasNext;
+
+  return (
+    <nav className="pagination" aria-label={label}>
+      <button
+        type="button"
+        className="pagination__arrow"
+        disabled={!canGoBack}
+        aria-label="Previous page"
+        onClick={() => onGo(page - 1)}
+      >
+        <span aria-hidden="true">←</span>
+      </button>
+
+      <ol className="pagination__pages">
+        {pageItems(page, pageCount).map((item, index) =>
+          item === "gap" ? (
+            // Not a control and not a page: it stands for the pages between two
+            // numbers, and announcing "ellipsis" to a screen reader that already
+            // has both numbers adds nothing.
+            <li key={`gap-${index}`} className="pagination__gap" aria-hidden="true">
+              …
+            </li>
+          ) : (
+            <li key={item}>
+              <button
+                type="button"
+                className={item === page ? "pagination__page is-current" : "pagination__page"}
+                aria-current={item === page ? "page" : undefined}
+                aria-label={`Page ${item}`}
+                onClick={() => onGo(item)}
+              >
+                {item}
+              </button>
+            </li>
+          )
+        )}
+      </ol>
+
+      <button
+        type="button"
+        className="pagination__arrow"
+        disabled={!canGoForward}
+        aria-label="Next page"
+        onClick={() => onGo(page + 1)}
+      >
+        <span aria-hidden="true">→</span>
+      </button>
+    </nav>
+  );
+}
+
+/**
+ * Which page numbers to draw, and where the gaps go.
+ *
+ * The first and last known pages are always present so the two ends stay
+ * reachable in one click, and a window of one either side of the current page
+ * keeps the immediate neighbours available. Everything else collapses.
+ *
+ * A gap is only drawn where it replaces more than one number: substituting "…"
+ * for a single page makes the control no narrower and takes away somewhere to
+ * click, which is the one thing an ellipsis must never do.
+ */
+function pageItems(page: number, pageCount: number, span = 1): (number | "gap")[] {
+  const keep = new Set<number>([1, pageCount]);
+  for (let offset = -span; offset <= span; offset += 1) {
+    const candidate = page + offset;
+    if (candidate >= 1 && candidate <= pageCount) keep.add(candidate);
+  }
+
+  const items: (number | "gap")[] = [];
+  let previous = 0;
+  for (const value of [...keep].sort((left, right) => left - right)) {
+    if (previous !== 0 && value - previous > 1) {
+      if (value - previous === 2) items.push(previous + 1);
+      else items.push("gap");
+    }
+    items.push(value);
+    previous = value;
+  }
+  return items;
 }

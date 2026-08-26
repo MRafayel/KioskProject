@@ -76,7 +76,10 @@ const sessionsQuerySchema = listQuerySchema.extend({
   state: adminSessionStateSchema.optional()
 });
 
-const printJobsQuerySchema = listQuerySchema.extend({ status: statusSchema });
+const printJobsQuerySchema = listQuerySchema.extend({
+  status: statusSchema,
+  recoveryResolved: z.enum(["true", "false"]).optional()
+});
 const paymentsQuerySchema = listQuerySchema.extend({ status: statusSchema });
 
 const refundsQuerySchema = z.object({

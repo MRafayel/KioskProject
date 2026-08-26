@@ -1,11 +1,20 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { suggestedRefundMinor, type AdminRefundQueueEntry } from "@printing-kiosk/admin-access";
 
 import { observabilityApi } from "../features/observability/api.js";
-import { Empty, Identifier, Money, When } from "../features/observability/components.js";
+import {
+  Empty,
+  Identifier,
+  Money,
+  Pagination,
+  Panel,
+  When
+} from "../features/observability/components.js";
+import { Proportion, StatusPill } from "../features/observability/surfaces.js";
 import { useAdminAction } from "../features/observability/useAdminAction.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
+import { usePageTrail } from "../features/observability/usePageTrail.js";
 
 /**
  * The prints waiting for somebody who can decide about money.
@@ -25,52 +34,85 @@ import { useAdminData } from "../features/observability/useAdminData.js";
 
 const QUEUE_REASON_LABELS = {
   REFUND_SUGGESTED: {
-    title: "A person says pages are missing",
+    title: "Pages are missing",
+    tag: "Missing pages",
     detail: "The question is how much is owed."
   },
   UNRESOLVABLE: {
     title: "Nobody could tell what happened",
-    detail: "No refund is suggested. This is a judgement call, which is why it is here."
+    tag: "Unclear",
+    detail: "No amount is suggested. This is a judgement call, which is why it is here."
   }
 } as const;
 
 export function RefundQueue({
   canAuthorize,
-  onAuthorized
+  onAuthorized,
+  onTotals
 }: {
   canAuthorize: boolean;
   onAuthorized: () => void;
+  /**
+   * Hands the queue's own totals to whatever is drawing a count above it.
+   *
+   * Money shows "needs decision" as a tile whether or not this list is on
+   * screen. Without this the page would fetch the queue twice the moment it
+   * opened on the queue — once for the rows and once for the number printed
+   * directly above them.
+   */
+  onTotals?: ((totals: { suggested: number; unresolvable: number }) => void) | undefined;
 }) {
   // No polling, deliberately. Every other panel refreshes on a timer; an Admin
   // part-way through typing an amount must not have the row underneath them
   // replaced, and a money screen that moves on its own is one somebody
   // misclicks.
-  const load = useCallback(() => observabilityApi.refundQueue(), []);
+  const pages = usePageTrail();
+  const cursor = pages.cursor;
+  const load = useCallback(() => observabilityApi.refundQueue(cursor), [cursor]);
   const state = useAdminData(load);
+  const nextCursor = state.data?.nextCursor ?? null;
 
-  if (!state.data) return null;
+  const items = state.data?.items ?? [];
+  const totals = state.data?.totals ?? { suggested: 0, unresolvable: 0 };
+  const total = totals.suggested + totals.unresolvable;
 
-  const { items, totals } = state.data;
+  const data = state.data;
+  useEffect(() => {
+    if (data) onTotals?.(data.totals);
+  }, [data, onTotals]);
 
   return (
-    <section className="panel">
-      <header className="panel__header">
-        <h2>Waiting on a money decision</h2>
+    <Panel
+      title="Needs decision"
+      state={state}
+      emptyMessage="No print is waiting for a refund decision."
+      hint="Oldest first. Each one is a customer waiting on somebody here."
+      actions={
         <button type="button" onClick={state.reload} disabled={state.loading}>
           Refresh
         </button>
-      </header>
-
-      {items.length === 0 ? (
+      }
+    >
+      {state.data && items.length === 0 ? (
         <Empty>
           No print is waiting for a refund decision. Prints leave this list when a refund is
           authorized, or when somebody corrects the record to say the customer got their pages.
         </Empty>
       ) : (
         <>
+          {/* These two totals come from the server and cover the whole queue,
+              not just the page below — so the split is worth drawing. The two
+              halves are different work: one is arithmetic somebody checks, the
+              other is a judgement call with no suggested amount. */}
+          <Proportion
+            label="What is waiting to be decided"
+            segments={[
+              { label: "with missing pages", value: totals.suggested, tone: "warn" },
+              { label: "where nobody could tell", value: totals.unresolvable, tone: "critical" }
+            ]}
+          />
           <p className="panel__status">
-            {totals.suggested} where a person says pages are missing, {totals.unresolvable} where
-            nobody could tell. Oldest first.
+            {total} to decide in total. Showing {items.length} on this page, oldest first.
           </p>
           <ul className="refund-queue">
             {items.map((entry) => (
@@ -85,9 +127,17 @@ export function RefundQueue({
               />
             ))}
           </ul>
+
+          <Pagination
+            label="Decision pages"
+            page={pages.page}
+            pageCount={pages.pageCount}
+            hasNext={pages.hasNext(nextCursor)}
+            onGo={(target) => pages.go(target, nextCursor)}
+          />
         </>
       )}
-    </section>
+    </Panel>
   );
 }
 
@@ -108,7 +158,15 @@ function RefundQueueRow({
       <div className="refund-queue__account">
         <p className="resolution__outcome">
           <strong>{label.title}</strong>
-          {entry.corrected ? <span className="key-list__meta">corrected</span> : null}
+          <span className="row-flags">
+            <StatusPill tone={entry.queueReason === "REFUND_SUGGESTED" ? "warn" : "critical"}>
+              {label.tag}
+            </StatusPill>
+            {/* A corrected account supersedes the original, and paying out
+                against superseded evidence is the exact mistake corrections
+                exist to prevent — so it is marked, not footnoted. */}
+            {entry.corrected ? <StatusPill tone="neutral">Corrected</StatusPill> : null}
+          </span>
         </p>
         <blockquote className="resolution__reason">{entry.reason}</blockquote>
         <p className="resolution__by">
@@ -116,9 +174,9 @@ function RefundQueueRow({
           &middot; {entry.kioskId} &middot; <Identifier value={entry.printJobId} />
         </p>
         <p className="resolution__by">
-          Paid for {entry.physicalSheets} sheet(s); the printer reported{" "}
-          {entry.sheetsProduced === null ? "no count" : `${entry.sheetsProduced}`}, a person counted{" "}
-          {entry.observedSheets === null ? "none" : entry.observedSheets}. {label.detail}
+          Paid for {entry.physicalSheets} sheet{entry.physicalSheets === 1 ? "" : "s"}. The printer
+          reported {entry.sheetsProduced === null ? "no count" : entry.sheetsProduced}; a person
+          counted {entry.observedSheets === null ? "none" : entry.observedSheets}. {label.detail}
         </p>
       </div>
 
@@ -133,7 +191,7 @@ function RefundQueueRow({
           {entry.refundedAmountMinor > 0 ? (
             <>
               {" "}
-              &middot; already owed{" "}
+              &middot; already owed back{" "}
               <Money
                 minor={entry.refundedAmountMinor}
                 currency={entry.currency}

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 /**
  * The shared surfaces the control plane is drawn on.
@@ -87,6 +87,8 @@ export interface KpiProps {
    */
   elevated?: boolean;
   onOpen?: (() => void) | undefined;
+  /** Visible interaction cue. Inferred for ordinary navigation and filters. */
+  behavior?: "navigate" | "filter" | "view" | "summary" | undefined;
   /** Completes "Kiosk health: 2 of 3." for a screen reader. */
   openLabel?: string;
   /**
@@ -118,6 +120,7 @@ export function Kpi({
   tone,
   elevated = false,
   onOpen,
+  behavior: requestedBehavior,
   openLabel,
   pressed
 }: KpiProps) {
@@ -138,6 +141,23 @@ export function Kpi({
         ? "kpi__value kpi__value--warn"
         : "kpi__value";
 
+  // The cards deliberately share one visual language, but they do not all do
+  // the same thing. Say the interaction in the card instead of making somebody
+  // discover whether a tile filters, navigates, or is only a summary by trying
+  // it. `pressed` is present for filter toggles and absent for navigation.
+  const behavior =
+    requestedBehavior ?? (!onOpen ? "summary" : pressed === undefined ? "navigate" : "filter");
+  const behaviorCue =
+    behavior === "summary"
+      ? { className: "kpi__behavior kpi__behavior--summary", label: "Summary" }
+      : behavior === "navigate"
+        ? { className: "kpi__behavior kpi__behavior--action", label: "View page →" }
+        : behavior === "view"
+          ? { className: "kpi__behavior kpi__behavior--action", label: "Open view" }
+          : pressed
+            ? { className: "kpi__behavior kpi__behavior--active", label: "Filtering table" }
+            : { className: "kpi__behavior kpi__behavior--action", label: "Filter table" };
+
   const body = (
     <>
       <p className="kpi__label">{label}</p>
@@ -146,6 +166,9 @@ export function Kpi({
         {of ? <span className="kpi__of"> {of}</span> : null}
       </p>
       {foot ? <p className={footClass(tone, pressed)}>{foot}</p> : null}
+      <p className={behaviorCue.className} aria-hidden="true">
+        {behaviorCue.label}
+      </p>
     </>
   );
 
@@ -298,4 +321,453 @@ export function Stat({ label, value, problem, critical, quiet, onOpen, openLabel
 function textOf(value: ReactNode): string {
   if (typeof value === "string" || typeof value === "number") return String(value);
   return "";
+}
+
+/** What a focus trap considers a stop. */
+const FOCUSABLE =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * One record, opened over the list instead of appended below it.
+ *
+ * Every list in this panel used to reveal its detail by rendering a second
+ * panel at the foot of the page. That made choosing a row an act with no
+ * visible result: the answer appeared a screenful further down, reading it
+ * meant leaving the table, and coming back cost the scroll position and
+ * whichever row was being compared against. On a fifty-row page that is the
+ * difference between an investigation and a scroll.
+ *
+ * The sheet leaves the list mounted and untouched underneath, so closing it
+ * returns to exactly the same rows at exactly the same offset with the opened
+ * row still marked.
+ *
+ * It is a real modal and behaves like one: focus moves in on open and is
+ * trapped while it is there, Escape closes, and the scrim swallows pointer
+ * events aimed at the page behind. A dialog that claims `aria-modal` while
+ * letting focus wander into the page behind it has lied to the only people
+ * relying on the claim, so the trap is not optional furniture.
+ *
+ * Returning focus to whatever opened it is the caller's job, because only the
+ * caller still has the element — see `useDetailSheet`.
+ */
+export function Sheet({
+  title,
+  subtitle,
+  onClose,
+  children
+}: {
+  title: string;
+  /** The one line under the title: which record this is, at a glance. */
+  subtitle?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    closeRef.current?.focus();
+    // The page behind a modal should not scroll under it. Restored rather than
+    // cleared, so a future caller with its own reason to lock is not undone.
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const stops = Array.from(sheetRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []);
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (!first || !last) return;
+
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    <>
+      {/* The scrim is the click-away target and the thing that stops the page
+          behind responding to a pointer. It is not a control, so it carries no
+          role and no name — Escape and the close button are the ways out that
+          announce themselves. */}
+      <div className="sheet-scrim" onClick={onClose} aria-hidden="true" />
+
+      <div
+        className="sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="detail-sheet-title"
+        ref={sheetRef}
+        onKeyDown={onKeyDown}
+      >
+        <div className="sheet__head">
+          <div>
+            <h2 className="sheet__title" id="detail-sheet-title">
+              {title}
+            </h2>
+            {subtitle ? <p className="sheet__subtitle">{subtitle}</p> : null}
+          </div>
+          <button type="button" className="sheet__close" ref={closeRef} onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="sheet__body">{children}</div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * The control in a row's leading cell.
+ *
+ * The tables used to put the only clickable thing inside the first cell — an
+ * eight-character identifier, underlined, about as wide as a thumbnail. The
+ * pointer target was a fraction of a row that was already responding to hover,
+ * which taught people that rows are clickable and then made them aim anyway.
+ *
+ * So the row takes the click (see `useDetailSheet().rowProps`) and this stays
+ * for the keyboard: it is what `Tab` lands on and what a screen reader
+ * announces, it carries the accessible name and the open state, and it is drawn
+ * as the cell's own text rather than as a link. Two affordances, one target.
+ */
+export function RowOpen({
+  label,
+  open,
+  onOpen,
+  children
+}: {
+  /** The whole row said in one phrase, for anyone not seeing the columns. */
+  label: string;
+  open: boolean;
+  onOpen: (opener: HTMLButtonElement) => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="row-open"
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label={label}
+      onClick={(event) => {
+        // The row handler would otherwise run a second time and toggle this
+        // straight back shut.
+        event.stopPropagation();
+        onOpen(event.currentTarget);
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * One summary tile, wired as one position of a mutually exclusive filter.
+ *
+ * Four panels put the same four-ish counts above the same kind of table, and
+ * on every one of them the number worth printing is the number worth clicking:
+ * somebody who has just read "4 need recovery" wants those four, not a dropdown
+ * two controls away that would have got them there. This is that behaviour,
+ * shared, so pressing a tile means the same thing everywhere.
+ *
+ * The wording changes with what is on, because the ring around a pressed tile
+ * is a colour and a shape and this screen is read by people who may get neither:
+ * the footnote says "showing only these" in words, and says why a count is a
+ * dash when somebody else's filter has made it unknowable.
+ */
+export function FilterKpi<Id extends string>({
+  card,
+  label,
+  noun,
+  value,
+  resting,
+  tone,
+  elevated,
+  active,
+  narrowed = false,
+  onChoose
+}: {
+  card: Id;
+  label: string;
+  /** What the rows are, for the screen-reader label: "sessions", "kiosks". */
+  noun: string;
+  value: number;
+  /** The footnote when nothing is filtered — the tile's ordinary caption. */
+  resting: ReactNode;
+  tone?: Extract<Tone, "warn" | "critical"> | undefined;
+  elevated?: boolean;
+  active: Id | null;
+  /**
+   * True when the rows behind every *other* tile have been narrowed away by the
+   * active filter — a server-side filter, typically. Those tiles then show a
+   * dash rather than a count, because "0 failed" and "we did not ask about
+   * failures" are different statements and only one of them is true.
+   */
+  narrowed?: boolean;
+  onChoose: (card: Id) => void;
+}) {
+  const pressed = active === card;
+  const unknown = narrowed && !pressed;
+
+  const foot = pressed
+    ? "Showing only these — select again to clear"
+    : unknown
+      ? "Not counted while filtered"
+      : resting;
+
+  return (
+    <Kpi
+      label={label}
+      value={unknown ? "—" : value}
+      foot={foot}
+      tone={unknown ? undefined : tone}
+      elevated={elevated ?? false}
+      pressed={pressed}
+      onOpen={() => onChoose(card)}
+      openLabel={
+        pressed
+          ? "Showing only these. Select to clear the filter."
+          : `Show only ${label.toLowerCase()} in the ${noun} table.`
+      }
+    />
+  );
+}
+
+/**
+ * A composition bar: what a total is made of, drawn to scale.
+ *
+ * The one visual summary in this panel, and it exists because the money queue
+ * has a split worth seeing at a glance: prints where the arithmetic already
+ * suggests an amount, against prints where nobody could tell what happened and
+ * an Admin has to decide from nothing. Those are different kinds of work and a
+ * single number hides the difference.
+ *
+ * It is CSS, not a chart library. Two divs and a flex-grow is the whole
+ * implementation, and a charting dependency for a two-segment bar would cost
+ * more bytes than the rest of this page put together.
+ *
+ * The legend is not decoration. Each segment is labelled with its own count in
+ * text, so the bar is an accelerant for people who can use it and nothing is
+ * lost for anyone who cannot — including at zero width, where a segment
+ * disappears entirely but its label does not.
+ */
+/**
+ * One number said large, with the sentence that makes it mean something.
+ *
+ * A `Kpi` is a tile in a row of tiles; this is the lead of a card that goes on
+ * to show its own working underneath. Same ordering — quiet label, loud value,
+ * quietest line last — because a person who reads only the middle line of
+ * anything on this screen should still come away with the fact.
+ *
+ * The note is not optional in practice and should always name the denominator.
+ * A success rate with no "of what" beside it is the single easiest number on a
+ * money screen to quote out of a meeting as something it never was.
+ */
+export function Headline({
+  label,
+  value,
+  note,
+  tone
+}: {
+  label: string;
+  value: ReactNode;
+  note?: ReactNode;
+  tone?: Extract<Tone, "warn" | "critical"> | undefined;
+}) {
+  const valueClass =
+    tone === "critical"
+      ? "headline__value headline__value--critical"
+      : tone === "warn"
+        ? "headline__value headline__value--warn"
+        : "headline__value";
+
+  return (
+    <div className="headline">
+      <p className="headline__label">{label}</p>
+      <p className={valueClass}>{value}</p>
+      {note ? <p className="headline__note">{note}</p> : null}
+    </div>
+  );
+}
+
+export interface DistributionRow {
+  /** Stable key, and usually the value a filter would send. */
+  id: string;
+  label: string;
+  value: number;
+  /** A quiet second line on the row — "1 failed", "all captured". */
+  note?: ReactNode;
+  tone?: Tone;
+  onOpen?: (() => void) | undefined;
+  /** Present only when the row is a filter that can be on. */
+  pressed?: boolean | undefined;
+  /** Completes "Failed: 3, 6% of 50." for a screen reader. */
+  openLabel?: string;
+}
+
+/**
+ * What one total is made of, one row per part, drawn to scale.
+ *
+ * A deliberate sibling of `Proportion` rather than a replacement. A composition
+ * bar answers "what is this made of" for two or three parts read together; this
+ * answers "which of these is the biggest" for a list read downwards — statuses,
+ * kiosks, reasons — where every row carries its own count, its own share, and
+ * often its own way in to the rows behind it.
+ *
+ * Three properties hold, and they are the whole reason this is a component
+ * rather than a div with a width on it. It is the only thing in the panel that
+ * draws a percentage, and a percentage is the easiest number here to mislead
+ * with.
+ *
+ *  - **The share is a share of something the caller named.** `total` is passed
+ *    in rather than summed from the rows, because the rows are frequently a
+ *    truncated list — the busiest five kiosks out of nine — and a percentage
+ *    computed against whatever happens to be visible would quietly mean
+ *    something else than it says.
+ *  - **Nothing is drawn that is not also written.** Every bar has its count and
+ *    its share beside it in words, so the bars are an accelerant for people who
+ *    can use them and nothing is lost for anyone who cannot.
+ *  - **The scope line belongs to the component.** A percentage with no
+ *    denominator in sight is how one page of rows becomes a statement about the
+ *    business.
+ */
+export function Distribution({
+  rows,
+  total,
+  label,
+  scope
+}: {
+  rows: readonly DistributionRow[];
+  /** What every share below is a share *of*. Named by `scope`, in words. */
+  total: number;
+  /** Names the list for a screen reader. */
+  label: string;
+  /** One line under the list: what was counted, and out of what. */
+  scope?: ReactNode;
+}) {
+  return (
+    <div className="distribution">
+      <ul className="distribution__rows" aria-label={label}>
+        {rows.map((row) => (
+          <DistributionEntry key={row.id} row={row} total={total} />
+        ))}
+      </ul>
+      {scope ? <p className="distribution__scope">{scope}</p> : null}
+    </div>
+  );
+}
+
+function DistributionEntry({ row, total }: { row: DistributionRow; total: number }) {
+  const share = total > 0 ? Math.round((row.value / total) * 100) : null;
+  const tone = row.tone ?? "neutral";
+
+  const body = (
+    <>
+      <span className="distribution__head">
+        <span className="distribution__label">{row.label}</span>
+        <span className="distribution__figures">
+          <strong>{row.value}</strong>
+          {share === null ? null : <span className="distribution__share">{share}%</span>}
+        </span>
+      </span>
+      {/* The bar says nothing the two numbers above it have not already said,
+          so it is hidden rather than announced as an unlabelled rectangle. */}
+      <span className="distribution__track" aria-hidden="true">
+        <span
+          className={`distribution__fill distribution__fill--${tone}`}
+          style={{ width: `${share ?? 0}%` }}
+        />
+      </span>
+      {row.note ? <span className="distribution__note">{row.note}</span> : null}
+    </>
+  );
+
+  const classes = [
+    "distribution__row",
+    row.onOpen ? "is-navigable" : "",
+    row.pressed ? "is-pressed" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (!row.onOpen) {
+    return (
+      <li className={classes}>
+        <span className="distribution__inner">{body}</span>
+      </li>
+    );
+  }
+
+  return (
+    <li className={classes}>
+      <button
+        type="button"
+        className="distribution__inner distribution__open"
+        onClick={row.onOpen}
+        aria-pressed={row.pressed === undefined ? undefined : row.pressed}
+        aria-label={`${row.label}: ${row.value}${
+          share === null ? "" : `, ${share}% of ${total}`
+        }. ${row.openLabel ?? "View details."}`}
+      >
+        {body}
+      </button>
+    </li>
+  );
+}
+
+export function Proportion({
+  segments,
+  label
+}: {
+  segments: readonly { label: string; value: number; tone: Extract<Tone, "warn" | "critical"> }[];
+  /** Names the whole bar for a screen reader. */
+  label: string;
+}) {
+  const total = segments.reduce((sum, segment) => sum + segment.value, 0);
+  if (total === 0) return null;
+
+  return (
+    <div className="proportion">
+      {/* The bar itself carries no text, so it is hidden from assistive
+          technology and the legend below does the announcing. Reading out two
+          unlabelled rectangles adds nothing to "3 missing pages, 1 unclear". */}
+      <div className="proportion__bar" aria-hidden="true">
+        {segments
+          .filter((segment) => segment.value > 0)
+          .map((segment) => (
+            <span
+              key={segment.label}
+              className={`proportion__segment proportion__segment--${segment.tone}`}
+              style={{ flexGrow: segment.value }}
+            />
+          ))}
+      </div>
+      <ul className="proportion__legend" aria-label={label}>
+        {segments.map((segment) => (
+          <li key={segment.label}>
+            <span
+              className={`proportion__key proportion__key--${segment.tone}`}
+              aria-hidden="true"
+            />
+            <strong>{segment.value}</strong> {segment.label}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }

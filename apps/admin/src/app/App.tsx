@@ -2,22 +2,21 @@ import { useCallback, useState } from "react";
 
 import { SessionProvider, useSession } from "../features/auth/SessionProvider.js";
 import {
+  canOpenSection,
   destinationKey,
   NavigationContext,
-  SECTION_CAPABILITY,
   type AdminDestination,
   type AdminSectionId
 } from "../features/navigation.js";
+import { AccountScreen, roleLabel } from "../routes/AccountScreen.js";
 import { AuditPanel } from "../routes/AuditPanel.js";
 import { ChangesPanel } from "../routes/ChangesPanel.js";
 import { ErrorsPanel } from "../routes/ErrorsPanel.js";
 import { KiosksPanel } from "../routes/KiosksPanel.js";
 import { MoneyPanel } from "../routes/MoneyPanel.js";
 import { OverviewScreen } from "../routes/OverviewScreen.js";
-import { PeoplePanel } from "../routes/PeoplePanel.js";
 import { PrintingPanel } from "../routes/PrintingPanel.js";
 import { RetentionPanel } from "../routes/RetentionPanel.js";
-import { SecurityPanel } from "../routes/SecurityKeysPanel.js";
 import { SessionsPanel } from "../routes/SessionsPanel.js";
 import { SignInScreen } from "../routes/SignInScreen.js";
 
@@ -29,6 +28,9 @@ import { SignInScreen } from "../routes/SignInScreen.js";
  * this file draws, and every one of those refusals is covered by test.
  */
 
+/** The three ids that resolve into the account area rather than the rail. */
+const ACCOUNT_SECTIONS = new Set<AdminSectionId>(["people", "security-keys", "account"]);
+
 interface Section {
   id: AdminSectionId;
   label: string;
@@ -38,16 +40,25 @@ interface Section {
 
 const SECTIONS: readonly Section[] = [
   { id: "overview", label: "Overview", render: () => <OverviewScreen /> },
-  { id: "kiosks", label: "Kiosks", render: () => <KiosksPanel /> },
+  {
+    id: "kiosks",
+    label: "Kiosks",
+    render: (destination) => <KiosksPanel initialFilter={destination.kioskFilter} />
+  },
   {
     id: "sessions",
-    label: "Sessions",
+    label: "Print sessions",
     render: (destination) => <SessionsPanel initialState={destination.sessionState} />
   },
   {
     id: "printing",
     label: "Printing",
-    render: (destination) => <PrintingPanel initialStatus={destination.printStatus} />
+    render: (destination) => (
+      <PrintingPanel
+        initialStatus={destination.printStatus}
+        initialUnresolved={destination.printUnresolvedOnly}
+      />
+    )
   },
   {
     id: "money",
@@ -57,16 +68,40 @@ const SECTIONS: readonly Section[] = [
   {
     id: "retention",
     label: "Retention",
-    render: (destination) => (
-      <RetentionPanel initialProblemsOnly={destination.retentionProblemsOnly} />
-    )
+    render: (destination) => <RetentionPanel initialFilter={destination.retentionFilter} />
   },
   { id: "errors", label: "Errors", render: () => <ErrorsPanel /> },
   { id: "audit", label: "Audit", render: () => <AuditPanel /> },
-  { id: "changes", label: "Changes", render: () => <ChangesPanel /> },
-  { id: "people", label: "People", render: () => <PeoplePanel /> },
-  { id: "security-keys", label: "Security", render: () => <SecurityPanel /> }
+  { id: "changes", label: "Pricing", render: () => <ChangesPanel /> },
+  // Reached from the account area rather than the rail. They stay in this list
+  // because they are still real destinations — an overview link or a deep link
+  // resolves to them — but `RAIL_SECTIONS` below is what the rail draws.
+  {
+    id: "people",
+    label: "People",
+    render: () => <AccountScreen initialTab="people" />
+  },
+  {
+    id: "security-keys",
+    label: "Security",
+    render: () => <AccountScreen initialTab="security" />
+  },
+  {
+    id: "account",
+    label: "Account settings",
+    render: (destination) => <AccountScreen initialTab={destination.accountTab} />
+  }
 ];
+
+/**
+ * What the rail draws, which is no longer everything reachable.
+ *
+ * People, Security and the account area are all one place now, and that place
+ * is reached by pressing your own name at the foot of the rail. Listing them
+ * here as well would put the same destination on screen twice and leave the
+ * rail as long as it was, which was the thing worth fixing.
+ */
+const RAIL_SECTIONS = SECTIONS.filter((section) => !ACCOUNT_SECTIONS.has(section.id));
 
 export function App() {
   return (
@@ -88,7 +123,7 @@ function Shell() {
       // A link the operator cannot follow should not move them somewhere they
       // will only be refused. The overview already hides these, so reaching
       // this means the capability changed under them mid-session.
-      if (!canOpen(SECTION_CAPABILITY[target.section])) return;
+      if (!canOpenSection(target.section, canOpen)) return;
       setDestination(target);
     },
     [canOpen]
@@ -97,7 +132,7 @@ function Shell() {
   if (session.status === "loading") {
     return (
       <main className="shell">
-        <p role="status">Checking your session…</p>
+        <p role="status">Checking your sign-in…</p>
       </main>
     );
   }
@@ -110,21 +145,24 @@ function Shell() {
     return <SignInScreen />;
   }
 
-  const visible = SECTIONS.filter((section) => session.can(SECTION_CAPABILITY[section.id]));
-  const current = visible.find((section) => section.id === destination.section) ?? visible[0];
+  const railSections = RAIL_SECTIONS.filter((section) => canOpenSection(section.id, session.can));
+  const reachable = SECTIONS.filter((section) => canOpenSection(section.id, session.can));
+  const current =
+    reachable.find((section) => section.id === destination.section) ?? railSections[0];
+  const inAccount = current ? ACCOUNT_SECTIONS.has(current.id) : false;
 
   return (
     <NavigationContext value={navigate}>
       <div className="shell">
         {/* The rail owns navigation and the signed-in identity together. Who you
-          are is a property of the whole session rather than of the screen you
+          are is a property of the whole sign-in rather than of the screen you
           happen to be on, so repeating it above every panel spent the most
           valuable strip of the page on something that never changes. */}
         <div className="shell__rail">
           <p className="shell__rail-title">Control plane</p>
 
           <nav className="shell__nav" aria-label="Sections">
-            {visible.map((section) => (
+            {railSections.map((section) => (
               <button
                 key={section.id}
                 type="button"
@@ -137,16 +175,33 @@ function Shell() {
             ))}
           </nav>
 
+          {/* Your own name is the door to everything about your account: the
+              sign-in, your keys, and — where the role holds it — the roster of
+              people. It is a real button rather than a tile with a handler, so
+              it is one `Tab` stop and announces where it goes.
+
+              Signing out used to sit directly beneath it and has moved inside,
+              next to the expiry it ends. It is an authentication action, it
+              belongs with the other ones, and a destructive control permanently
+              parked one pixel below a navigation control is a misclick waiting
+              for a tired evening. */}
           <div className="shell__account">
-            <p className="shell__account-name">{session.identity.displayName}</p>
-            <p className="shell__account-role">{roleLabel(session.identity.role)}</p>
             <button
               type="button"
-              className="shell__signout"
-              disabled={session.activity === "signing-out"}
-              onClick={() => void session.signOut()}
+              className={inAccount ? "shell__identity is-active" : "shell__identity"}
+              aria-current={inAccount ? "page" : undefined}
+              onClick={() => setDestination({ section: "account" })}
             >
-              {session.activity === "signing-out" ? "Signing out…" : "Sign out"}
+              <span className="shell__avatar" aria-hidden="true">
+                {initials(session.identity.displayName)}
+              </span>
+              <span className="shell__identity-text">
+                <span className="shell__account-name">{session.identity.displayName}</span>
+                <span className="shell__account-role">{roleLabel(session.identity.role)}</span>
+              </span>
+              <span className="shell__identity-chevron" aria-hidden="true">
+                ›
+              </span>
             </button>
           </div>
         </div>
@@ -167,7 +222,7 @@ function Shell() {
                       disabled={session.activity === "refreshing"}
                       onClick={() => void session.refresh()}
                     >
-                      Retry session check
+                      Retry sign-in check
                     </button>
                   ) : null}
                   <button type="button" onClick={session.clearError}>
@@ -188,17 +243,6 @@ function Shell() {
               <p>Your role has no sections available.</p>
             )}
           </main>
-
-          <footer className="shell__footer">
-            <p>
-              Session ends{" "}
-              <time dateTime={session.identity.session.hardExpiresAt}>
-                {new Date(session.identity.session.hardExpiresAt).toLocaleTimeString()}
-              </time>{" "}
-              at the latest. This panel records observations and acknowledgements; it cannot move
-              money, change a kiosk, or reach document contents.
-            </p>
-          </footer>
         </div>
       </div>
     </NavigationContext>
@@ -206,11 +250,11 @@ function Shell() {
 }
 
 /**
- * The lock screen: the session paused, not ended.
+ * The lock screen: the sign-in paused, not ended.
  *
  * A privileged role reopens with one key touch; the password works for
- * everybody. "Not me" signs the session out properly. Nothing else renders —
- * the session behind this screen still holds a place in whatever the person
+ * everybody. "Not me" signs the account out properly. Nothing else renders —
+ * the sign-in behind this screen still holds a place in whatever the person
  * was doing, and drawing any of it would defeat the lock.
  */
 function LockScreen() {
@@ -230,7 +274,7 @@ function LockScreen() {
 
   return (
     <main className="signin" aria-labelledby="lock-title">
-      <h1 id="lock-title">Session locked</h1>
+      <h1 id="lock-title">Control plane locked</h1>
       <p>
         {locked.displayName} — you have been away for a while. Confirm it is you to continue where
         you left off.
@@ -292,18 +336,15 @@ function LockScreen() {
 }
 
 /**
- * On the rail this is plain text rather than a badge.
+ * Two letters standing in for a face, matching the account area's avatar.
  *
- * The status tones are reserved for "somebody has to do something", and a role
- * is a standing fact, not a task. Tinting it would put a second coloured thing
- * beside the active section and teach the eye to stop trusting the tone.
+ * Kept here rather than imported so the rail does not depend on a route module
+ * for one string operation; the rule is four lines and identical in both.
  */
-function roleLabel(role: string): string {
-  return (
-    {
-      OPERATOR: "Operator",
-      ADMIN: "Admin",
-      TECHNICAL_ADMIN: "Technical Admin"
-    }[role] ?? role
-  );
+function initials(displayName: string): string {
+  const words = displayName.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  const first = words[0]?.[0] ?? "";
+  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? "") : "";
+  return (first + last).toUpperCase();
 }

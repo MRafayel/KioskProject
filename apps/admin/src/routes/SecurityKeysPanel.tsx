@@ -11,7 +11,7 @@ import { AdminApiError, adminApi } from "../features/auth/api.js";
 type Authenticator = AdminAuthenticatorsResponse["items"][number];
 
 /**
- * The Security section: your password, your sessions, your keys. Everything on
+ * The Security section: your password, your sign-ins, your keys. Everything on
  * this page is about the signed-in account and nothing else's.
  */
 export function SecurityPanel() {
@@ -346,7 +346,7 @@ export function SecurityKeysPanel() {
  *
  * The address and browser strings are context for "is this mine", nothing
  * more: the page never claims they identify a device, and neither does the
- * server. The one session that cannot be revoked from here is the one being
+ * server. The one sign-in that cannot be revoked from here is the one being
  * used — that is what "Sign out" is for.
  */
 function OwnSessionsPanel() {
@@ -364,7 +364,7 @@ function OwnSessionsPanel() {
       setListing(await adminApi.ownSessions());
     } catch (error) {
       if (handleAuthenticationError(error)) return;
-      setLoadError("Could not load your sessions.");
+      setLoadError("Could not load where you are signed in.");
     }
   }, [handleAuthenticationError]);
 
@@ -430,7 +430,10 @@ function OwnSessionsPanel() {
                   type="button"
                   disabled={busy}
                   onClick={() =>
-                    void act(() => adminApi.revokeOwnSession(item.sessionId), "Session signed out.")
+                    void act(
+                      () => adminApi.revokeOwnSession(item.sessionId),
+                      "Signed out from that browser."
+                    )
                   }
                 >
                   Sign out
@@ -440,7 +443,7 @@ function OwnSessionsPanel() {
           ))}
         </ul>
       ) : (
-        <p role="status">Loading your sessions…</p>
+        <p role="status">Loading where you are signed in…</p>
       )}
 
       {others.length > 0 ? (
@@ -473,7 +476,7 @@ function OwnSessionsPanel() {
 
 /**
  * Changing your own password. The server demands the current password and a
- * fresh strong reauthentication, and ends every other session when it
+ * fresh strong reauthentication, and ends every other sign-in when it
  * succeeds — so the panel says all three before the person starts.
  */
 function PasswordPanel() {
@@ -520,7 +523,9 @@ function PasswordPanel() {
           kind: "success",
           text:
             result.revokedSessions > 0
-              ? `Password changed. ${result.revokedSessions} other session(s) were signed out.`
+              ? `Password changed. Signed out ${result.revokedSessions} other sign-in${
+                  result.revokedSessions === 1 ? "" : "s"
+                }.`
               : "Password changed."
         });
       } catch (error) {
@@ -541,7 +546,7 @@ function PasswordPanel() {
     <section className="panel" aria-labelledby="password-title">
       <h2 id="password-title">Your password</h2>
       <p className="panel__hint">
-        Changing it asks you to confirm it is you, and signs out every other session.
+        Changing it asks you to confirm it is you, and signs you out everywhere else.
       </p>
 
       <form className="panel__form" onSubmit={submit}>

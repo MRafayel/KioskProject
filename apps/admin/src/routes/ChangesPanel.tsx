@@ -3,7 +3,14 @@ import { useCallback, useState } from "react";
 import type { ChangePreview, PricingPublishPayload } from "@printing-kiosk/admin-access";
 
 import { observabilityApi } from "../features/observability/api.js";
-import { Empty, Money, StateBadge, Table, When } from "../features/observability/components.js";
+import {
+  Empty,
+  Money,
+  RowWhen,
+  StateBadge,
+  Table,
+  When
+} from "../features/observability/components.js";
 import { useAdminAction } from "../features/observability/useAdminAction.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
 import { useSession } from "../features/auth/SessionProvider.js";
@@ -13,7 +20,7 @@ import { useSession } from "../features/auth/SessionProvider.js";
  *
  * Deliberately plain: the panels in this build are temporary, so this one does
  * the minimum that lets an Admin operate and verify the workflow — see the
- * tariff in force, price a change out, publish it, and read what was published
+ * current pricing, preview a change, publish it, and read what was published
  * before.
  *
  * Two behaviours here are load-bearing rather than cosmetic, and should survive
@@ -42,9 +49,9 @@ interface FormState {
 }
 
 const NUMERIC_FIELDS = [
-  ["unitAmountMinor", "Per printed side"],
-  ["serviceFeeMinor", "Service fee"],
-  ["minimumAmountMinor", "Minimum charge"],
+  ["unitAmountMinor", "Per printed side (minor units)"],
+  ["serviceFeeMinor", "Service fee (minor units)"],
+  ["minimumAmountMinor", "Minimum charge (minor units)"],
   ["taxBasisPoints", "Tax (basis points)"],
   ["duplexAdjustmentBasisPoints", "Duplex adjustment (basis points)"]
 ] as const;
@@ -108,7 +115,7 @@ export function ChangesPanel() {
     <>
       <section className="panel">
         <header className="panel__header">
-          <h2>Prices</h2>
+          <h2>Current pricing</h2>
           <button type="button" onClick={state.reload} disabled={state.loading}>
             Refresh
           </button>
@@ -116,34 +123,35 @@ export function ChangesPanel() {
 
         {current ? (
           <p className="panel__hint">
-            In force: <strong>{current.version}</strong> —{" "}
+            Current version <strong>{current.version}</strong>:{" "}
             <Money
               minor={current.unitAmountMinor}
               currency={current.currency}
               exponent={current.currencyExponent}
             />{" "}
-            per side, fee{" "}
+            per printed side,{" "}
             <Money
               minor={current.serviceFeeMinor}
               currency={current.currency}
               exponent={current.currencyExponent}
-            />
-            , minimum{" "}
+            />{" "}
+            service fee,{" "}
             <Money
               minor={current.minimumAmountMinor}
               currency={current.currency}
               exponent={current.currencyExponent}
-            />
-            , tax {current.taxBasisPoints} bp, duplex {current.duplexAdjustmentBasisPoints} bp.
-            Published <When value={current.publishedAt} />.
+            />{" "}
+            minimum charge, tax {current.taxBasisPoints} basis points, duplex adjustment{" "}
+            {current.duplexAdjustmentBasisPoints} basis points. Published{" "}
+            <When value={current.publishedAt} />.
           </p>
         ) : (
-          <Empty>No tariff is published, so there is nothing to replace.</Empty>
+          <Empty>No pricing has been published, so there is nothing to replace.</Empty>
         )}
 
         {published ? (
           <p className="panel__status" role="status">
-            Published {published}. Every kiosk is quoting it now.
+            Published pricing version {published}. Every kiosk is using it now.
           </p>
         ) : null}
 
@@ -156,9 +164,9 @@ export function ChangesPanel() {
             }}
           >
             <p className="panel__hint">
-              Publishing takes effect at every kiosk the moment it commits, and the tariff it
-              replaces is archived in the same transaction. Price the change out first: what you
-              publish is what you were shown.
+              Publishing updates every kiosk immediately and archives the current version. Enter
+              every proposed value, including values that are not changing, then preview the prices
+              before publishing.
             </p>
 
             <label>
@@ -170,20 +178,24 @@ export function ChangesPanel() {
               />
             </label>
 
-            {NUMERIC_FIELDS.map(([field, label]) => (
-              <label key={field}>
-                {label}
-                <input
-                  inputMode="numeric"
-                  value={form[field]}
-                  onChange={(event) => edit(field, event.target.value)}
-                  placeholder={String(current[field])}
-                />
-              </label>
-            ))}
+            {/* Five integers that are read together and compared against what
+                is in force, so they are laid out as a grid rather than as five
+                stacked lines a person has to scroll between. */}
+            <div className="change-form__numbers">
+              {NUMERIC_FIELDS.map(([field, label]) => (
+                <label key={field}>
+                  {label}
+                  <input
+                    inputMode="numeric"
+                    value={form[field]}
+                    onChange={(event) => edit(field, event.target.value)}
+                  />
+                </label>
+              ))}
+            </div>
 
             <button type="submit" disabled={!payload || previewAction.state.running}>
-              {previewAction.state.running ? "Pricing…" : "Price this out"}
+              {previewAction.state.running ? "Previewing…" : "Preview prices"}
             </button>
             {previewAction.state.error ? (
               <p className="panel__status" role="alert">
@@ -194,9 +206,9 @@ export function ChangesPanel() {
         ) : null}
 
         {preview ? (
-          <>
+          <div className="reveal">
             <Table
-              caption="What these prices would charge"
+              caption="Preview for common print jobs"
               columns={["Job", "Now", "After", "Change"]}
             >
               {preview.rows.map((row) => (
@@ -231,7 +243,7 @@ export function ChangesPanel() {
               ))}
             </Table>
 
-            <label>
+            <label className="change-form__reason">
               Why these prices are changing
               <textarea
                 rows={2}
@@ -242,6 +254,7 @@ export function ChangesPanel() {
 
             <button
               type="button"
+              className="button-primary"
               disabled={!payload || reason.trim().length < 8 || publishAction.state.running}
               onClick={() => {
                 if (payload) void publishAction.run({ payload, preview });
@@ -254,29 +267,40 @@ export function ChangesPanel() {
                 {publishAction.state.error}
               </p>
             ) : null}
-          </>
+          </div>
         ) : null}
       </section>
 
       <section className="panel">
         <header className="panel__header">
-          <h2>What has been published</h2>
+          <h2>Pricing history</h2>
         </header>
 
         {changes.length === 0 ? (
-          <Empty>Nothing has been published from here yet.</Empty>
+          <Empty>No pricing changes have been published here yet.</Empty>
         ) : (
-          <Table columns={["Version", "Replaced", "Published", "By", "Why", ""]}>
+          <Table
+            className="data-table"
+            pane
+            paneClassName="data-pane"
+            columns={["Version", "Replaced", "Published", "By", "Why", ""]}
+          >
             {changes.map((change) => (
               <tr key={change.id}>
-                <td>{change.resultRef}</td>
-                <td>{change.replacedRef ?? "—"}</td>
-                <td>
-                  <When value={change.publishedAt} />
+                <td data-label="Version">
+                  <strong>{change.resultRef}</strong>
                 </td>
-                <td>{change.publishedByDisplayName ?? change.publishedByAdminUserId}</td>
-                <td>{change.reason}</td>
-                <td>{change.inForce ? <StateBadge value="In force" tone="good" /> : null}</td>
+                <td data-label="Replaced">{change.replacedRef ?? "—"}</td>
+                <td data-label="Published">
+                  <RowWhen value={change.publishedAt} />
+                </td>
+                <td data-label="By">
+                  {change.publishedByDisplayName ?? change.publishedByAdminUserId}
+                </td>
+                <td data-label="Why">{change.reason}</td>
+                <td data-label="">
+                  {change.inForce ? <StateBadge value="Current" tone="good" /> : null}
+                </td>
               </tr>
             ))}
           </Table>
@@ -286,7 +310,7 @@ export function ChangesPanel() {
   );
 }
 
-/** The form as numbers, or null while it is not yet a complete tariff. */
+/** The form as numbers, or null while it is not yet a complete pricing version. */
 function toPayload(form: FormState): PricingPublishPayload | null {
   if (form.version.trim().length < 3) return null;
   if (NUMERIC_FIELDS.some(([field]) => form[field].trim() === "")) return null;
