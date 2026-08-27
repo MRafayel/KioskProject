@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PaymentSnapshot, PrintJobSnapshot } from "@printing-kiosk/contracts";
@@ -22,6 +23,7 @@ import {
   readKioskPayment,
   requestSimulatedOutcome
 } from "../features/session/paymentService.js";
+import { applyPrintedSheets } from "../features/session/paper.js";
 import {
   SUCCESS_MOTION_MS,
   SUCCESS_POST_MOTION_HOLD_MS,
@@ -180,6 +182,23 @@ export function PrintingScreen() {
   // Presentation only. It reads the job this screen already polls and cannot
   // reach the device, so it can neither delay a print nor change its outcome.
   const stage = usePrintStage(observedPrintJob);
+
+  // The sheets this job produced have already left the tray, and the control
+  // plane already took them out of the ledger when it confirmed the completion.
+  // Taking them out of the screen's copy here is what stops the next customer
+  // being offered a count the kiosk stopped having twenty seconds ago.
+  //
+  // Once per job. This effect re-runs on every poll and again if the screen
+  // resumes a job it had already seen settle, and a deduction applied twice
+  // would understate the paper until the next poll corrected it.
+  const queryClient = useQueryClient();
+  const deductedPrintJobId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!observedPrintJob || !observedPrintJobSuccessful) return;
+    if (deductedPrintJobId.current === observedPrintJob.id) return;
+    deductedPrintJobId.current = observedPrintJob.id;
+    void applyPrintedSheets(queryClient, observedPrintJob.sheetsProduced ?? 0);
+  }, [observedPrintJob, observedPrintJobSuccessful, queryClient]);
 
   useEffect(() => {
     if (!showSuccessMotion) return;

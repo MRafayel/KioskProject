@@ -1,3 +1,6 @@
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+
 import { getKioskPaperResponseSchema, type KioskPaperEstimate } from "@printing-kiosk/contracts";
 
 /**
@@ -82,6 +85,74 @@ export function kioskPaperQueryOptions() {
     refetchInterval: PAPER_POLL_MS,
     initialData: UNKNOWN_PAPER
   };
+}
+
+/**
+ * Take a finished print out of the estimate without waiting for the next poll.
+ *
+ * The control plane already deducted these sheets, in the same transaction that
+ * moved the job to a confirmed completion. This is not a second opinion about
+ * that: it is the same subtraction, applied locally so the screen stops showing
+ * a count the kiosk stopped having up to twenty seconds ago. The next poll is
+ * still the reconciliation, and it overwrites whatever this left behind.
+ *
+ * Applied only to a *known* estimate. A kiosk nobody tracks records the
+ * completion as history with a zero delta and stays untracked, so inventing a
+ * number here would be inventing the tracking too.
+ *
+ * A read that was already in flight was sent before the deduction was
+ * committed, so landing it afterwards would put the old count back. Cancelling
+ * first is what keeps the event-driven update and the poll from fighting; if
+ * one slips through anyway the poll after it is correct.
+ */
+export async function applyPrintedSheets(
+  queryClient: QueryClient,
+  sheetsProduced: number
+): Promise<void> {
+  if (!Number.isFinite(sheetsProduced) || sheetsProduced <= 0) return;
+  await queryClient.cancelQueries({ queryKey: KIOSK_PAPER_QUERY_KEY });
+  queryClient.setQueryData<KioskPaperEstimate>(KIOSK_PAPER_QUERY_KEY, (current) => {
+    if (!current || current.estimatedSheets === null) return current;
+    // The same floor the ledger keeps: a tray cannot hold fewer than no sheets.
+    return { estimatedSheets: Math.max(0, current.estimatedSheets - sheetsProduced) };
+  });
+}
+
+/**
+ * One early read after a kiosk that had closed opens again.
+ *
+ * A kiosk goes unavailable when its printer runs out. What happens next is a
+ * person putting paper in it and then typing the new count into the admin
+ * panel, and those two are minutes apart from the terminal's point of view: the
+ * printer recovers first, the count arrives second. A screen that only asked
+ * again on its ordinary interval would spend that interval offering the count
+ * from before the refill.
+ *
+ * So the reopening schedules exactly one extra read, and then nothing. The
+ * interval is unchanged, no state polls faster than any other, and a kiosk that
+ * closes and reopens twenty times in an hour costs twenty reads.
+ */
+export const PAPER_RELOAD_REFRESH_MS = 7_000;
+
+export function usePaperReloadRefresh(available: boolean): void {
+  const queryClient = useQueryClient();
+  // Seeded from the first answer, so mounting is not itself a reopening.
+  const wasAvailable = useRef(available);
+
+  useEffect(() => {
+    const reopened = available && !wasAvailable.current;
+    wasAvailable.current = available;
+    if (!reopened) return;
+
+    const timer = window.setTimeout(() => {
+      // Prefetch rather than refetch: this runs on the welcome screen, where
+      // nothing is subscribed to the estimate yet, and the point is to have the
+      // new count already in hand when the next customer reaches the upload
+      // screen. It swallows its own failures — the ordinary poll follows.
+      void queryClient.prefetchQuery({ ...kioskPaperQueryOptions(), staleTime: 0 });
+    }, PAPER_RELOAD_REFRESH_MS);
+    return () => window.clearTimeout(timer);
+  }, [available, queryClient]);
 }
 
 /**

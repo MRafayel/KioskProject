@@ -9,6 +9,7 @@ import {
   AVAILABILITY_POLL_MS,
   readKioskAvailability
 } from "../features/session/availability.js";
+import { usePaperReloadRefresh } from "../features/session/paper.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
 import { createKioskSession, SessionRequestError } from "../features/session/sessionService.js";
 
@@ -60,6 +61,11 @@ export function WelcomeScreen() {
     placeholderData: ASSUME_AVAILABLE,
     initialData: ASSUME_AVAILABLE
   });
+  // A kiosk that closed for an empty tray reopens once somebody refills it, and
+  // the count that person types into the admin panel arrives a moment after the
+  // printer itself recovers. One early read catches it, so the first customer
+  // through the door is not offered the count from before the refill.
+  usePaperReloadRefresh(availability.data.available);
   const startError = describeStartFailure(createSession.error, messages.welcome);
   // Only a definite negative closes the kiosk. WARNING-level conditions — toner
   // running down, a tray that will need paper — never reach this: the gate

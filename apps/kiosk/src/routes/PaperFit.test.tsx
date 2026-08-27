@@ -6,6 +6,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
+import { StrictMode } from "react";
+
+import type { PrintJobSnapshot } from "@printing-kiosk/contracts";
+
 import { App } from "../app/App.js";
 import { LanguageProvider } from "../features/i18n/LanguageProvider.js";
 import { messages as catalogues } from "../features/i18n/messages.js";
@@ -217,11 +221,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderKiosk(path: string, state: PrototypeState) {
+function renderKiosk(
+  path: string,
+  state: PrototypeState,
+  seedPaperSheets?: number,
+  strict = false
+) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } }
   });
-  render(
+  if (seedPaperSheets !== undefined) {
+    queryClient.setQueryData(KIOSK_PAPER_QUERY_KEY, { estimatedSheets: seedPaperSheets });
+  }
+  const tree = (
     <LanguageProvider>
       <QueryClientProvider client={queryClient}>
         <PrototypeSessionProvider initialState={state}>
@@ -230,12 +242,16 @@ function renderKiosk(path: string, state: PrototypeState) {
       </QueryClientProvider>
     </LanguageProvider>
   );
+  // `main.tsx` mounts the terminal inside StrictMode, so every effect here runs,
+  // cleans up and runs again in development. Anything that may only happen once
+  // has to survive that, and the only way to check it is to reproduce it.
+  render(strict ? <StrictMode>{tree}</StrictMode> : tree);
   return queryClient;
 }
 
-async function openInEnglish(path: string, state: PrototypeState) {
+async function openInEnglish(path: string, state: PrototypeState, seedPaperSheets?: number) {
   const user = userEvent.setup();
-  const queryClient = renderKiosk(path, state);
+  const queryClient = renderKiosk(path, state, seedPaperSheets);
   await user.click(screen.getByRole("button", { name: "English" }));
   return { user, queryClient };
 }
@@ -410,5 +426,104 @@ describe("the estimate is checked again on the way to the checkout", () => {
     expect(payButton()).toBeDisabled();
     expect(screen.getByText(copy.configure.paperShortHelp)).toBeVisible();
     expect(screen.queryByRole("heading", { name: copy.checkout.title })).toBeNull();
+  });
+});
+
+describe("a finished print leaves the estimate immediately", () => {
+  const PRINTED_SHEETS = 6;
+
+  const settledPrintJob: PrintJobSnapshot = {
+    id: "01900000-0000-7000-8000-0000000000cc",
+    sessionId: SESSION.id,
+    quoteId: "01900000-0000-7000-8000-0000000000aa",
+    paymentId: "01900000-0000-7000-8000-0000000000bb",
+    settingsRevision: 1,
+    status: "COMPLETED",
+    resultConfidence: "CONFIRMED",
+    failureCode: null,
+    warningCode: null,
+    copies: 1,
+    printedSides: 8,
+    physicalSheets: PRINTED_SHEETS,
+    sheetsProduced: PRINTED_SHEETS,
+    createdAt: "2030-01-01T00:01:00.000Z",
+    deadlineAt: "2030-01-01T00:06:00.000Z",
+    completedAt: "2030-01-01T00:02:00.000Z"
+  };
+
+  function printedState(printJob: PrintJobSnapshot): PrototypeState {
+    return {
+      ...configuringState,
+      pricing: { status: "READY", settings: settingsBody(), quote: quoteBody(), errorCode: null },
+      payment: {
+        payment: {
+          id: settledPrintJob.paymentId,
+          sessionId: SESSION.id,
+          quoteId: settledPrintJob.quoteId,
+          provider: "MOCK",
+          status: "CAPTURED",
+          appliedToSession: true,
+          amountMinor: 60_000,
+          currency: "AMD",
+          currencyExponent: 2,
+          failureCode: null,
+          createdAt: "2030-01-01T00:00:00.000Z",
+          expiresAt: "2030-01-01T00:03:00.000Z",
+          capturedAt: "2030-01-01T00:01:00.000Z"
+        },
+        attempt: 1,
+        errorCode: null
+      },
+      print: { job: printJob, errorCode: null, failureDisposition: null }
+    };
+  }
+
+  function heldSheets(queryClient: QueryClient): number | null | undefined {
+    return queryClient.getQueryData<{ estimatedSheets: number | null }>(KIOSK_PAPER_QUERY_KEY)
+      ?.estimatedSheets;
+  }
+
+  it("subtracts the sheets the device produced without waiting for a poll", async () => {
+    // The control plane deducted these when it confirmed the completion. The
+    // screen must not spend an interval offering paper the kiosk no longer has.
+    const { queryClient } = await openInEnglish("/printing", printedState(settledPrintJob), 40);
+
+    await waitFor(() => expect(heldSheets(queryClient)).toBe(40 - PRINTED_SHEETS));
+  });
+
+  it("applies the deduction once even though every effect here runs twice", async () => {
+    // The terminal mounts inside StrictMode, so this effect really does run,
+    // clean up and run again on every screen in development. Applying the
+    // deduction twice would understate the paper by a whole job until the next
+    // poll corrected it, which is exactly the wrong direction to be wrong in.
+    const queryClient = renderKiosk("/printing", printedState(settledPrintJob), 40, true);
+
+    await waitFor(() => expect(heldSheets(queryClient)).toBe(40 - PRINTED_SHEETS));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(heldSheets(queryClient)).toBe(40 - PRINTED_SHEETS);
+  });
+
+  it("takes nothing out for a print the device could not confirm", async () => {
+    // An unconfirmed job goes to recovery and its sheets are settled by an
+    // operator. Guessing at them here would be guessing at the tray.
+    const { queryClient } = await openInEnglish(
+      "/printing",
+      printedState({
+        ...settledPrintJob,
+        status: "RECOVERY_REQUIRED",
+        resultConfidence: "UNCONFIRMED",
+        sheetsProduced: null
+      }),
+      40
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(heldSheets(queryClient)).toBe(40);
   });
 });
