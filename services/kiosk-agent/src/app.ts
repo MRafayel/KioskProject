@@ -107,6 +107,25 @@ export async function buildAgent(
     )
   );
 
+  /**
+   * How much paper the touchscreen may tell a customer about.
+   *
+   * Read while somebody is uploading and configuring, so the screen can say
+   * what can be printed now and refuse a job that plainly will not fit. Like
+   * availability, the answer comes from the control plane rather than from
+   * anything this process knows: the estimate is a ledger the admin surface
+   * writes, and an agent forming its own opinion of it would be a second one.
+   */
+  app.get("/v1/paper", (_request, reply) =>
+    forwardApiResponse(
+      upstreamFetch,
+      environment,
+      `/v1/kiosks/${encodeURIComponent(environment.DEV_KIOSK_ID)}/paper`,
+      { method: "GET", headers: upstreamHeaders(environment) },
+      reply
+    )
+  );
+
   app.post("/v1/sessions", async (request, reply) => {
     const idempotencyKey = singleHeader(request.headers["idempotency-key"]);
     if (!idempotencyKey) {

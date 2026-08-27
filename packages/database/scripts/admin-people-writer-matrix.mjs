@@ -164,6 +164,8 @@ export const READABLE_TABLES = Object.freeze({
  * the absence explicitly means a future migration cannot quietly hand it one.
  */
 export const FORBIDDEN_TABLES = Object.freeze({
+  kiosk_paper_events:
+    "Paper inventory is an operational ledger, not part of account administration.",
   admin_webauthn_challenges:
     "In-flight ceremony state. Managing a person does not mean standing in the middle of their WebAuthn ceremony.",
   admin_break_glass_credentials:

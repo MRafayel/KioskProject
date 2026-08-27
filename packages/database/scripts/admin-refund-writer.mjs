@@ -11,6 +11,7 @@
  * Usage:
  *
  *   ADMIN_REFUND_DATABASE_PASSWORD=... node scripts/admin-refund-writer.mjs provision
+ *   node scripts/admin-refund-writer.mjs provision # reuses ADMIN_REFUND_DATABASE_URL
  *   node scripts/admin-refund-writer.mjs verify
  *   node scripts/admin-refund-writer.mjs disable
  *

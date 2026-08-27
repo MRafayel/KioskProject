@@ -2,12 +2,45 @@ import { describe, expect, it } from "vitest";
 
 import { RECOVERY_OUTCOMES } from "./observability.js";
 import {
+  addKioskPaperBodySchema,
   acknowledgeIncidentBodySchema,
+  correctKioskPaperBodySchema,
   incidentKey,
   resolveRecoveryBodySchema,
   resolveRecoveryResponseSchema,
   suggestsRefund
 } from "./operations.js";
+
+describe("kiosk paper updates", () => {
+  const requestKey = "3f4a2d16-6f0f-4f4a-9c94-4a06c8f1b900";
+
+  it("accepts a bounded refill and requires a reasoned correction", () => {
+    expect(addKioskPaperBodySchema.parse({ sheetsAdded: 500, requestKey })).toEqual({
+      sheetsAdded: 500,
+      requestKey
+    });
+    expect(
+      correctKioskPaperBodySchema.parse({
+        estimatedSheets: 240,
+        reason: "Counted the tray",
+        requestKey
+      }).estimatedSheets
+    ).toBe(240);
+    expect(
+      correctKioskPaperBodySchema.safeParse({
+        estimatedSheets: 240,
+        reason: "",
+        requestKey
+      }).success
+    ).toBe(false);
+  });
+
+  it("refuses negative, fractional and unbounded sheet counts", () => {
+    for (const sheetsAdded of [-1, 0, 1.5, 100_001]) {
+      expect(addKioskPaperBodySchema.safeParse({ sheetsAdded, requestKey }).success).toBe(false);
+    }
+  });
+});
 
 describe("recovery outcomes", () => {
   it("suggests a refund for exactly the outcomes that mean pages are missing", () => {

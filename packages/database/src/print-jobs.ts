@@ -167,6 +167,84 @@ export interface PrintJobSettlementOutcome {
   sessionVersion: number | null;
 }
 
+export interface PaperConsumptionOutcome {
+  consumedSheets: number;
+  estimateDeltaSheets: number;
+  estimateAffected: boolean;
+  estimatedSheets: number | null;
+}
+
+/**
+ * Deduct confirmed physical output from the kiosk's software paper estimate.
+ *
+ * The caller has already moved the print job to a confirmed COMPLETED state in
+ * this transaction. The database trigger verifies that fact again. Tracking is
+ * considered available only after a person records a refill or correction;
+ * completions before that point are retained as zero-delta history rather than
+ * inventing a negative starting balance.
+ */
+export async function recordConfirmedPaperConsumption(
+  transaction: Prisma.TransactionClient,
+  input: {
+    id: string;
+    kioskId: string;
+    printJobId: string;
+    sheetsProduced: number;
+    actorId: string;
+    now: Date;
+  }
+): Promise<PaperConsumptionOutcome> {
+  const initialized = await transaction.kioskPaperEvent.findFirst({
+    where: { kioskId: input.kioskId, type: { in: ["REFILL", "CORRECTION"] } },
+    select: { id: true }
+  });
+
+  const aggregate = initialized
+    ? await transaction.kioskPaperEvent.aggregate({
+        where: { kioskId: input.kioskId },
+        _sum: { deltaSheets: true }
+      })
+    : null;
+  const current = initialized ? Math.max(0, aggregate?._sum.deltaSheets ?? 0) : null;
+  // The estimate has a physical floor. If the recorded count has drifted below
+  // reality, preserve the full consumed quantity but never make remaining paper
+  // negative; the next refill then adds what staff actually loaded.
+  const delta = current === null ? 0 : -Math.min(current, input.sheetsProduced);
+
+  const created = await transaction.kioskPaperEvent.create({
+    data: {
+      id: input.id,
+      kioskId: input.kioskId,
+      type: "PRINT_DEDUCTION",
+      quantitySheets: input.sheetsProduced,
+      deltaSheets: delta,
+      estimateAffected: current !== null,
+      printJobId: input.printJobId,
+      actorType: "KIOSK_AGENT",
+      actorId: input.actorId,
+      createdAt: input.now
+    },
+    select: { deltaSheets: true, estimateAffected: true }
+  });
+
+  const remaining = created.estimateAffected
+    ? await transaction.kioskPaperEvent.aggregate({
+        where: { kioskId: input.kioskId },
+        _sum: { deltaSheets: true }
+      })
+    : null;
+
+  return {
+    consumedSheets: input.sheetsProduced,
+    // The insert trigger derives these values under a per-kiosk transaction
+    // lock. The values proposed above are useful in ordinary execution, but
+    // the returned row is authoritative when another paper event raced it.
+    estimateDeltaSheets: created.deltaSheets,
+    estimateAffected: created.estimateAffected,
+    estimatedSheets: created.estimateAffected ? Math.max(0, remaining?._sum.deltaSheets ?? 0) : null
+  };
+}
+
 /**
  * Write one settled print outcome: the job, the session, the events the kiosk
  * will see, the compensation if money bought nothing, and the ledger entry that
@@ -243,6 +321,21 @@ export async function applyPrintJobSettlement(
     ...(input.deviceDiagnostics === undefined ? {} : { deviceDetail: input.deviceDiagnostics })
   });
 
+  const paperConsumption =
+    input.status === "COMPLETED" &&
+    input.resultConfidence === "CONFIRMED" &&
+    input.sheetsProduced !== null &&
+    input.sheetsProduced > 0
+      ? await recordConfirmedPaperConsumption(transaction, {
+          id: input.newId(),
+          kioskId: job.kioskId,
+          printJobId: job.id,
+          sheetsProduced: input.sheetsProduced,
+          actorId: input.actorId,
+          now: input.now
+        })
+      : null;
+
   const session = await transaction.printSession.findUnique({ where: { id: job.sessionId } });
   await transaction.auditEvent.create({
     data: {
@@ -258,6 +351,13 @@ export async function applyPrintJobSettlement(
       metadata: {
         printJobId: job.id,
         resultConfidence: input.resultConfidence,
+        ...(paperConsumption
+          ? {
+              paperSheetsConsumed: paperConsumption.consumedSheets,
+              paperEstimateDelta: paperConsumption.estimateDeltaSheets,
+              paperEstimateAffected: paperConsumption.estimateAffected
+            }
+          : {}),
         ...(input.failureCode ? { failureCode: input.failureCode } : {}),
         ...(refundId ? { refundId } : {})
       }

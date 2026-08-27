@@ -67,6 +67,8 @@ export const ADMIN_CAPABILITIES = [
   "kiosk.read",
   "kiosk.liveness.read",
   "kiosk.maintenance_mode",
+  /** Append a refill or reasoned correction to a kiosk's paper estimate. */
+  "kiosk.paper.manage",
 
   "session.read",
   "session.timeline.read",
@@ -202,6 +204,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "dashboard.read",
     "kiosk.read",
     "kiosk.liveness.read",
+    "kiosk.paper.manage",
     "session.read",
     "session.timeline.read",
     "document.metadata.read",
@@ -232,6 +235,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "kiosk.read",
     "kiosk.liveness.read",
     "kiosk.maintenance_mode",
+    "kiosk.paper.manage",
     "session.read",
     "session.timeline.read",
     "document.metadata.read",
@@ -312,6 +316,7 @@ const ROLE_CAPABILITIES: Readonly<Record<AdminRole, readonly AdminCapability[]>>
     "kiosk.read",
     "kiosk.liveness.read",
     "kiosk.maintenance_mode",
+    "kiosk.paper.manage",
     "session.read",
     "session.timeline.read",
     "document.metadata.read",
@@ -386,6 +391,10 @@ const CAPABILITY_RISK: Readonly<Record<AdminCapability, ActionRisk>> = {
   "kiosk.read": "R0",
   "kiosk.liveness.read": "R0",
   "kiosk.maintenance_mode": "R2",
+  // Changes only a software estimate, is append-only, and is routine floor
+  // work. Requiring a security-key ceremony while holding a ream would make
+  // the accurate entry less likely without protecting physical stock.
+  "kiosk.paper.manage": "R1",
 
   "session.read": "R0",
   "session.timeline.read": "R0",

@@ -151,7 +151,7 @@ const ADMIN_WRITE_CONNECTION_OPTIONS = [
  * run in the same process.
  *
  * In production this points at `printing_kiosk_admin_writer`, which holds
- * INSERT on two tables and no UPDATE or DELETE anywhere. That is what makes
+ * INSERT on a short allow-list and no UPDATE or DELETE anywhere. That is what makes
  * "an Operator cannot move money" and "nobody can rewrite what a device
  * reported" properties of the database rather than of this repository.
  */
@@ -187,13 +187,16 @@ const FORBIDDEN_ADMIN_WRITE_PRIVILEGES: readonly (readonly [string, string])[] =
   ["public.audit_events", "UPDATE"],
   ["public.audit_events", "DELETE"],
   ["public.print_job_recovery_resolutions", "UPDATE"],
-  ["public.print_job_recovery_resolutions", "DELETE"]
+  ["public.print_job_recovery_resolutions", "DELETE"],
+  ["public.kiosk_paper_events", "UPDATE"],
+  ["public.kiosk_paper_events", "DELETE"]
 ];
 
-/** The two grants without which no admin action can complete. */
+/** The core grants without which admin actions cannot complete. */
 const REQUIRED_ADMIN_WRITE_PRIVILEGES: readonly (readonly [string, string])[] = [
   ["public.print_job_recovery_resolutions", "INSERT"],
-  ["public.audit_events", "INSERT"]
+  ["public.audit_events", "INSERT"],
+  ["public.kiosk_paper_events", "INSERT"]
 ];
 
 /**
@@ -228,7 +231,8 @@ export async function assertAdminWriteClientIsAppendOnly(client: PrismaClient): 
     throw new Error(
       "The admin write connection does not match the control plane's privilege policy. " +
         `Refusing to start: ${violations.join("; ")}. ` +
-        "Check ADMIN_WRITE_DATABASE_URL and rerun `pnpm db:admin-writer verify`."
+        "Check ADMIN_WRITE_DATABASE_URL, run `pnpm db:admin-writer provision`, then " +
+        "`pnpm db:admin-writer verify`."
     );
   }
 }
@@ -618,6 +622,8 @@ export type {
   PrintJobLedgerType,
   PrintJobSettlementOutcome
 } from "./print-jobs.js";
+export { readKioskPaperEstimate } from "./kiosk-paper.js";
+export type { KioskPaperEstimateReader } from "./kiosk-paper.js";
 export {
   MAX_UPLOAD_ARTIFACT_SETTLE_MILLISECONDS,
   processingArtifactCleanupDueAt,

@@ -53,6 +53,10 @@ export interface MessageCatalog {
     sessionLabel: string;
     qrTitle: string;
     waitingForPhone: string;
+    /** How much this kiosk can print now, in sheets, under the QR code. */
+    paperAvailable: (sheets: number) => string;
+    /** Shown instead when nobody is tracking this kiosk's paper. Never "0". */
+    paperUnavailable: string;
     uploadedDocument: string;
     uploadedDocuments: string;
     documentsReady: (count: number) => string;
@@ -151,6 +155,13 @@ export interface MessageCatalog {
     priceUnavailable: string;
     priceUnavailableHelp: string;
     priceRetry: string;
+    /** The dialog shown when the job asks for more sheets than the kiosk has. */
+    paperShortTitle: string;
+    paperShortBody: (availableSheets: number, requiredSheets: number) => string;
+    paperShortAdvice: string;
+    paperShortDismiss: string;
+    /** The same refusal, beside the button, for as long as it stands. */
+    paperShortHelp: string;
     reviewAndPay: string;
     backToUpload: string;
   };
@@ -337,6 +348,11 @@ const english: MessageCatalog = {
     sessionLabel: "Upload session",
     qrTitle: "QR code for secure phone upload",
     waitingForPhone: "Waiting for your phone",
+    paperAvailable: (sheets) =>
+      sheets === 1
+        ? "This printer can currently print 1 sheet"
+        : `This printer can currently print ${sheets} sheets`,
+    paperUnavailable: "Paper availability unavailable",
     uploadedDocument: "Uploaded document",
     uploadedDocuments: "Uploaded documents",
     documentsReady: (count) => (count === 1 ? "1 document ready" : `${count} documents ready`),
@@ -445,6 +461,12 @@ const english: MessageCatalog = {
     priceUnavailable: "The price could not be confirmed.",
     priceUnavailableHelp: "The price could not be confirmed, so payment is not available yet.",
     priceRetry: "Try again",
+    paperShortTitle: "Not enough paper",
+    paperShortBody: (availableSheets, requiredSheets) =>
+      `This printer has about ${availableSheets} ${availableSheets === 1 ? "sheet" : "sheets"} available, but your current print settings need about ${requiredSheets} ${requiredSheets === 1 ? "sheet" : "sheets"}.`,
+    paperShortAdvice: "Reduce the number of pages or copies.",
+    paperShortDismiss: "Change settings",
+    paperShortHelp: "Reduce the pages or copies to fit the paper available.",
     reviewAndPay: "Review and pay",
     backToUpload: "Back to upload"
   },
@@ -619,6 +641,9 @@ const russian: MessageCatalog = {
     sessionLabel: "Сеанс загрузки",
     qrTitle: "QR-код для безопасной загрузки с телефона",
     waitingForPhone: "Ожидаем подключение телефона",
+    paperAvailable: (sheets) =>
+      `Сейчас принтер может напечатать ${sheets} ${russianPlural(sheets, "лист", "листа", "листов")}`,
+    paperUnavailable: "Данные о бумаге недоступны",
     uploadedDocument: "Загруженный документ",
     uploadedDocuments: "Загруженные документы",
     documentsReady: (count) => (count === 1 ? "1 документ готов" : `Готовых документов: ${count}`),
@@ -730,6 +755,12 @@ const russian: MessageCatalog = {
     priceUnavailable: "Не удалось подтвердить стоимость.",
     priceUnavailableHelp: "Стоимость не подтверждена, поэтому оплата пока недоступна.",
     priceRetry: "Повторить",
+    paperShortTitle: "Недостаточно бумаги",
+    paperShortBody: (availableSheets, requiredSheets) =>
+      `В принтере осталось примерно ${availableSheets} ${russianPlural(availableSheets, "лист", "листа", "листов")}, а для текущих настроек нужно примерно ${requiredSheets} ${russianPlural(requiredSheets, "лист", "листа", "листов")}.`,
+    paperShortAdvice: "Уменьшите количество страниц или копий.",
+    paperShortDismiss: "Изменить настройки",
+    paperShortHelp: "Уменьшите количество страниц или копий, чтобы хватило бумаги.",
     reviewAndPay: "Проверить и оплатить",
     backToUpload: "Вернуться к загрузке"
   },
@@ -910,6 +941,8 @@ const armenian: MessageCatalog = {
     sessionLabel: "Ֆայլերի վերբեռնման պատուհան",
     qrTitle: "Հեռախոսից անվտանգ վերբեռնման QR կոդ",
     waitingForPhone: "Սպասում ենք, որ հեռախոսը միանա",
+    paperAvailable: (sheets) => `Այս տպիչը հիմա կարող է տպել ${sheets} թերթ`,
+    paperUnavailable: "Թղթի քանակը հասանելի չէ",
     uploadedDocument: "Վերբեռնված փաստաթուղթ",
     uploadedDocuments: "Վերբեռնված փաստաթղթեր",
     documentsReady: (count) => `Պատրաստ է ${count} փաստաթուղթ`,
@@ -1018,6 +1051,12 @@ const armenian: MessageCatalog = {
     priceUnavailable: "Չհաջողվեց հաշվարկել արժեքը։",
     priceUnavailableHelp: "Քանի դեռ արժեքը հաշվարկված չէ, վճարել հնարավոր չէ։",
     priceRetry: "Փորձել կրկին",
+    paperShortTitle: "Թուղթը բավարար չէ",
+    paperShortBody: (availableSheets, requiredSheets) =>
+      `Այս տպիչում մնացել է մոտ ${availableSheets} թերթ, իսկ ընթացիկ կարգավորումների համար պետք է մոտ ${requiredSheets} թերթ։`,
+    paperShortAdvice: "Նվազեցրեք էջերի կամ պատճենների քանակը։",
+    paperShortDismiss: "Փոխել կարգավորումները",
+    paperShortHelp: "Նվազեցրեք էջերը կամ պատճենները, որպեսզի թուղթը բավականացնի։",
     reviewAndPay: "Ստուգել և վճարել",
     backToUpload: "Վերադառնալ փաստաթղթին"
   },

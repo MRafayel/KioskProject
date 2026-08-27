@@ -4,10 +4,13 @@ import { z } from "zod";
 import {
   acknowledgeIncidentBodySchema,
   acknowledgeIncidentResponseSchema,
+  addKioskPaperBodySchema,
+  correctKioskPaperBodySchema,
   correctRecoveryBodySchema,
   correctRecoveryResponseSchema,
   resolveRecoveryBodySchema,
   resolveRecoveryResponseSchema,
+  kioskPaperMutationResponseSchema,
   retryRetentionBodySchema,
   retryRetentionResponseSchema
 } from "@printing-kiosk/admin-access";
@@ -19,10 +22,10 @@ import type { AdminOperationsService } from "./operations.js";
 /**
  * Everything the control plane can change that does not cost money.
  *
- * Four routes, and none of them can cause a payout: they record what a person
- * saw at a tray, correct such a record, ask retention to retry a run that gave
- * up, and note that somebody is looking at a failure. The connection they run
- * on holds no grant on `refunds` at all.
+ * None of these routes can cause a payout: they record what a person saw at a
+ * tray, maintain a software paper estimate, ask retention to retry a run that
+ * gave up, or note that somebody is looking at a failure. The connection they
+ * run on holds no grant on `refunds` at all.
  *
  * `refund.authorize` is deliberately not here. It lives in `refund-routes.ts`,
  * on its own pool as its own database role, because the Phase 4 gate is that
@@ -40,6 +43,12 @@ import type { AdminOperationsService } from "./operations.js";
  */
 
 const printJobParams = z.object({ printJobId: z.string().uuid() });
+const kioskParams = z.object({
+  kioskId: z
+    .string()
+    .max(64)
+    .regex(/^[A-Za-z0-9_.:-]+$/u)
+});
 
 /**
  * A ceiling on actions by source address.
@@ -72,6 +81,44 @@ export function registerAdminOperationsRoutes(
   const throttleAccount = createAdminAccountThrottle(app, {
     namespace: "action",
     ...ACTION_ACCOUNT_RATE
+  });
+
+  /** Add newly loaded physical sheets to the software estimate. */
+  app.post("/v1/admin/kiosks/:kioskId/paper/refills", actionRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "kiosk.paper.manage");
+    await throttleAccount(request, admin.sessionId);
+
+    const params = kioskParams.parse(request.params);
+    const body = addKioskPaperBodySchema.parse(request.body ?? {});
+    const result = await dependencies.operations.addKioskPaper(
+      admin,
+      params.kioskId,
+      body,
+      request.id
+    );
+    return sendNoStore(
+      reply.code(result.replayed ? 200 : 201),
+      kioskPaperMutationResponseSchema.parse(result)
+    );
+  });
+
+  /** Reset a drifted estimate by appending a reasoned correction. */
+  app.post("/v1/admin/kiosks/:kioskId/paper/corrections", actionRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "kiosk.paper.manage");
+    await throttleAccount(request, admin.sessionId);
+
+    const params = kioskParams.parse(request.params);
+    const body = correctKioskPaperBodySchema.parse(request.body ?? {});
+    const result = await dependencies.operations.correctKioskPaper(
+      admin,
+      params.kioskId,
+      body,
+      request.id
+    );
+    return sendNoStore(
+      reply.code(result.replayed ? 200 : 201),
+      kioskPaperMutationResponseSchema.parse(result)
+    );
   });
 
   /**

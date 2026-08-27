@@ -4,6 +4,7 @@ import {
   ADMIN_ATTENTION_CODES,
   KIOSK_DEGRADED_WINDOW_MILLISECONDS,
   KIOSK_ONLINE_WINDOW_MILLISECONDS,
+  classifyPaperEstimate,
   adminAuditEntrySchema,
   adminDocumentSchema,
   adminPrintJobSchema,
@@ -48,6 +49,17 @@ describe("kiosk liveness", () => {
 
   it("does not report a clock-skewed future heartbeat as offline", () => {
     expect(classifyKioskLiveness(new Date(now.getTime() + 30_000), now)).toBe("ONLINE");
+  });
+});
+
+describe("paper estimate guidance", () => {
+  it("keeps unavailable distinct and applies the shared low-paper boundaries", () => {
+    expect(classifyPaperEstimate(null)).toBe("UNAVAILABLE");
+    expect(classifyPaperEstimate(101)).toBe("HEALTHY");
+    expect(classifyPaperEstimate(100)).toBe("GETTING_LOW");
+    expect(classifyPaperEstimate(26)).toBe("GETTING_LOW");
+    expect(classifyPaperEstimate(25)).toBe("REFILL_SOON");
+    expect(classifyPaperEstimate(0)).toBe("REFILL_SOON");
   });
 });
 

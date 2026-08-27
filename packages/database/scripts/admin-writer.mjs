@@ -16,6 +16,7 @@
  * Usage:
  *
  *   ADMIN_WRITE_DATABASE_PASSWORD=... node scripts/admin-writer.mjs provision
+ *   node scripts/admin-writer.mjs provision # reuses ADMIN_WRITE_DATABASE_URL
  *   node scripts/admin-writer.mjs verify
  *   node scripts/admin-writer.mjs disable
  *

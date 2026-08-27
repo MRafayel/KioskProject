@@ -234,8 +234,36 @@ export const getKioskAvailabilityResponseSchema = z
   .object({ availability: kioskAvailabilitySchema })
   .strict();
 
+/**
+ * How much paper the kiosk believes is loaded, for the customer's benefit.
+ *
+ * A software estimate, not a tray reading: it is the sum of what staff have
+ * recorded loading and what confirmed prints have consumed since. The screen
+ * uses it to say what can be printed now and to stop somebody paying for a job
+ * that plainly will not fit, which is worth doing even though the number is
+ * approximate — the hard refusal remains the readiness gate's, from the
+ * printer's own state.
+ *
+ * It carries a count and nothing else. A screen strangers stand in front of has
+ * no business naming the person who last refilled the tray or when.
+ */
+export const kioskPaperEstimateSchema = z
+  .object({
+    /**
+     * Null when nobody has recorded a refill or correction for this kiosk yet,
+     * which is a different thing from an empty tray and must be shown as one.
+     * Zero means tracking is running and the estimate has reached the floor.
+     */
+    estimatedSheets: z.number().int().min(0).max(100_000).nullable()
+  })
+  .strict();
+
+export const getKioskPaperResponseSchema = z.object({ paper: kioskPaperEstimateSchema }).strict();
+
 export type KioskAvailability = z.infer<typeof kioskAvailabilitySchema>;
 export type GetKioskAvailabilityResponse = z.infer<typeof getKioskAvailabilityResponseSchema>;
+export type KioskPaperEstimate = z.infer<typeof kioskPaperEstimateSchema>;
+export type GetKioskPaperResponse = z.infer<typeof getKioskPaperResponseSchema>;
 export type PrinterQueueStateValue = z.infer<typeof printerQueueStateSchema>;
 export type PrinterHealthStateValue = z.infer<typeof printerHealthStateSchema>;
 export type PrinterApprovalState = z.infer<typeof printerApprovalStateSchema>;

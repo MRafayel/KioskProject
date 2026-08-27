@@ -6,7 +6,7 @@ import {
   registerAgentBodySchema,
   reportPrinterStateBodySchema
 } from "@printing-kiosk/contracts";
-import type { PrismaClient } from "@printing-kiosk/database";
+import { readKioskPaperEstimate, type PrismaClient } from "@printing-kiosk/database";
 
 import { ApiError } from "../sessions/errors.js";
 
@@ -33,6 +33,7 @@ export interface DeviceRouteDependencies {
  * takes a kiosk identifier from the request at all.
  */
 const kioskAvailabilityParamsSchema = z.object({ kioskId: z.string().min(1).max(64) });
+const kioskPaperParamsSchema = kioskAvailabilityParamsSchema;
 
 export function registerDeviceRoutes(
   app: FastifyInstance,
@@ -85,6 +86,55 @@ export function registerDeviceRoutes(
           ? { available: true, reason: null }
           : { available: false, reason: readiness.reason }
       });
+    }
+  );
+
+  /**
+   * How much paper this kiosk is believed to hold.
+   *
+   * The second route a touchscreen may call, and read-only like the first. It
+   * exists so the screen can tell a customer what can be printed now, and can
+   * stop them paying for a job the tray plainly cannot finish — a refusal that
+   * costs nothing before payment and costs a refund and an operator's afternoon
+   * after it.
+   *
+   * It answers with a count and nothing else: not who last refilled the tray,
+   * not when, not the ledger behind it. Those are an operator's business and
+   * they are on the admin surface, behind an admin session.
+   *
+   * Deliberately not folded into `availability`. That route answers the
+   * question the readiness gate answers — may a session start at all — and its
+   * answer is the printer's own state. This one is a software estimate that
+   * cannot close a kiosk and must never look as though it could.
+   */
+  app.get(
+    "/v1/kiosks/:kioskId/paper",
+    {
+      // Read while a customer is standing at the screen rather than on an idle
+      // timer, so the ceiling only has to cover the upload and configure
+      // screens re-asking as the job takes shape.
+      config: { rateLimit: { max: 120, timeWindow: "1 minute", keyGenerator: kioskRateLimitKey } }
+    },
+    async (request, reply) => {
+      const identity = await dependencies.kioskAuthentication.authenticate(
+        request,
+        dependencies.database,
+        dependencies.clock,
+        "sessions:create"
+      );
+      const params = kioskPaperParamsSchema.parse(request.params);
+      if (params.kioskId !== identity.kioskId) {
+        throw new ApiError(404, "KIOSK_NOT_FOUND", "No such kiosk.");
+      }
+
+      const estimatedSheets = await readKioskPaperEstimate(
+        dependencies.database,
+        identity.kioskId
+      );
+
+      return reply
+        .header("cache-control", "no-store")
+        .send({ paper: { estimatedSheets } });
     }
   );
 

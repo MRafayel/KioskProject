@@ -1,23 +1,46 @@
 import { useCallback, useState } from "react";
 
-import type { AdminKiosksResponse } from "@printing-kiosk/admin-access";
+import type {
+  AddKioskPaperBody,
+  AdminKioskPaperEvent,
+  AdminKiosksResponse,
+  CorrectKioskPaperBody,
+  PaperEstimateStatus
+} from "@printing-kiosk/admin-access";
 
+import { useSession } from "../features/auth/SessionProvider.js";
 import { observabilityApi } from "../features/observability/api.js";
-import { Empty, Panel, StateBadge, Table, When } from "../features/observability/components.js";
-import { FilterKpi, KpiRow, StatusPill } from "../features/observability/surfaces.js";
+import {
+  Empty,
+  Pagination,
+  Panel,
+  StateBadge,
+  Table,
+  When
+} from "../features/observability/components.js";
+import {
+  FilterKpi,
+  KpiRow,
+  RowOpen,
+  Sheet,
+  StatusPill
+} from "../features/observability/surfaces.js";
+import { useAdminAction } from "../features/observability/useAdminAction.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
+import { useDetailSheet } from "../features/observability/useDetailSheet.js";
+import { usePageTrail } from "../features/observability/usePageTrail.js";
 
 type Kiosk = AdminKiosksResponse["items"][number];
 
 /**
  * The tiles above the table.
  *
- * All four filter the loaded rows rather than the server: there is one kiosks
+ * All six filter the loaded rows rather than the server: there is one kiosks
  * endpoint, it returns every kiosk the caller may see, and it takes no filter.
  * So unlike Sessions no tile ever narrows what the others can count, and all
- * four keep showing real numbers whichever one is pressed.
+ * six keep showing real numbers whichever one is pressed.
  */
-type CardId = "OFFLINE" | "DEGRADED" | "RECOVERY" | "PRINTER" | "ONLINE";
+type CardId = "OFFLINE" | "DEGRADED" | "RECOVERY" | "PRINTER" | "PAPER" | "ONLINE";
 
 /** A kiosk beyond the degraded heartbeat window, or one that never reported. */
 function isOffline(kiosk: Kiosk): boolean {
@@ -34,11 +57,16 @@ function printerProblem(kiosk: Kiosk): boolean {
   return kiosk.printer.health !== "READY" || kiosk.printer.warningCode !== null;
 }
 
+function paperIsLow(kiosk: Kiosk): boolean {
+  return kiosk.paper.status === "GETTING_LOW" || kiosk.paper.status === "REFILL_SOON";
+}
+
 const MATCHES: Readonly<Record<CardId, (kiosk: Kiosk) => boolean>> = {
   OFFLINE: isOffline,
   DEGRADED: isDegraded,
   RECOVERY: (kiosk) => kiosk.recoveryRequiredJobs > 0,
   PRINTER: printerProblem,
+  PAPER: paperIsLow,
   ONLINE: (kiosk) => kiosk.liveness === "ONLINE"
 };
 
@@ -51,6 +79,8 @@ function flagsFor(kiosk: Kiosk): string[] {
   if (kiosk.recoveryRequiredJobs > 0) flags.push("Recovery-state jobs");
   if (!kiosk.printer) flags.push("No approved printer");
   else if (kiosk.printer.health !== "READY") flags.push("Printer not ready");
+  if (kiosk.paper.status === "REFILL_SOON") flags.push("Refill paper soon");
+  else if (kiosk.paper.status === "GETTING_LOW") flags.push("Paper getting low");
   return flags;
 }
 
@@ -66,9 +96,11 @@ function flagsFor(kiosk: Kiosk): string[] {
  * itself and saying why.
  */
 export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefined } = {}) {
+  const session = useSession();
   const load = useCallback(() => observabilityApi.kiosks(), []);
   const state = useAdminData(load, { refreshMilliseconds: 15_000 });
   const [active, setActive] = useState<CardId | null>(initialFilter ?? null);
+  const sheet = useDetailSheet();
 
   const items = state.data?.items ?? [];
   const count = (predicate: (kiosk: Kiosk) => boolean) => items.filter(predicate).length;
@@ -77,6 +109,7 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
   const degraded = count(isDegraded);
   const recovery = count((kiosk) => kiosk.recoveryRequiredJobs > 0);
   const printers = count(printerProblem);
+  const lowPaper = count(paperIsLow);
   const online = count((kiosk) => kiosk.liveness === "ONLINE");
 
   const visible = active ? items.filter(MATCHES[active]) : items;
@@ -84,15 +117,18 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
   // cannot distinguish that from an unresolved recovery, so it stays context
   // rather than being counted as work somebody still has to do.
   const attention = visible.filter(
-    (kiosk) => isOffline(kiosk) || isDegraded(kiosk) || printerProblem(kiosk)
+    (kiosk) => isOffline(kiosk) || isDegraded(kiosk) || printerProblem(kiosk) || paperIsLow(kiosk)
   ).length;
-  const urgent = visible.some((kiosk) => isOffline(kiosk) || printerProblem(kiosk));
+  const urgent = visible.some(
+    (kiosk) => isOffline(kiosk) || printerProblem(kiosk) || kiosk.paper.status === "REFILL_SOON"
+  );
 
   const LABELS: Readonly<Record<CardId, string>> = {
     OFFLINE: "offline or never reported",
     DEGRADED: "with a delayed heartbeat",
     RECOVERY: "with recovery-state print jobs",
     PRINTER: "with a printer problem",
+    PAPER: "with a low paper estimate",
     ONLINE: "online"
   };
 
@@ -200,6 +236,16 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
           />
           <FilterKpi
             noun="kiosks"
+            card="PAPER"
+            label="Low paper estimate"
+            value={lowPaper}
+            resting={lowPaper === 0 ? "No tracked kiosk is low" : "At or below 100 sheets"}
+            tone={lowPaper > 0 ? "warn" : undefined}
+            active={active}
+            onChoose={choose}
+          />
+          <FilterKpi
+            noun="kiosks"
             card="ONLINE"
             label="Online"
             value={online}
@@ -233,7 +279,7 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
 
         {visible.length > 0 ? (
           <Table
-            className="data-table"
+            className="data-table data-table--interactive"
             pane
             paneClassName="data-pane"
             columns={[
@@ -241,6 +287,7 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
               "Status",
               "Agent",
               "USB printer",
+              "Paper estimate",
               "Active print sessions",
               "Open print jobs",
               "Recovery-state jobs"
@@ -248,20 +295,37 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
           >
             {visible.map((kiosk) => {
               const flags = flagsFor(kiosk);
+              const classes = [
+                sheet.selected === kiosk.id ? "is-selected" : "",
+                isOffline(kiosk) ? "is-alarming-row" : "",
+                !isOffline(kiosk) && (printerProblem(kiosk) || kiosk.paper.status === "REFILL_SOON")
+                  ? "is-quiet-row"
+                  : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
               return (
                 <tr
                   key={kiosk.id}
-                  className={
-                    isOffline(kiosk)
-                      ? "is-alarming-row"
-                      : printerProblem(kiosk)
-                        ? "is-quiet-row"
-                        : undefined
+                  className={classes || undefined}
+                  onClick={(event) =>
+                    sheet.open(
+                      kiosk.id,
+                      event.currentTarget.querySelector<HTMLButtonElement>(".row-open")
+                    )
                   }
                 >
                   <td data-label="Kiosk">
-                    <strong>{kiosk.name}</strong>
-                    <span className="key-list__meta">{kiosk.publicCode}</span>
+                    <RowOpen
+                      open={sheet.selected === kiosk.id}
+                      onOpen={(opener) => sheet.open(kiosk.id, opener)}
+                      label={`Open ${kiosk.name}, ${paperStatusLabel(
+                        kiosk.paper.status
+                      ).toLowerCase()}`}
+                    >
+                      <strong>{kiosk.name}</strong>
+                      <span className="key-list__meta">{kiosk.publicCode}</span>
+                    </RowOpen>
                   </td>
                   <td data-label="Status">
                     <StateBadge value={kiosk.status} humanize quiet={kiosk.status === "ACTIVE"} />
@@ -321,6 +385,9 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
                       <StateBadge value="NOT_APPROVED" humanize />
                     )}
                   </td>
+                  <td data-label="Paper estimate">
+                    <PaperEstimate summary={kiosk.paper} />
+                  </td>
                   <td data-label="Active print sessions">{kiosk.liveSessions}</td>
                   <td data-label="Open print jobs">{kiosk.openPrintJobs}</td>
                   <td data-label="Recovery-state jobs">
@@ -336,6 +403,380 @@ export function KiosksPanel({ initialFilter }: { initialFilter?: CardId | undefi
           </Table>
         ) : null}
       </Panel>
+
+      {sheet.selected ? (
+        <KioskPaperSheet
+          kiosk={items.find((kiosk) => kiosk.id === sheet.selected) ?? null}
+          canManage={session.can("kiosk.paper.manage")}
+          onChanged={state.reload}
+          onClose={sheet.close}
+        />
+      ) : null}
     </>
   );
+}
+
+function PaperEstimate({ summary }: { summary: Kiosk["paper"] }) {
+  return (
+    <span className="paper-estimate">
+      <strong>
+        {summary.estimatedSheets === null
+          ? "Estimate unavailable"
+          : `~${summary.estimatedSheets.toLocaleString()} sheets`}
+      </strong>
+      <StatusPill tone={paperStatusTone(summary.status)}>
+        {paperStatusLabel(summary.status)}
+      </StatusPill>
+    </span>
+  );
+}
+
+function KioskPaperSheet({
+  kiosk,
+  canManage,
+  onChanged,
+  onClose
+}: {
+  kiosk: Kiosk | null;
+  canManage: boolean;
+  onChanged: () => void;
+  onClose: () => void;
+}) {
+  const pages = usePageTrail();
+  const cursor = pages.cursor;
+  const kioskId = kiosk?.id ?? "";
+  const load = useCallback(() => observabilityApi.kioskPaper(kioskId, cursor), [cursor, kioskId]);
+  const detail = useAdminData(load);
+  const nextCursor = detail.data?.nextCursor ?? null;
+  const paper = detail.data?.paper ?? kiosk?.paper ?? null;
+
+  const changed = useCallback(() => {
+    pages.reset();
+    detail.reload();
+    onChanged();
+  }, [detail, onChanged, pages]);
+
+  return (
+    <Sheet
+      title={kiosk?.name ?? "Kiosk paper"}
+      subtitle={
+        kiosk ? (
+          <>
+            <span>{kiosk.publicCode}</span>
+            <span aria-hidden="true">·</span>
+            <StateBadge value={kiosk.liveness} humanize quiet={kiosk.liveness === "ONLINE"} />
+          </>
+        ) : (
+          <span>Loading…</span>
+        )
+      }
+      onClose={onClose}
+    >
+      {detail.error ? (
+        <div className="panel__error" role="alert">
+          <span className="panel__error-text">{detail.error}</span>
+          <button type="button" onClick={detail.reload}>
+            Try again
+          </button>
+        </div>
+      ) : null}
+
+      {paper ? (
+        <section className="paper-summary" aria-labelledby="paper-estimate-title">
+          <div>
+            <h3 id="paper-estimate-title">Paper estimate</h3>
+            <p className="paper-summary__value">
+              {paper.estimatedSheets === null
+                ? "Estimate unavailable"
+                : `~${paper.estimatedSheets.toLocaleString()} sheets remaining`}
+            </p>
+            <StatusPill tone={paperStatusTone(paper.status)}>
+              {paperStatusLabel(paper.status)}
+            </StatusPill>
+          </div>
+          <p className="paper-summary__note">
+            Software estimate only — this printer has no paper-level sensor. Confirmed physical
+            sheets are deducted automatically.
+          </p>
+          <dl className="detail-grid">
+            <div>
+              <dt>Last paper refill</dt>
+              <dd>
+                {paper.lastRefill ? (
+                  <>
+                    <strong>+{paper.lastRefill.sheetsAdded.toLocaleString()} sheets</strong>
+                    <span className="key-list__meta">
+                      {paper.lastRefill.recordedByDisplayName ?? "Admin user"} ·{" "}
+                      <When value={paper.lastRefill.recordedAt} />
+                    </span>
+                    {paper.lastRefill.note ? (
+                      <span className="key-list__meta">{paper.lastRefill.note}</span>
+                    ) : null}
+                  </>
+                ) : (
+                  "No refill recorded"
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>Low-paper guidance</dt>
+              <dd>
+                Getting low at {paper.gettingLowAtSheets} sheets · refill soon at{" "}
+                {paper.refillSoonAtSheets}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
+
+      {canManage && paper ? (
+        <PaperActions
+          kioskId={kioskId}
+          estimatedSheets={paper.estimatedSheets}
+          onChanged={changed}
+        />
+      ) : null}
+
+      <h3>Paper history</h3>
+      {detail.loading && !detail.data ? <p className="panel__status">Loading…</p> : null}
+      {detail.data && detail.data.items.length === 0 ? (
+        <Empty>No paper activity has been recorded.</Empty>
+      ) : null}
+      {detail.data && detail.data.items.length > 0 ? (
+        <ol className="paper-history">
+          {detail.data.items.map((event) => (
+            <PaperEvent key={event.id} event={event} />
+          ))}
+        </ol>
+      ) : null}
+      <Pagination
+        label="Paper history pages"
+        page={pages.page}
+        pageCount={pages.pageCount}
+        hasNext={pages.hasNext(nextCursor)}
+        onGo={(target) => pages.go(target, nextCursor)}
+      />
+    </Sheet>
+  );
+}
+
+function PaperActions({
+  kioskId,
+  estimatedSheets,
+  onChanged
+}: {
+  kioskId: string;
+  estimatedSheets: number | null;
+  onChanged: () => void;
+}) {
+  const [mode, setMode] = useState<"REFILL" | "CORRECTION" | null>(null);
+  const [sheets, setSheets] = useState("");
+  const [note, setNote] = useState("");
+  const [requestKey, setRequestKey] = useState(newRequestKey);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const refill = useAdminAction<AddKioskPaperBody>(
+    useCallback((body) => observabilityApi.addKioskPaper(kioskId, body), [kioskId])
+  );
+  const correction = useAdminAction<CorrectKioskPaperBody>(
+    useCallback((body) => observabilityApi.correctKioskPaper(kioskId, body), [kioskId])
+  );
+
+  const action = mode === "CORRECTION" ? correction : refill;
+  const parsed = Number(sheets);
+  const numberValid =
+    Number.isInteger(parsed) && parsed >= (mode === "REFILL" ? 1 : 0) && parsed <= 100_000;
+  const trimmed = note.trim();
+  const noteValid =
+    mode === "CORRECTION" ? trimmed.length >= 3 : trimmed.length === 0 || trimmed.length >= 3;
+  const ready = mode !== null && numberValid && noteValid && !action.state.running;
+
+  const edit = (value: string, setValue: (next: string) => void) => {
+    setValue(value);
+    setRequestKey(newRequestKey());
+    setMessage(null);
+    refill.reset();
+    correction.reset();
+  };
+
+  const closeForm = () => {
+    setMode(null);
+    setSheets("");
+    setNote("");
+    setRequestKey(newRequestKey());
+    refill.reset();
+    correction.reset();
+  };
+
+  return (
+    <section className="paper-actions" aria-labelledby="paper-actions-title">
+      <h3 id="paper-actions-title">Update estimate</h3>
+      {mode === null ? (
+        <div className="paper-actions__choices">
+          <button
+            type="button"
+            className="button-primary"
+            onClick={() => {
+              setMode("REFILL");
+              setSheets("");
+              setNote("");
+              setMessage(null);
+            }}
+          >
+            Add paper
+          </button>
+          <button
+            type="button"
+            className="button-quiet"
+            onClick={() => {
+              setMode("CORRECTION");
+              setSheets(String(estimatedSheets ?? 0));
+              setNote("");
+              setMessage(null);
+            }}
+          >
+            Correct estimate
+          </button>
+          {message ? (
+            <span className="paper-actions__success" role="status">
+              {message}
+            </span>
+          ) : null}
+        </div>
+      ) : (
+        <form
+          className="resolve paper-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!ready) return;
+            const run =
+              mode === "REFILL"
+                ? refill.run({
+                    sheetsAdded: parsed,
+                    ...(trimmed ? { note: trimmed } : {}),
+                    requestKey
+                  })
+                : correction.run({ estimatedSheets: parsed, reason: trimmed, requestKey });
+            void run.then((recorded) => {
+              if (!recorded) return;
+              const success =
+                mode === "REFILL"
+                  ? `Added ${parsed.toLocaleString()} sheets to the estimate.`
+                  : `Corrected the estimate to ${parsed.toLocaleString()} sheets.`;
+              closeForm();
+              setMessage(success);
+              onChanged();
+            });
+          }}
+        >
+          <h3>{mode === "REFILL" ? "Add paper" : "Correct paper estimate"}</h3>
+          <label className="resolve__field">
+            {mode === "REFILL" ? "Physical sheets loaded" : "Estimated sheets remaining"}
+            <input
+              type="number"
+              min={mode === "REFILL" ? 1 : 0}
+              max={100_000}
+              step={1}
+              required
+              value={sheets}
+              onChange={(event) => edit(event.target.value, setSheets)}
+            />
+          </label>
+          <label className="resolve__field">
+            {mode === "REFILL" ? (
+              <>
+                Note <span className="resolve__optional">(optional)</span>
+              </>
+            ) : (
+              "Reason for correction"
+            )}
+            <textarea
+              rows={2}
+              maxLength={280}
+              required={mode === "CORRECTION"}
+              value={note}
+              onChange={(event) => edit(event.target.value, setNote)}
+              placeholder={
+                mode === "REFILL" ? "New ream loaded" : "Counted the tray after clearing a jam"
+              }
+            />
+          </label>
+          <p className="resolve__optional">
+            {mode === "REFILL"
+              ? "This increases the current estimate and keeps a permanent refill record."
+              : "This sets the estimate to the number entered; earlier activity remains in history."}
+          </p>
+          {action.state.error ? (
+            <p className="resolve__error" role="alert">
+              {action.state.error}
+            </p>
+          ) : null}
+          <div className="resolve__actions">
+            <button type="submit" disabled={!ready}>
+              {action.state.running
+                ? "Recording…"
+                : mode === "REFILL"
+                  ? "Add to estimate"
+                  : "Correct estimate"}
+            </button>
+            <button type="button" className="button-quiet" onClick={closeForm}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function PaperEvent({ event }: { event: AdminKioskPaperEvent }) {
+  const title =
+    event.type === "REFILL"
+      ? `Added ${event.quantitySheets.toLocaleString()} sheets`
+      : event.type === "CORRECTION"
+        ? `Set estimate to ${event.quantitySheets.toLocaleString()} sheets`
+        : `${event.quantitySheets.toLocaleString()} sheets printed`;
+  const actor =
+    event.type === "PRINT_DEDUCTION"
+      ? "Automatic after confirmed print"
+      : (event.recordedByDisplayName ?? "Admin user");
+  const consequence = !event.estimateAffected
+    ? "Estimate was not active, so no stock was changed"
+    : event.deltaSheets === 0
+      ? "Estimate unchanged"
+      : `${event.deltaSheets > 0 ? "+" : ""}${event.deltaSheets.toLocaleString()} sheets`;
+
+  return (
+    <li className="paper-history__item">
+      <div className="paper-history__head">
+        <strong>{title}</strong>
+        <When value={event.createdAt} />
+      </div>
+      <span className="key-list__meta">
+        {actor} · {consequence}
+      </span>
+      {event.reason ? <span className="paper-history__reason">{event.reason}</span> : null}
+      {event.printJobId ? (
+        <span className="key-list__meta">Print job {event.printJobId}</span>
+      ) : null}
+    </li>
+  );
+}
+
+function paperStatusLabel(status: PaperEstimateStatus): string {
+  if (status === "HEALTHY") return "Healthy";
+  if (status === "GETTING_LOW") return "Getting low";
+  if (status === "REFILL_SOON") return "Refill soon";
+  return "Estimate unavailable";
+}
+
+function paperStatusTone(status: PaperEstimateStatus): "neutral" | "good" | "warn" | "critical" {
+  if (status === "HEALTHY") return "good";
+  if (status === "GETTING_LOW") return "warn";
+  if (status === "REFILL_SOON") return "critical";
+  return "neutral";
+}
+
+function newRequestKey(): string {
+  return globalThis.crypto.randomUUID();
 }

@@ -104,6 +104,7 @@ export const READABLE_TABLES = Object.freeze({
  * to reach the ones already issued, so this connection cannot even read them.
  */
 export const FORBIDDEN_TABLES = Object.freeze({
+  kiosk_paper_events: "Paper inventory is an operational ledger, not part of publishing a tariff.",
   price_quotes: "What a customer was already quoted. A new tariff does not reach backwards.",
   refunds: "Money owed back.",
   refund_authorizations: "The record of who authorized a payout.",

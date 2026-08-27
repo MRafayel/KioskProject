@@ -6,6 +6,7 @@ import {
   adminAuditResponseSchema,
   adminDocumentsResponseSchema,
   adminErrorsResponseSchema,
+  adminKioskPaperResponseSchema,
   adminKiosksResponseSchema,
   adminMoneySummaryResponseSchema,
   adminOverviewResponseSchema,
@@ -54,6 +55,12 @@ import { scopeForAdmin, type AdminObservabilityService } from "./observability.j
 
 const sessionParams = z.object({ sessionId: z.string().uuid() });
 const printJobParams = z.object({ printJobId: z.string().uuid() });
+const kioskParams = z.object({
+  kioskId: z
+    .string()
+    .max(64)
+    .regex(/^[A-Za-z0-9_.:-]+$/u)
+});
 
 /** A cursor is validated again by the decoder; this only bounds its size. */
 const cursorSchema = z.string().max(120).optional();
@@ -173,6 +180,20 @@ export function registerAdminObservabilityRoutes(
     await throttleAccount(request, admin.sessionId);
     const kiosks = await dependencies.observability.kiosks(scopeForAdmin(admin));
     return sendNoStore(reply, adminKiosksResponseSchema.parse(kiosks));
+  });
+
+  app.get("/v1/admin/kiosks/:kioskId/paper", readRoute, async (request, reply) => {
+    const admin = await authorizeAdmin(request, dependencies, "kiosk.read");
+    await throttleAccount(request, admin.sessionId);
+    const params = kioskParams.parse(request.params);
+    const query = cursorQuerySchema.parse(request.query);
+    const paper = await dependencies.observability.kioskPaper(
+      scopeForAdmin(admin),
+      params.kioskId,
+      query.cursor
+    );
+    if (!paper) throw adminNotFound();
+    return sendNoStore(reply, adminKioskPaperResponseSchema.parse(paper));
   });
 
   // ---------------------------------------------------------------------------

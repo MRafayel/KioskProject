@@ -48,6 +48,8 @@ export const INSERTABLE_TABLES = Object.freeze({
     "A later account superseding one of those, by somebody who did not make it. Appends; the original stays exactly as written.",
   cleanup_retry_requests:
     "A person asking retention to try a dead-lettered run again. The worker re-arms its own run; this role holds nothing on cleanup_runs.",
+  kiosk_paper_events:
+    "A refill or reasoned correction to a software paper estimate. Print deductions are written by the print path, not by this role.",
   audit_events: "Every admin action records itself here, including the ones that failed."
 });
 
@@ -118,6 +120,10 @@ export const READABLE_TABLES = Object.freeze({
     "available_at"
   ],
   cleanup_retry_requests: "*",
+
+  // Refill/correction idempotency and the signed total used to calculate a
+  // correction. No device command or customer data is present.
+  kiosk_paper_events: "*",
 
   // The error centre's acknowledgements are audit events; reading them back is
   // how a repeat acknowledgement is recognised as one.

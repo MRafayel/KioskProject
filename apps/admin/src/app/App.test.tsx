@@ -510,7 +510,14 @@ describe("admin Phase 2 operational sections", () => {
           },
           liveSessions: 0,
           openPrintJobs: 0,
-          recoveryRequiredJobs: 0
+          recoveryRequiredJobs: 0,
+          paper: {
+            estimatedSheets: null,
+            status: "UNAVAILABLE",
+            gettingLowAtSheets: 100,
+            refillSoonAtSheets: 25,
+            lastRefill: null
+          }
         }
       ]
     });

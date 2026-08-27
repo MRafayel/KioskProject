@@ -46,6 +46,7 @@ model Kiosk {
   adminScopes         AdminKioskScope[]
   agents              KioskAgent[]
   printers            Printer[]
+  paperEvents         KioskPaperEvent[]
 
   @@index([status])
   @@index([lastSeenAt])
@@ -503,6 +504,7 @@ model PrintJob {
   recoveryResolution   PrintJobRecoveryResolution?
   recoveryCorrections  PrintJobRecoveryCorrection[]
   refundAuthorization  RefundAuthorization?
+  paperEvent            KioskPaperEvent?
 
   @@unique([sessionId], map: "print_jobs_one_per_session_idx")
   @@index([status, availableAt])
@@ -698,6 +700,43 @@ model PrintJobEvent {
   @@unique([printJobId, sequence])
   @@index([printJobId, createdAt])
   @@map("print_job_events")
+}
+
+/// One immutable change to a kiosk's software paper estimate.
+///
+/// Refills add sheets, corrections set the estimate by recording the delta from
+/// its previous value, and confirmed print completions deduct the physical
+/// sheets the device reported producing. The signed delta makes the current
+/// estimate a sum over history; the quantity preserves what physically
+/// happened even when an estimate was unavailable or had already reached zero.
+model KioskPaperEvent {
+  id                String     @id @db.Uuid
+  kioskId           String     @map("kiosk_id") @db.VarChar(64)
+  type              String     @db.VarChar(24)
+  /// Sheets added, corrected-to, or consumed, depending on `type`.
+  quantitySheets    Int        @map("quantity_sheets")
+  /// The signed change applied to the estimate. A deduction may apply zero
+  /// when tracking had not started or the estimate had already reached zero.
+  deltaSheets       Int        @map("delta_sheets")
+  estimateAffected  Boolean    @default(true) @map("estimate_affected")
+  reason            String?    @db.VarChar(280)
+  printJobId        String?    @unique @map("print_job_id") @db.Uuid
+  recordedByAdminId String?    @map("recorded_by_admin_id") @db.Uuid
+  recordedByRole    String?    @map("recorded_by_role") @db.VarChar(24)
+  actorType         String     @map("actor_type") @db.VarChar(32)
+  actorId           String     @map("actor_id") @db.VarChar(100)
+  /// Stable across a browser retry. Null for automatic deductions, whose print
+  /// job identifier is already their idempotency key.
+  requestKey        String?    @unique @map("request_key") @db.Uuid
+  requestDigest     String?    @map("request_digest") @db.VarChar(64)
+  createdAt         DateTime   @default(now()) @map("created_at")
+  kiosk             Kiosk      @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  printJob          PrintJob?  @relation(fields: [printJobId], references: [id], onDelete: Restrict)
+  recordedBy        AdminUser? @relation(fields: [recordedByAdminId], references: [id], onDelete: Restrict)
+
+  @@index([kioskId, createdAt])
+  @@index([type, createdAt])
+  @@map("kiosk_paper_events")
 }
 
 /// Durable work for a kiosk agent. The kiosk opens no inbound port: it leases
@@ -937,6 +976,7 @@ model AdminUser {
   refundAuthorizations RefundAuthorization[]
   cleanupRetryRequests CleanupRetryRequest[]
   changeExecutions     AdminChangeExecution[]
+  paperEvents          KioskPaperEvent[]
 
   @@index([status, role])
   @@map("admin_users")

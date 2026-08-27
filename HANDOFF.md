@@ -610,10 +610,11 @@ decision for, so after a migration each of the five least-privilege roles must b
 re-provisioned before deploy. That is the mechanism working, not a nuisance — but
 it does mean `pnpm db:migrate:owner` is never the last step.
 
-And **the migrator now owns fifteen tables, not nine.** Any migration that
+And **the migrator now owns sixteen tables, not nine.** Any migration that
 alters `print_job_recovery_resolutions`, `print_job_recovery_corrections`,
 `refund_authorizations`, `cleanup_retry_requests`, `admin_passwords`,
-`admin_invitations` or `admin_password_resets` has to run as the owner too,
+`admin_invitations`, `admin_password_resets` or `kiosk_paper_events` has to run
+as the owner too,
 and a role script that grants on one of them needs the owner connection — which
 is the defect Phase 5 found in `admin-append-role.mjs` and Phase 6 found again in
 `admin-reader.mjs`. If a third script is ever written, check which connection it

@@ -2,7 +2,10 @@ import { z } from "zod";
 
 import {
   ADMIN_ERROR_SUBSYSTEMS,
+  PAPER_ESTIMATE_MAX_SHEETS,
+  PAPER_ESTIMATE_STATUSES,
   RECOVERY_OUTCOMES,
+  adminKioskPaperEventSchema,
   adminRecoveryCorrectionSchema,
   adminRecoveryResolutionSchema,
   adminRefundAuthorizationSchema,
@@ -17,10 +20,11 @@ import {
  * dashboard can act through should be small enough to read in one sitting and
  * to review as a closed set.
  *
- * Five requests, in ascending order of what they can cost:
+ * A short set of requests, in ascending order of what they can cost:
  *
  *   - acknowledge an incident            nothing changes at all
  *   - ask retention to try again         a worker retries work it already owns
+ *   - add or correct kiosk paper          a software estimate changes
  *   - record a recovery observation      a new fact about a print
  *   - correct a recovery observation     a new fact superseding an earlier one
  *   - authorize a refund                 an obligation to return money
@@ -34,6 +38,41 @@ import {
  * The vocabularies here are mirrored by check constraints in the database, so a
  * value that gets past this file still cannot get past PostgreSQL.
  */
+
+// ---------------------------------------------------------------------------
+// Kiosk paper estimate
+// ---------------------------------------------------------------------------
+
+const paperNoteSchema = z.string().trim().min(3).max(280);
+
+export const addKioskPaperBodySchema = z
+  .object({
+    sheetsAdded: z.number().int().min(1).max(PAPER_ESTIMATE_MAX_SHEETS),
+    note: paperNoteSchema.optional(),
+    /** Stable across transport and step-up retries. */
+    requestKey: z.string().uuid()
+  })
+  .strict();
+
+export const correctKioskPaperBodySchema = z
+  .object({
+    estimatedSheets: z.number().int().min(0).max(PAPER_ESTIMATE_MAX_SHEETS),
+    reason: paperNoteSchema,
+    /** Stable across transport and step-up retries. */
+    requestKey: z.string().uuid()
+  })
+  .strict();
+
+export const kioskPaperMutationResponseSchema = z.object({
+  event: adminKioskPaperEventSchema,
+  estimatedSheets: z.number().int().min(0).max(PAPER_ESTIMATE_MAX_SHEETS),
+  status: z.enum(PAPER_ESTIMATE_STATUSES),
+  replayed: z.boolean()
+});
+
+export type AddKioskPaperBody = z.infer<typeof addKioskPaperBodySchema>;
+export type CorrectKioskPaperBody = z.infer<typeof correctKioskPaperBodySchema>;
+export type KioskPaperMutationResponse = z.infer<typeof kioskPaperMutationResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Print recovery resolution

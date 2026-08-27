@@ -2,6 +2,7 @@ import {
   adminChangesResponseSchema,
   adminMoneySummaryResponseSchema,
   adminErrorsResponseSchema,
+  adminKioskPaperResponseSchema,
   adminOverviewResponseSchema,
   adminPeopleResponseSchema,
   adminRefundQueueResponseSchema,
@@ -9,6 +10,7 @@ import {
   authorizeRefundResponseSchema,
   changeAdminStatusResponseSchema,
   correctRecoveryResponseSchema,
+  kioskPaperMutationResponseSchema,
   kioskAssignmentResponseSchema,
   publishChangeResponseSchema,
   resolveRecoveryResponseSchema,
@@ -20,6 +22,7 @@ import {
   type AdminAuditResponse,
   type AdminDocumentsResponse,
   type AdminKiosksResponse,
+  type AdminKioskPaperResponse,
   type AdminPaymentsResponse,
   type AdminPrintJobDetailResponse,
   type AdminPrintJobsResponse,
@@ -37,6 +40,9 @@ import {
   type ChangeAdminStatusResponse,
   type CorrectRecoveryBody,
   type CorrectRecoveryResponse,
+  type AddKioskPaperBody,
+  type CorrectKioskPaperBody,
+  type KioskPaperMutationResponse,
   type KioskAssignmentBody,
   type KioskAssignmentResponse,
   type PublishChangeBody,
@@ -55,9 +61,9 @@ import {
 import { adminRequest, adminRequestParsed } from "../auth/api.js";
 
 /**
- * The operational reads, and the five things a person can do.
+ * The operational reads and the small set of things a person can do.
  *
- * The mutating calls are at the bottom and there are exactly five of them. All
+ * The mutating calls are grouped below. All
  * go through the same `adminRequest`, so all carry the CSRF token and all
  * surface "touch your key again" the same way every other call does.
  *
@@ -90,6 +96,12 @@ export const observabilityApi = {
   // SCREAMING_SNAKE next to a button that goes nowhere useful.
   overview: () => adminRequestParsed(adminOverviewResponseSchema, "GET", "/v1/admin/overview"),
   kiosks: () => adminRequest<AdminKiosksResponse>("GET", "/v1/admin/kiosks"),
+  kioskPaper: (kioskId: string, cursor?: string) =>
+    adminRequestParsed<AdminKioskPaperResponse>(
+      adminKioskPaperResponseSchema,
+      "GET",
+      `/v1/admin/kiosks/${encodeURIComponent(kioskId)}/paper${query({ cursor })}`
+    ),
 
   sessions: (filters: ListFilters = {}) =>
     adminRequest<AdminSessionsResponse>("GET", `/v1/admin/sessions${query(filters)}`),
@@ -203,6 +215,22 @@ export const observabilityApi = {
       correctRecoveryResponseSchema,
       "POST",
       `/v1/admin/print-jobs/${encodeURIComponent(printJobId)}/recovery-correction`,
+      body
+    ),
+
+  addKioskPaper: (kioskId: string, body: AddKioskPaperBody) =>
+    adminRequestParsed<KioskPaperMutationResponse>(
+      kioskPaperMutationResponseSchema,
+      "POST",
+      `/v1/admin/kiosks/${encodeURIComponent(kioskId)}/paper/refills`,
+      body
+    ),
+
+  correctKioskPaper: (kioskId: string, body: CorrectKioskPaperBody) =>
+    adminRequestParsed<KioskPaperMutationResponse>(
+      kioskPaperMutationResponseSchema,
+      "POST",
+      `/v1/admin/kiosks/${encodeURIComponent(kioskId)}/paper/corrections`,
       body
     ),
 

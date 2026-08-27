@@ -15,6 +15,7 @@
  * Usage:
  *
  *   ADMIN_READ_DATABASE_PASSWORD=... node scripts/admin-reader.mjs provision
+ *   node scripts/admin-reader.mjs provision # reuses ADMIN_READ_DATABASE_URL
  *   node scripts/admin-reader.mjs verify
  *   node scripts/admin-reader.mjs disable
  *
@@ -40,6 +41,7 @@ import { parseArgs } from "node:util";
 import { config as loadDotenv } from "dotenv";
 import pg from "pg";
 
+import { resolveProvisionPassword } from "./admin-append-role.mjs";
 import {
   ADMIN_READER_ROLE,
   DENIED_TABLES,
@@ -112,12 +114,18 @@ if (failures > 0) process.exit(1);
  * loses its grant instead of lingering because nobody thought to revoke it.
  */
 async function provision() {
-  const password = process.env.ADMIN_READ_DATABASE_PASSWORD;
-  if (!password || password.length < 24) {
-    fail(
-      "ADMIN_READ_DATABASE_PASSWORD must be set to at least 24 characters.\n" +
-        "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\""
-    );
+  // A configured ADMIN_READ_DATABASE_URL already holds this role's credential,
+  // so re-granting after a migration does not need the secret repeated in a
+  // transient variable. Setting it explicitly still rotates the password.
+  let password;
+  try {
+    password = resolveProvisionPassword({
+      role: ADMIN_READER_ROLE,
+      passwordVariable: "ADMIN_READ_DATABASE_PASSWORD",
+      urlVariable: "ADMIN_READ_DATABASE_URL"
+    });
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "Could not resolve the reader role password.");
   }
 
   const existingTables = await listTables();

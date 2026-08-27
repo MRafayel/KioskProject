@@ -5,7 +5,7 @@ import type { PrismaClient } from "@printing-kiosk/database";
  *
  * Its sibling, `read-database.ts`, expresses "the panel cannot write" as a
  * type. This one expresses something narrower and more useful: the panel can
- * *append*, to two tables, and can read only what it needs to decide whether
+ * *append* to a short allow-list of tables, and can read only what it needs to decide whether
  * the append is allowed.
  *
  * Every model below exposes either `create` or nothing but reads. There is no
@@ -31,7 +31,7 @@ import type { PrismaClient } from "@printing-kiosk/database";
  */
 type ReadOnly<TDelegate> = Pick<
   TDelegate,
-  Extract<keyof TDelegate, "findFirst" | "findUnique" | "findMany" | "count">
+  Extract<keyof TDelegate, "findFirst" | "findUnique" | "findMany" | "count" | "aggregate">
 >;
 
 /** A table an admin action may add a row to, and nothing else. */
@@ -52,6 +52,8 @@ export interface AdminWriteDatabase {
    * worker does after reading this, and not something an admin action does.
    */
   cleanupRetryRequest: Appendable<PrismaClient["cleanupRetryRequest"]>;
+  /** Refills and corrections. Automatic deductions use the print path. */
+  kioskPaperEvent: Appendable<PrismaClient["kioskPaperEvent"]>;
   /** Every admin action records itself, including the ones that were refused. */
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
 
@@ -64,6 +66,7 @@ export interface AdminWriteDatabase {
   printSession: ReadOnly<PrismaClient["printSession"]>;
   payment: ReadOnly<PrismaClient["payment"]>;
   cleanupRun: ReadOnly<PrismaClient["cleanupRun"]>;
+  kiosk: ReadOnly<PrismaClient["kiosk"]>;
   adminUser: ReadOnly<PrismaClient["adminUser"]>;
   adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
 
@@ -85,11 +88,13 @@ export interface AdminWriteTransaction {
   printJobRecoveryResolution: Appendable<PrismaClient["printJobRecoveryResolution"]>;
   printJobRecoveryCorrection: Appendable<PrismaClient["printJobRecoveryCorrection"]>;
   cleanupRetryRequest: Appendable<PrismaClient["cleanupRetryRequest"]>;
+  kioskPaperEvent: Appendable<PrismaClient["kioskPaperEvent"]>;
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
   printJob: ReadOnly<PrismaClient["printJob"]>;
   printSession: ReadOnly<PrismaClient["printSession"]>;
   payment: ReadOnly<PrismaClient["payment"]>;
   cleanupRun: ReadOnly<PrismaClient["cleanupRun"]>;
+  kiosk: ReadOnly<PrismaClient["kiosk"]>;
   adminUser: ReadOnly<PrismaClient["adminUser"]>;
   adminKioskScope: ReadOnly<PrismaClient["adminKioskScope"]>;
 }

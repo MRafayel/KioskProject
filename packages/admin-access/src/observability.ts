@@ -239,6 +239,69 @@ export const adminOverviewResponseSchema = z.object({
 // Kiosks
 // ---------------------------------------------------------------------------
 
+/** A deliberately conservative default for a common 500-sheet tray/ream. */
+export const PAPER_GETTING_LOW_THRESHOLD_SHEETS = 100;
+export const PAPER_REFILL_SOON_THRESHOLD_SHEETS = 25;
+/** Bounds human input and keeps every aggregate inside a safe integer. */
+export const PAPER_ESTIMATE_MAX_SHEETS = 100_000;
+export const PAPER_ESTIMATE_STATUSES = [
+  "HEALTHY",
+  "GETTING_LOW",
+  "REFILL_SOON",
+  "UNAVAILABLE"
+] as const;
+export type PaperEstimateStatus = (typeof PAPER_ESTIMATE_STATUSES)[number];
+
+/** One shared interpretation for the API and every place the UI shows paper. */
+export function classifyPaperEstimate(estimatedSheets: number | null): PaperEstimateStatus {
+  if (estimatedSheets === null) return "UNAVAILABLE";
+  if (estimatedSheets <= PAPER_REFILL_SOON_THRESHOLD_SHEETS) return "REFILL_SOON";
+  if (estimatedSheets <= PAPER_GETTING_LOW_THRESHOLD_SHEETS) return "GETTING_LOW";
+  return "HEALTHY";
+}
+
+export const adminKioskPaperSummarySchema = z.object({
+  /** Null until the first refill or correction starts software tracking. */
+  estimatedSheets: z.number().int().min(0).max(PAPER_ESTIMATE_MAX_SHEETS).nullable(),
+  status: z.enum(PAPER_ESTIMATE_STATUSES),
+  gettingLowAtSheets: z.literal(PAPER_GETTING_LOW_THRESHOLD_SHEETS),
+  refillSoonAtSheets: z.literal(PAPER_REFILL_SOON_THRESHOLD_SHEETS),
+  lastRefill: z
+    .object({
+      sheetsAdded: z.number().int().positive().max(PAPER_ESTIMATE_MAX_SHEETS),
+      note: z.string().max(280).nullable(),
+      recordedByAdminUserId: z.string().uuid(),
+      recordedByDisplayName: z.string().max(120).nullable(),
+      recordedAt: isoTimestamp
+    })
+    .nullable()
+});
+
+export const KIOSK_PAPER_EVENT_TYPES = ["REFILL", "CORRECTION", "PRINT_DEDUCTION"] as const;
+
+export const adminKioskPaperEventSchema = z.object({
+  id: z.string().uuid(),
+  type: z.enum(KIOSK_PAPER_EVENT_TYPES),
+  /** Added, corrected-to, or physically consumed, depending on the type. */
+  quantitySheets: z.number().int().min(0).max(1_000_000),
+  /** The signed change actually applied to the estimate. */
+  deltaSheets: z.number().int(),
+  estimateAffected: z.boolean(),
+  reason: z.string().max(280).nullable(),
+  printJobId: z.string().uuid().nullable(),
+  recordedByAdminUserId: z.string().uuid().nullable(),
+  recordedByDisplayName: z.string().max(120).nullable(),
+  recordedByRole: z.string().max(24).nullable(),
+  createdAt: isoTimestamp
+});
+
+export const adminKioskPaperResponseSchema = z.object({
+  kioskId: z.string().max(64),
+  paper: adminKioskPaperSummarySchema,
+  items: z.array(adminKioskPaperEventSchema),
+  nextCursor: z.string().nullable()
+});
+
 export const adminKioskSchema = z.object({
   id: z.string().max(64),
   publicCode: z.string().max(64),
@@ -275,7 +338,8 @@ export const adminKioskSchema = z.object({
     .nullable(),
   liveSessions: z.number().int().nonnegative(),
   openPrintJobs: z.number().int().nonnegative(),
-  recoveryRequiredJobs: z.number().int().nonnegative()
+  recoveryRequiredJobs: z.number().int().nonnegative(),
+  paper: adminKioskPaperSummarySchema
 });
 
 export const adminKiosksResponseSchema = z.object({
@@ -1112,6 +1176,9 @@ export const adminAuditResponseSchema = z.object({
 export type AdminOverviewResponse = z.infer<typeof adminOverviewResponseSchema>;
 export type AdminKiosksResponse = z.infer<typeof adminKiosksResponseSchema>;
 export type AdminKiosk = z.infer<typeof adminKioskSchema>;
+export type AdminKioskPaperSummary = z.infer<typeof adminKioskPaperSummarySchema>;
+export type AdminKioskPaperEvent = z.infer<typeof adminKioskPaperEventSchema>;
+export type AdminKioskPaperResponse = z.infer<typeof adminKioskPaperResponseSchema>;
 export type AdminSessionsResponse = z.infer<typeof adminSessionsResponseSchema>;
 export type AdminSessionSummary = z.infer<typeof adminSessionSummarySchema>;
 export type AdminSessionDetailResponse = z.infer<typeof adminSessionDetailResponseSchema>;

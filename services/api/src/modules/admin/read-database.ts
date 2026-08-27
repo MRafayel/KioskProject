@@ -49,6 +49,8 @@ export interface AdminReadDatabase {
   refundAuthorization: ReadOnly<PrismaClient["refundAuthorization"]>;
   /** Who asked retention to try again, and about which failure. */
   cleanupRetryRequest: ReadOnly<PrismaClient["cleanupRetryRequest"]>;
+  /** Append-only refills, corrections and confirmed print deductions. */
+  kioskPaperEvent: ReadOnly<PrismaClient["kioskPaperEvent"]>;
   agentCommand: ReadOnly<PrismaClient["agentCommand"]>;
   outboxEvent: ReadOnly<PrismaClient["outboxEvent"]>;
   auditEvent: ReadOnly<PrismaClient["auditEvent"]>;

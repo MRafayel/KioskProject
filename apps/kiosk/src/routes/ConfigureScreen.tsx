@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { KioskRedirect, useKioskNavigate } from "../app/router.js";
 import { DocumentCard, pageButtonKey, type EnlargedPage } from "../components/DocumentCard.js";
+import { PaperShortfallModal } from "../components/PaperShortfallModal.js";
 import { SessionTimer } from "../components/SessionTimer.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
@@ -21,6 +22,7 @@ import {
   type PagePrintState,
   type ReadyPrototypeFile
 } from "../features/session/model.js";
+import { exceedsPaperEstimate, kioskPaperQueryOptions } from "../features/session/paper.js";
 import {
   readKioskPrintCapabilities,
   readKioskSessionVersion
@@ -125,20 +127,8 @@ export function ConfigureScreen() {
     dispatch
   });
 
-  // The second half of the upload gate. The button that leads here is disabled
-  // and guarded, but this screen prices a job, and a job whose contents are
-  // still being checked has no settled price — so anything that reached here
-  // with a document still validating, or one that was rejected, goes back.
-  if (!sessionId || !canLeaveUpload(state.files)) return <KioskRedirect to="/upload" />;
-
-  const capabilities = state.capabilities;
-  const duplexAvailable =
-    capabilities === null || capabilities.duplexModes.some((mode) => mode !== "SIMPLEX");
-  const maxCopies = capabilities?.maxCopies ?? FALLBACK_MAX_COPIES;
   const localSummary = calculatePrintSummary(state.files, state.settings);
   const priced = state.pricing.settings;
-  const quote = state.pricing.quote;
-  const payable = isQuotePayable(quote, new Date());
   // Server counts win whenever they exist; the local arithmetic only fills the
   // moment between a touch and the control plane's answer.
   const summary = priced
@@ -152,6 +142,72 @@ export function ConfigureScreen() {
         totalSides: localSummary.totalSides,
         totalSheets: localSummary.totalSheets
       };
+  // The physical sheets this configuration would consume, which is the only
+  // count paper cares about: duplex halves it, copies multiply it, and several
+  // documents each round up on their own last sheet. It is exactly the number
+  // shown in the summary beside the price, so the refusal and the arithmetic
+  // the customer can see are never two different claims.
+  const requiredSheets = summary.totalSheets;
+
+  const paperQuery = useQuery(kioskPaperQueryOptions());
+  const availableSheets = paperQuery.data.estimatedSheets;
+  const paperShort = exceedsPaperEstimate(requiredSheets, availableSheets);
+
+  // Shown the moment the job stops fitting rather than when the customer
+  // reaches for the pay button, so nobody spends a minute on settings that were
+  // never going to print. Only the crossing opens it: raising copies again on a
+  // job that is already too big is not news, and re-opening on every touch
+  // would make the dialog something to swat away rather than something to read.
+  const [paperDialogOpen, setPaperDialogOpen] = useState(false);
+  const wasPaperShort = useRef(false);
+  useEffect(() => {
+    if (paperShort && !wasPaperShort.current) setPaperDialogOpen(true);
+    if (!paperShort) setPaperDialogOpen(false);
+    wasPaperShort.current = paperShort;
+  }, [paperShort]);
+
+  // The second half of the upload gate. The button that leads here is disabled
+  // and guarded, but this screen prices a job, and a job whose contents are
+  // still being checked has no settled price — so anything that reached here
+  // with a document still validating, or one that was rejected, goes back.
+  if (!sessionId || !canLeaveUpload(state.files)) return <KioskRedirect to="/upload" />;
+
+  const capabilities = state.capabilities;
+  const duplexAvailable =
+    capabilities === null || capabilities.duplexModes.some((mode) => mode !== "SIMPLEX");
+  const maxCopies = capabilities?.maxCopies ?? FALLBACK_MAX_COPIES;
+  const quote = state.pricing.quote;
+  const payable = isQuotePayable(quote, new Date());
+
+  /**
+   * The last look at the paper before the customer spends anything.
+   *
+   * The polled answer can be seconds old, and the thing that ages it is exactly
+   * the thing that matters: another job completing at this kiosk. A press is a
+   * deliberate act and one more read costs nothing beside a payment, so the
+   * button asks again and refuses here rather than at a checkout the customer
+   * has already started.
+   *
+   * A read that fails raises rather than answering, and is caught here so that
+   * losing contact with the agent cannot lift a shortfall the screen had
+   * already established.
+   */
+  const reviewAndPay = async () => {
+    let latest = availableSheets;
+    try {
+      latest = (await queryClient.fetchQuery({ ...kioskPaperQueryOptions(), staleTime: 0 }))
+        .estimatedSheets;
+    } catch {
+      // Keep the last answer that arrived rather than treating a failed read as
+      // news about the tray.
+    }
+    if (exceedsPaperEstimate(requiredSheets, latest)) {
+      setPaperDialogOpen(true);
+      return;
+    }
+    navigate("/checkout");
+  };
+
   const removeFile = async (file: ReadyPrototypeFile) => {
     if (removingId) return;
     setRemovingId(file.id);
@@ -325,12 +381,20 @@ export function ConfigureScreen() {
           <button
             className="button button--primary button--wide"
             type="button"
-            disabled={!payable}
-            onClick={() => void navigate("/checkout")}
+            // Disabled as well as guarded, for the reason the welcome screen
+            // gives: a button covered by a dialog is still a button a stray tap
+            // can reach. The guard inside `reviewAndPay` is the decision; this
+            // attribute only describes one already made.
+            disabled={!payable || paperShort}
+            onClick={() => void reviewAndPay()}
           >
             {messages.configure.reviewAndPay} <span aria-hidden="true">→</span>
           </button>
-          {payable ? null : (
+          {paperShort ? (
+            <p className="configuration-error" role="alert">
+              {messages.configure.paperShortHelp}
+            </p>
+          ) : payable ? null : (
             <p className="upload-panel__pending" role="status">
               {state.pricing.status === "FAILED"
                 ? messages.configure.priceUnavailableHelp
@@ -346,6 +410,14 @@ export function ConfigureScreen() {
           </button>
         </aside>
       </div>
+
+      {paperDialogOpen && availableSheets !== null ? (
+        <PaperShortfallModal
+          availableSheets={availableSheets}
+          requiredSheets={requiredSheets}
+          onDismiss={() => setPaperDialogOpen(false)}
+        />
+      ) : null}
 
       {enlarged ? (
         <div

@@ -17,6 +17,7 @@ import {
   isReadyFile,
   type PrototypeFile
 } from "../features/session/model.js";
+import { kioskPaperQueryOptions } from "../features/session/paper.js";
 import { listKioskSessionFiles } from "../features/session/sessionService.js";
 
 export function UploadScreen() {
@@ -39,6 +40,12 @@ export function UploadScreen() {
     gcTime: 0,
     retry: false
   });
+
+  // Read here as well as on the configure screen, and shared by query key, so
+  // the number the customer is told about while uploading is the same one the
+  // job is checked against a moment later.
+  const paperQuery = useQuery(kioskPaperQueryOptions());
+  const paper = paperQuery.data;
 
   useEffect(() => {
     if (!filesQuery.data) return;
@@ -106,6 +113,16 @@ export function UploadScreen() {
             marginSize={2}
             title={messages.upload.qrTitle}
           />
+          {/* What this kiosk can print now, directly under the code the
+              customer is about to photograph. A count when one is being kept,
+              and an honest absence when one is not: a kiosk nobody has recorded
+              paper for is not a kiosk with no paper, and showing "0 sheets"
+              would say the wrong thing about a full tray. */}
+          <p className="qr-card__paper" role="status">
+            {paper.estimatedSheets === null
+              ? messages.upload.paperUnavailable
+              : messages.upload.paperAvailable(paper.estimatedSheets)}
+          </p>
           <div className="qr-card__timer">
             <SessionTimer compact />
           </div>

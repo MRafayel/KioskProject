@@ -20,6 +20,7 @@
  */
 
 import process from "node:process";
+import { URL } from "node:url";
 
 import pg from "pg";
 
@@ -46,6 +47,96 @@ const ALL_PRIVILEGES = ["SELECT", "INSERT", ...MUTATING_PRIVILEGES];
  * @property {Record<string,string>} settings  connection settings pinned on it
  * @property {string} summary                  one line printed after provisioning
  */
+
+const MINIMUM_ROLE_PASSWORD_LENGTH = 24;
+
+/**
+ * Resolve the credential used while creating or synchronising a role.
+ *
+ * Deployments already have to provide the role's connection URL to the API.
+ * Requiring the same secret a second time in a transient `*_PASSWORD` variable
+ * made routine post-migration provisioning fail even when the configured URL
+ * was correct. The explicit variable remains useful when creating a role for
+ * the first time, but an existing role URL is an equally valid source.
+ *
+ * The URL is accepted only when it names the role being provisioned. This
+ * prevents a typo from changing the role to some other connection's password.
+ * No error includes the URL or its password.
+ *
+ * @param {Pick<AppendRolePolicy, "role" | "passwordVariable" | "urlVariable">} policy
+ * @param {Record<string, string | undefined>} environment
+ */
+export function resolveProvisionPassword(policy, environment = process.env) {
+  const explicitPassword = environment[policy.passwordVariable];
+  if (explicitPassword !== undefined && explicitPassword !== "") {
+    assertPasswordLength(policy, explicitPassword, policy.passwordVariable);
+    return explicitPassword;
+  }
+
+  const connectionString = environment[policy.urlVariable];
+  if (connectionString) {
+    let url;
+    try {
+      url = new URL(connectionString);
+    } catch {
+      throw new FatalPolicyError(
+        `${policy.urlVariable} must be a valid PostgreSQL connection URL.`
+      );
+    }
+
+    if (url.protocol !== "postgresql:" && url.protocol !== "postgres:") {
+      throw new FatalPolicyError(
+        `${policy.urlVariable} must be a PostgreSQL connection URL.`
+      );
+    }
+
+    let username;
+    let password;
+    try {
+      username = decodeURIComponent(url.username);
+      password = decodeURIComponent(url.password);
+    } catch {
+      throw new FatalPolicyError(
+        `${policy.urlVariable} contains invalid percent-encoding in its credentials.`
+      );
+    }
+
+    if (username !== policy.role) {
+      throw new FatalPolicyError(
+        `${policy.urlVariable} must use PostgreSQL role ${policy.role} before its ` +
+          "password can be used for provisioning."
+      );
+    }
+
+    assertPasswordLength(policy, password, policy.urlVariable);
+    return password;
+  }
+
+  throw passwordConfigurationError(policy);
+}
+
+function assertPasswordLength(policy, password, source) {
+  if (password.length >= MINIMUM_ROLE_PASSWORD_LENGTH) return;
+  throw new FatalPolicyError(
+    `${source} must provide a password of at least ${MINIMUM_ROLE_PASSWORD_LENGTH} characters.\n` +
+      passwordConfigurationHelp(policy)
+  );
+}
+
+function passwordConfigurationError(policy) {
+  return new FatalPolicyError(
+    `${policy.passwordVariable} or ${policy.urlVariable} must provide the role password.\n` +
+      passwordConfigurationHelp(policy)
+  );
+}
+
+function passwordConfigurationHelp(policy) {
+  return (
+    `Set ${policy.passwordVariable} explicitly, or configure ${policy.urlVariable} with ` +
+    `the ${policy.role} credential.\n` +
+    "Generate a password with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\""
+  );
+}
 
 /**
  * Run one command against one policy. Returns the process exit code.
@@ -129,13 +220,7 @@ class AppendRoleSession {
    */
   async provision() {
     const { policy, client } = this;
-    const password = process.env[policy.passwordVariable];
-    if (!password || password.length < 24) {
-      throw new FatalPolicyError(
-        `${policy.passwordVariable} must be set to at least 24 characters.\n` +
-          "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\""
-      );
-    }
+    const password = resolveProvisionPassword(policy);
 
     const existingTables = await this.listTables();
     this.assertPolicyMatchesSchema(existingTables);

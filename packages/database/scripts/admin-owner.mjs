@@ -19,6 +19,7 @@
  * Usage:
  *
  *   ADMIN_OWNER_DATABASE_PASSWORD=... node scripts/admin-owner.mjs provision
+ *   node scripts/admin-owner.mjs provision # reuses ADMIN_OWNER_DATABASE_URL
  *   node scripts/admin-owner.mjs verify
  *
  * `provision` must be run by a connection that can create roles and reassign
@@ -42,6 +43,7 @@ import { parseArgs } from "node:util";
 import { config as loadDotenv } from "dotenv";
 import pg from "pg";
 
+import { resolveProvisionPassword } from "./admin-append-role.mjs";
 import { quoteIdentifier, quoteLiteral } from "./sql-identifiers.mjs";
 
 const packageDirectory = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -123,7 +125,10 @@ const OWNED_TABLES = Object.freeze({
   print_job_recovery_resolutions: ["SELECT"],
   print_job_recovery_corrections: ["SELECT"],
   refund_authorizations: ["SELECT"],
-  cleanup_retry_requests: ["SELECT"]
+  cleanup_retry_requests: ["SELECT"],
+  // The product print path appends automatic deductions; it never rewrites
+  // inventory history.
+  kiosk_paper_events: ["SELECT", "INSERT"]
 });
 
 const ALL_PRIVILEGES = [
@@ -173,12 +178,18 @@ try {
 if (failures > 0) process.exit(1);
 
 async function provision() {
-  const password = process.env.ADMIN_OWNER_DATABASE_PASSWORD;
-  if (!password || password.length < 24) {
-    fail(
-      "ADMIN_OWNER_DATABASE_PASSWORD must be set to at least 24 characters.\n" +
-        "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\""
-    );
+  // Taking ownership of a table a migration just created is routine, and a
+  // configured ADMIN_OWNER_DATABASE_URL already holds this role's credential.
+  // Setting the variable explicitly still creates or rotates it.
+  let password;
+  try {
+    password = resolveProvisionPassword({
+      role: ADMIN_OWNER_ROLE,
+      passwordVariable: "ADMIN_OWNER_DATABASE_PASSWORD",
+      urlVariable: "ADMIN_OWNER_DATABASE_URL"
+    });
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "Could not resolve the owner role password.");
   }
 
   const existingTables = await listTables();

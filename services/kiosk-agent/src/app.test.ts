@@ -633,3 +633,53 @@ describe("kiosk agent settings and pricing facade", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 });
+
+describe("kiosk agent paper facade", () => {
+  it("asks the control plane about its own kiosk and adds the device credential", async () => {
+    // The estimate lives in a ledger the admin surface writes. The agent
+    // forwards the question rather than forming an opinion of its own, exactly
+    // as it does for availability.
+    const environment = loadEnvironment({
+      NODE_ENV: "test",
+      API_ORIGIN: "https://api.example.test",
+      DEV_KIOSK_API_KEY: "test-kiosk-api-key-000000"
+    });
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const app = await buildAgent(environment, {
+      upstreamFetch: (input, init) => {
+        requests.push({ url: String(input), init });
+        return Promise.resolve(
+          new Response(JSON.stringify({ paper: { estimatedSheets: 118 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+    });
+    openApps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/v1/paper" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ paper: { estimatedSheets: 118 } });
+    expect(requests[0]?.url).toBe("https://api.example.test/v1/kiosks/kiosk_dev_001/paper");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
+      "Bearer test-kiosk-api-key-000000"
+    );
+    expect(response.body).not.toContain(environment.DEV_KIOSK_API_KEY);
+  });
+
+  it("fails rather than inventing a count when the control plane cannot be reached", async () => {
+    // The screen turns a failure into "unknown" for itself. What it must never
+    // receive from here is a number nobody answered with.
+    const app = await buildAgent(loadEnvironment({ NODE_ENV: "test" }), {
+      upstreamFetch: () => Promise.reject(new Error("network unavailable"))
+    });
+    openApps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/v1/paper" });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).not.toHaveProperty("paper");
+  });
+});

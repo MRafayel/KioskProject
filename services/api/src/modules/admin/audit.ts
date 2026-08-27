@@ -81,6 +81,14 @@ const ALLOWED_METADATA_KEYS = new Set([
   "observedRecordId",
   "physicalSheets",
   "status",
+  // Software paper inventory. Counts only; the estimate is explicitly not a
+  // sensor reading, and the event id ties the audit row to its immutable ledger.
+  "paperEventId",
+  "sheetsAdded",
+  "estimatedSheets",
+  "paperSheetsConsumed",
+  "paperEstimateDelta",
+  "paperEstimateAffected",
   // Asking retention to try again.
   "cleanupRunId",
   "attempts",
@@ -151,8 +159,8 @@ export interface WriteAdminAuditEventInput {
  * Anything that can append one audit row.
  *
  * Structural rather than the full client, because the callers are deliberately
- * narrow types: an admin action's connection exposes two tables and the `create`
- * method, and requiring a `PrismaClient` here would have forced it to widen the
+ * narrow types: an admin action's connection exposes a short table allow-list
+ * and the `create` method, and requiring a `PrismaClient` here would have forced it to widen the
  * one place where being narrow is the point.
  */
 export type AuditEventWriter =

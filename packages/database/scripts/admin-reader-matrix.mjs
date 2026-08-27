@@ -100,6 +100,8 @@ export const READABLE_TABLES = Object.freeze({
   // Who asked retention to try again, and about which failure. Operational
   // state the retention screen reports; it names no document and no object key.
   cleanup_retry_requests: "*",
+  // Software inventory only: counts, actors and timestamps. No document data.
+  kiosk_paper_events: "*",
 
   // `selections` carries per-document content digests until retention strips
   // them. The priced aggregates beside it answer every operational question.

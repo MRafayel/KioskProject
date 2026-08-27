@@ -31,7 +31,14 @@ import { observabilityApi } from "../features/observability/api.js";
 
 vi.mock("../features/auth/SessionProvider.js", () => {
   const handleAuthenticationError = () => false;
-  return { useSession: () => ({ can: () => true, handleAuthenticationError }) };
+  return {
+    useSession: () => ({
+      can: () => true,
+      handleAuthenticationError,
+      confirmCurrentIdentity: () => Promise.resolve(true),
+      stepUp: () => Promise.resolve(true)
+    })
+  };
 });
 
 afterEach(() => {
@@ -130,6 +137,12 @@ describe("Printing", () => {
 describe("Kiosks", () => {
   beforeEach(() => {
     vi.spyOn(observabilityApi, "kiosks").mockResolvedValue(kiosks());
+    vi.spyOn(observabilityApi, "kioskPaper").mockResolvedValue({
+      kioskId: "k1",
+      paper: kiosks().items[0]!.paper,
+      items: [],
+      nextCursor: null
+    });
   });
 
   it("filters to offline kiosks and exposes degraded heartbeat state separately", async () => {
@@ -144,6 +157,56 @@ describe("Kiosks", () => {
 
     await user.click(screen.getByRole("button", { name: "Show all" }));
     await waitFor(() => expect(bodyRows()).toHaveLength(2));
+  });
+
+  it("filters low estimates and records refills and corrections in the kiosk sheet", async () => {
+    const user = userEvent.setup();
+    const add = vi.spyOn(observabilityApi, "addKioskPaper").mockResolvedValue({
+      event: paperEvent("REFILL", 500, 500),
+      estimatedSheets: 520,
+      status: "HEALTHY",
+      replayed: false
+    });
+    const correct = vi.spyOn(observabilityApi, "correctKioskPaper").mockResolvedValue({
+      event: paperEvent("CORRECTION", 200, 180),
+      estimatedSheets: 200,
+      status: "HEALTHY",
+      replayed: false
+    });
+    render(<KiosksPanel />);
+
+    const lowCard = await tileNamed(/^Low paper estimate: 1\./);
+    await user.click(lowCard);
+    expect(lowCard).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    expect(screen.getByText("Front counter")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Open Front counter/ }));
+    const sheet = await screen.findByRole("dialog", { name: "Front counter" });
+    expect(within(sheet).getByText("~20 sheets remaining")).toBeVisible();
+    expect(within(sheet).getByText(/Software estimate only/)).toBeVisible();
+
+    await user.click(within(sheet).getByRole("button", { name: "Add paper" }));
+    await user.type(within(sheet).getByLabelText("Physical sheets loaded"), "500");
+    await user.click(within(sheet).getByRole("button", { name: "Add to estimate" }));
+    await waitFor(() => expect(add).toHaveBeenCalledOnce());
+    const refillCall = add.mock.calls[0];
+    expect(refillCall?.[0]).toBe("k1");
+    expect(refillCall?.[1].sheetsAdded).toBe(500);
+    expect(refillCall?.[1].requestKey).toMatch(/^[0-9a-f-]{36}$/u);
+
+    await user.click(within(sheet).getByRole("button", { name: "Correct estimate" }));
+    const estimate = within(sheet).getByLabelText("Estimated sheets remaining");
+    await user.clear(estimate);
+    await user.type(estimate, "200");
+    await user.type(within(sheet).getByLabelText("Reason for correction"), "Tray counted");
+    await user.click(within(sheet).getByRole("button", { name: "Correct estimate" }));
+    await waitFor(() => expect(correct).toHaveBeenCalledOnce());
+    const correctionCall = correct.mock.calls[0];
+    expect(correctionCall?.[0]).toBe("k1");
+    expect(correctionCall?.[1].estimatedSheets).toBe(200);
+    expect(correctionCall?.[1].reason).toBe("Tray counted");
+    expect(correctionCall?.[1].requestKey).toMatch(/^[0-9a-f-]{36}$/u);
   });
 });
 
@@ -342,15 +405,57 @@ function kiosks(): AdminKiosksResponse {
     printer: null,
     liveSessions: 0,
     openPrintJobs: 0,
-    recoveryRequiredJobs: 0
+    recoveryRequiredJobs: 0,
+    paper: {
+      estimatedSheets: null,
+      status: "UNAVAILABLE" as const,
+      gettingLowAtSheets: 100 as const,
+      refillSoonAtSheets: 25 as const,
+      lastRefill: null
+    }
   };
   return {
     scoped: false,
     items: [
-      { ...base, id: "k1", publicCode: "K-1", name: "Front counter", liveness: "ONLINE" },
+      {
+        ...base,
+        id: "k1",
+        publicCode: "K-1",
+        name: "Front counter",
+        liveness: "ONLINE",
+        paper: {
+          estimatedSheets: 20,
+          status: "REFILL_SOON",
+          gettingLowAtSheets: 100,
+          refillSoonAtSheets: 25,
+          lastRefill: {
+            sheetsAdded: 500,
+            note: "New ream",
+            recordedByAdminUserId: uuid(8),
+            recordedByDisplayName: "Operator One",
+            recordedAt: "2026-08-23T12:00:00.000Z"
+          }
+        }
+      },
       { ...base, id: "k2", publicCode: "K-2", name: "Back office", liveness: "OFFLINE" }
     ]
   };
+}
+
+function paperEvent(type: "REFILL" | "CORRECTION", quantitySheets: number, deltaSheets: number) {
+  return {
+    id: uuid(type === "REFILL" ? 9 : 10),
+    type,
+    quantitySheets,
+    deltaSheets,
+    estimateAffected: true,
+    reason: type === "CORRECTION" ? "Tray counted" : null,
+    printJobId: null,
+    recordedByAdminUserId: uuid(8),
+    recordedByDisplayName: "Operator One",
+    recordedByRole: "OPERATOR",
+    createdAt: "2026-08-23T12:00:00.000Z"
+  } as const;
 }
 
 function retention(): AdminRetentionResponse {
