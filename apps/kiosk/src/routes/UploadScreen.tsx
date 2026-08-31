@@ -95,7 +95,6 @@ export function UploadScreen() {
   return (
     <div className="screen-grid screen-grid--upload">
       <section className="screen-copy" aria-labelledby="upload-title">
-        <p className="eyebrow">{messages.upload.step}</p>
         <h1 id="upload-title">{messages.upload.title}</h1>
         <p>{messages.upload.description}</p>
 

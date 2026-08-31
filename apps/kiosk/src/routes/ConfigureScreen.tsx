@@ -285,7 +285,6 @@ export function ConfigureScreen() {
     <div className="configuration-page">
       <header className="screen-heading">
         <div>
-          <p className="eyebrow">{messages.configure.step}</p>
           <h1>{messages.configure.title}</h1>
           <p>
             {documents.length > 1
@@ -293,13 +292,6 @@ export function ConfigureScreen() {
               : messages.configure.description}
           </p>
         </div>
-        <button
-          className="button button--quiet"
-          type="button"
-          onClick={() => void navigate("/upload")}
-        >
-          {messages.configure.addDocument}
-        </button>
       </header>
       {removeFailed ? (
         <p className="configuration-error" role="alert">
@@ -413,7 +405,7 @@ export function ConfigureScreen() {
             type="button"
             onClick={() => void navigate("/upload")}
           >
-            {messages.configure.backToUpload}
+            {messages.configure.addDocument}
           </button>
         </aside>
       </div>

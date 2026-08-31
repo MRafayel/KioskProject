@@ -5,13 +5,11 @@ export interface MessageCatalog {
   brand: {
     name: string;
     welcomeSubtitle: string;
-    activeSubtitle: string;
   };
   common: {
     cancel: string;
     printProgress: string;
     steps: [string, string, string, string];
-    privacyNotice: string;
     keepSession: string;
     cancelSession: string;
     cancelTitle: string;
@@ -37,7 +35,6 @@ export interface MessageCatalog {
     printerOutOfPaperError: string;
   };
   upload: {
-    step: string;
     title: string;
     description: string;
     instructionCamera: string;
@@ -79,7 +76,6 @@ export interface MessageCatalog {
     fileMeta: (pageCount: number, size: string) => string;
   };
   configure: {
-    step: string;
     title: string;
     description: string;
     descriptionMany: (count: number) => string;
@@ -155,10 +151,8 @@ export interface MessageCatalog {
     /** The same refusal, beside the button, for as long as it stands. */
     paperShortHelp: string;
     reviewAndPay: string;
-    backToUpload: string;
   };
   checkout: {
-    step: string;
     title: string;
     description: string;
     selectedPages: (count: number) => string;
@@ -287,14 +281,12 @@ const english: MessageCatalog = {
   languageSelectorLabel: "Choose another language",
   brand: {
     name: "Print kiosk",
-    welcomeSubtitle: "Private self-service printing",
-    activeSubtitle: "Black-and-white documents"
+    welcomeSubtitle: "Private self-service printing"
   },
   common: {
     cancel: "Cancel",
     printProgress: "Print progress",
     steps: ["Upload", "Settings", "Pay", "Print"],
-    privacyNotice: "Private files are removed automatically after this session.",
     keepSession: "Keep session",
     cancelSession: "Cancel session",
     cancelTitle: "Cancel this print session?",
@@ -323,7 +315,6 @@ const english: MessageCatalog = {
     printerOutOfPaperError: "The printer is out of paper — please contact staff."
   },
   upload: {
-    step: "Step 1 of 4",
     title: "Upload your document",
     description: "Scan this QR code with your phone. No account or app is needed.",
     instructionCamera: "Open your phone camera",
@@ -371,7 +362,6 @@ const english: MessageCatalog = {
     fileMeta: (pageCount, size) => `${pageCount} ${pageCount === 1 ? "page" : "pages"} · ${size}`
   },
   configure: {
-    step: "Step 2 of 4",
     title: "Choose print settings",
     description: "Review each option before payment. All output is black-and-white.",
     descriptionMany: (count) =>
@@ -450,11 +440,9 @@ const english: MessageCatalog = {
     paperShortAdvice: "Reduce the number of pages or copies.",
     paperShortDismiss: "Change settings",
     paperShortHelp: "Reduce the pages or copies to fit the paper available.",
-    reviewAndPay: "Review and pay",
-    backToUpload: "Back to upload"
+    reviewAndPay: "Review and pay"
   },
   checkout: {
-    step: "Step 3 of 4",
     title: "Review and pay",
     description: "Check your print details. The prototype will simulate payment at this kiosk.",
     selectedPages: (count) => `${count} selected ${count === 1 ? "page" : "pages"}`,
@@ -571,14 +559,12 @@ const russian: MessageCatalog = {
   languageSelectorLabel: "Выберите другой язык",
   brand: {
     name: "Терминал печати",
-    welcomeSubtitle: "Безопасная самостоятельная печать",
-    activeSubtitle: "Чёрно-белая печать документов"
+    welcomeSubtitle: "Безопасная самостоятельная печать"
   },
   common: {
     cancel: "Отменить",
     printProgress: "Этапы печати",
     steps: ["Загрузка", "Настройки", "Оплата", "Печать"],
-    privacyNotice: "Личные файлы автоматически удалятся после завершения сеанса.",
     keepSession: "Продолжить",
     cancelSession: "Отменить сеанс",
     cancelTitle: "Отменить этот сеанс печати?",
@@ -607,7 +593,6 @@ const russian: MessageCatalog = {
     printerOutOfPaperError: "В принтере закончилась бумага — обратитесь к персоналу."
   },
   upload: {
-    step: "Шаг 1 из 4",
     title: "Загрузите документ",
     description: "Отсканируйте QR-код телефоном. Регистрация и приложение не нужны.",
     instructionCamera: "Откройте камеру телефона",
@@ -655,7 +640,6 @@ const russian: MessageCatalog = {
       `${pageCount} ${russianPlural(pageCount, "страница", "страницы", "страниц")} · ${size}`
   },
   configure: {
-    step: "Шаг 2 из 4",
     title: "Настройте печать",
     description:
       "Проверьте все параметры перед оплатой. Печать выполняется только в чёрно-белом режиме.",
@@ -735,11 +719,9 @@ const russian: MessageCatalog = {
     paperShortAdvice: "Уменьшите количество страниц или копий.",
     paperShortDismiss: "Изменить настройки",
     paperShortHelp: "Уменьшите количество страниц или копий, чтобы хватило бумаги.",
-    reviewAndPay: "Проверить и оплатить",
-    backToUpload: "Вернуться к загрузке"
+    reviewAndPay: "Проверить и оплатить"
   },
   checkout: {
-    step: "Шаг 3 из 4",
     title: "Проверьте заказ и оплатите",
     description: "Проверьте параметры печати. В прототипе оплата на терминале будет имитироваться.",
     selectedPages: (count) =>
@@ -862,14 +844,12 @@ const armenian: MessageCatalog = {
   languageSelectorLabel: "Ընտրեք այլ լեզու",
   brand: {
     name: "Տպման տերմինալ",
-    welcomeSubtitle: "Ինքնուրույն և անվտանգ տպում",
-    activeSubtitle: "Փաստաթղթերի սև-սպիտակ տպում"
+    welcomeSubtitle: "Ինքնուրույն և անվտանգ տպում"
   },
   common: {
     cancel: "Չեղարկել",
     printProgress: "Տպման փուլերը",
     steps: ["Վերբեռնում", "Կարգավորումներ", "Վճարում", "Տպում"],
-    privacyNotice: "Ձեր ֆայլերն ավտոմատ կհեռացվեն տպման գործընթացի ավարտին։",
     keepSession: "Շարունակել տպումը",
     cancelSession: "Այո, չեղարկել",
     cancelTitle: "Չեղարկե՞լ տպումը։",
@@ -898,7 +878,6 @@ const armenian: MessageCatalog = {
     printerOutOfPaperError: "Տպիչում թուղթը վերջացել է․ դիմեք սպասարկողին։"
   },
   upload: {
-    step: "Քայլ 1 / 4",
     title: "Վերբեռնեք փաստաթուղթը",
     description: "Սկանավորեք QR կոդը հեռախոսով։ Գրանցում և հավելված պետք չեն։",
     instructionCamera: "Բացեք հեռախոսի տեսախցիկը",
@@ -945,7 +924,6 @@ const armenian: MessageCatalog = {
     fileMeta: (pageCount, size) => `${pageCount} էջ · ${size}`
   },
   configure: {
-    step: "Քայլ 2 / 4",
     title: "Ընտրեք տպման կարգավորումները",
     description: "Վճարելուց առաջ ստուգեք կարգավորումները։ Տպումը միայն սև-սպիտակ է։",
     descriptionMany: (count) =>
@@ -1022,11 +1000,9 @@ const armenian: MessageCatalog = {
     paperShortAdvice: "Նվազեցրեք էջերի կամ պատճենների քանակը։",
     paperShortDismiss: "Փոխել կարգավորումները",
     paperShortHelp: "Նվազեցրեք էջերը կամ պատճենները, որպեսզի թուղթը բավականացնի։",
-    reviewAndPay: "Ստուգել և վճարել",
-    backToUpload: "Վերադառնալ փաստաթղթին"
+    reviewAndPay: "Ստուգել և վճարել"
   },
   checkout: {
-    step: "Քայլ 3 / 4",
     title: "Ստուգեք և վճարեք",
     description:
       "Ստուգեք տպման կարգավորումները։ Փորձնական տարբերակում վճարումը միայն նմանակվում է։",

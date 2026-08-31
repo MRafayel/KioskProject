@@ -169,7 +169,6 @@ export function KioskLayout({ children }: { children: ReactNode }) {
           </span>
           <span>
             <strong>{messages.brand.name}</strong>
-            <small>{messages.brand.activeSubtitle}</small>
           </span>
         </div>
 
@@ -209,9 +208,6 @@ export function KioskLayout({ children }: { children: ReactNode }) {
 
       <footer className="session-footer">
         <LanguageSelector />
-        <div className="privacy-strip">
-          <span aria-hidden="true">●</span> {messages.common.privacyNotice}
-        </div>
       </footer>
 
       {cancelStatus !== "closed" ? (

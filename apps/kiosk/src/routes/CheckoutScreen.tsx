@@ -86,7 +86,6 @@ export function CheckoutScreen() {
   return (
     <div className="checkout-grid">
       <section className="screen-copy" aria-labelledby="checkout-title">
-        <p className="eyebrow">{messages.checkout.step}</p>
         <h1 id="checkout-title">{messages.checkout.title}</h1>
         <p>{messages.checkout.description}</p>
 
