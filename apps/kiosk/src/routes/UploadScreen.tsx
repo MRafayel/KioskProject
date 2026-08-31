@@ -69,9 +69,23 @@ export function UploadScreen() {
   // this presentational activity treatment.
   const showProcessingActivity =
     !filesQuery.isError && !firstRejected && visibleFiles.some((file) => isFileValidating(file));
+  // What this kiosk can print now, in the customer's own terms. A count when one
+  // is being kept, and an honest absence when one is not: a kiosk nobody has
+  // recorded paper for is not a kiosk with no paper, and showing "0 sheets"
+  // would say the wrong thing about a full tray.
+  const paperMessage =
+    paper.estimatedSheets === null
+      ? messages.upload.paperUnavailable
+      : messages.upload.paperAvailable(paper.estimatedSheets);
+  // Until a document arrives there is nothing to report about the upload, and
+  // saying so was the pill's whole content. The paper count is the useful thing
+  // to know at exactly that moment — before the customer has spent anything, and
+  // while the number can still change what they choose to send. Once documents
+  // start arriving the pill has real news about them, and the count is enforced
+  // again on the settings screen, where the job is finally measured against it.
   const statusMessage =
     visibleFiles.length === 0
-      ? messages.upload.waitingForPhone
+      ? paperMessage
       : pending
         ? fileStatusLabel(pending, messages.upload)
         : messages.upload.documentsReady(readyCount);
@@ -113,16 +127,6 @@ export function UploadScreen() {
             marginSize={2}
             title={messages.upload.qrTitle}
           />
-          {/* What this kiosk can print now, directly under the code the
-              customer is about to photograph. A count when one is being kept,
-              and an honest absence when one is not: a kiosk nobody has recorded
-              paper for is not a kiosk with no paper, and showing "0 sheets"
-              would say the wrong thing about a full tray. */}
-          <p className="qr-card__paper" role="status">
-            {paper.estimatedSheets === null
-              ? messages.upload.paperUnavailable
-              : messages.upload.paperAvailable(paper.estimatedSheets)}
-          </p>
           <div className="qr-card__timer">
             <SessionTimer compact />
           </div>

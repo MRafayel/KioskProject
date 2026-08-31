@@ -252,8 +252,12 @@ p {
   animation: spin 900ms linear infinite;
 }
 
+/* Centred because the pill now carries a sentence rather than two words, and
+   the longer locales wrap it. A single line is unaffected. */
 .status-pill__message {
   font-size: inherit;
+  text-align: center;
+  text-wrap: balance;
 }
 
 .status-pill__message--processing {
@@ -665,18 +669,6 @@ p {
   border-radius: 0.5rem;
 }
 
-/* Sits between the code and the timer as a quiet line of fact, not a warning:
-   it is true on a healthy kiosk as often as on a low one, and styling it as an
-   alert would make a full tray look like a problem. */
-.qr-card__paper {
-  margin: 0.75rem 0 0;
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 650;
-  text-align: center;
-  text-wrap: balance;
-}
-
 .qr-card__timer {
   display: flex;
   width: 100%;
@@ -879,6 +871,16 @@ p {
   background: #fff2f3;
   font-size: 0.82rem;
   font-weight: 700;
+}
+
+/* The same alert directly beneath an action button instead of beneath a heading
+   or a price, which are what the pull-up above is for: those leave a margin to
+   close, and a button leaves none, so the pull-up rode over the button and
+   painted its own background across the bottom of it.
+   The gap here matches `.upload-panel__pending`, the line this one alternates
+   with in the same place, so the card keeps its spacing whichever is showing. */
+.configuration-error--under-button {
+  margin-top: 0.65rem;
 }
 
 .settings-card,

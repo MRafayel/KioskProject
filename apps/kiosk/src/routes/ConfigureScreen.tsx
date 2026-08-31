@@ -398,7 +398,7 @@ export function ConfigureScreen() {
             {messages.configure.reviewAndPay} <span aria-hidden="true">→</span>
           </button>
           {paperShort ? (
-            <p className="configuration-error" role="alert">
+            <p className="configuration-error configuration-error--under-button" role="alert">
               {messages.configure.paperShortHelp}
             </p>
           ) : payable ? null : (

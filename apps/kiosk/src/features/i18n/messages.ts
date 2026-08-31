@@ -52,7 +52,6 @@ export interface MessageCatalog {
     instructionFile: string;
     sessionLabel: string;
     qrTitle: string;
-    waitingForPhone: string;
     /** How much this kiosk can print now, in sheets, under the QR code. */
     paperAvailable: (sheets: number) => string;
     /** Shown instead when nobody is tracking this kiosk's paper. Never "0". */
@@ -346,7 +345,6 @@ const english: MessageCatalog = {
     instructionFile: "Choose one or more PDF, JPEG, or PNG files",
     sessionLabel: "Upload session",
     qrTitle: "QR code for secure phone upload",
-    waitingForPhone: "Waiting for your phone",
     paperAvailable: (sheets) =>
       sheets === 1
         ? "This printer can currently print 1 sheet"
@@ -638,7 +636,6 @@ const russian: MessageCatalog = {
     instructionFile: "Выберите один или несколько файлов PDF, JPEG или PNG",
     sessionLabel: "Сеанс загрузки",
     qrTitle: "QR-код для безопасной загрузки с телефона",
-    waitingForPhone: "Ожидаем подключение телефона",
     paperAvailable: (sheets) =>
       `Сейчас принтер может напечатать ${sheets} ${russianPlural(sheets, "лист", "листа", "листов")}`,
     paperUnavailable: "Данные о бумаге недоступны",
@@ -937,7 +934,6 @@ const armenian: MessageCatalog = {
     instructionFile: "Ընտրեք մեկ կամ մի քանի PDF, JPEG կամ PNG ֆայլ",
     sessionLabel: "Ֆայլերի վերբեռնման պատուհան",
     qrTitle: "Հեռախոսից անվտանգ վերբեռնման QR կոդ",
-    waitingForPhone: "Սպասում ենք, որ հեռախոսը միանա",
     paperAvailable: (sheets) => `Այս տպիչը հիմա կարող է տպել ${sheets} թերթ`,
     paperUnavailable: "Թղթի քանակը հասանելի չէ",
     uploadedDocument: "Վերբեռնված փաստաթուղթ",

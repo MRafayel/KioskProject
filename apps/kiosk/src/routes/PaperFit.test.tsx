@@ -284,7 +284,13 @@ describe("what the upload screen says about paper", () => {
     estimatedSheets = 120;
     await openInEnglish("/upload", uploadingState);
 
-    expect(await screen.findByText(copy.upload.paperAvailable(120))).toBeVisible();
+    // In the status pill, which is the one thing on this screen with nothing to
+    // say until a document arrives. Asserted through the pill rather than by
+    // text alone, so moving the count somewhere quieter is a failure here
+    // rather than a silent change to the first thing a customer reads.
+    const pill = await screen.findByRole("status", { name: copy.upload.paperAvailable(120) });
+    expect(pill).toBeVisible();
+    expect(pill).toHaveClass("status-pill--waiting");
   });
 
   it("says the availability is unknown rather than showing a fake zero", async () => {
