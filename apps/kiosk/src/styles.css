@@ -324,7 +324,6 @@ p {
   padding: 1.45rem clamp(2rem, 5vw, 6rem);
 }
 
-.welcome__actions,
 .topbar__actions {
   display: flex;
   align-items: center;
@@ -362,7 +361,7 @@ p {
   display: grid;
   width: 72px;
   height: 72px;
-  margin-bottom: 1.5rem;
+  margin: 0 auto 1.5rem;
   place-items: center;
   border-radius: 1.25rem;
   color: var(--blue);
@@ -388,11 +387,6 @@ p {
   color: var(--muted);
   font-size: 0.8rem;
   font-weight: 700;
-}
-
-.welcome__footer-notes {
-  display: flex;
-  gap: 2.5rem;
 }
 
 .kiosk-shell {
@@ -2120,20 +2114,8 @@ p {
     gap: 0.8rem;
   }
 
-  .welcome__actions {
-    margin-left: auto;
-  }
-
   .welcome__footer {
-    align-items: flex-start;
-    gap: 0.8rem;
-    flex-direction: column;
-  }
-
-  .welcome__footer-notes {
-    align-items: flex-start;
-    gap: 0.35rem;
-    flex-direction: column;
+    justify-content: center;
   }
 
   .topbar .brand > span:last-child {
@@ -2209,12 +2191,6 @@ p {
 /* A kiosk that cannot print says so in its own status pill as well as in the
    dialog over it, so the state is still legible from across the room once
    somebody has walked away from the screen. */
-.status-pill--down {
-  border-color: rgb(196 62 62 / 35%);
-  background: rgb(196 62 62 / 12%);
-  color: #8c2f2f;
-}
-
 /* The printing screen leads with a sentence rather than a label, so its heading
    carries more words than the other terminal states and wants less weight to
    stay readable at arm's length. */

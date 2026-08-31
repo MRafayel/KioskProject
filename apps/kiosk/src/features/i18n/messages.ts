@@ -8,8 +8,6 @@ export interface MessageCatalog {
     activeSubtitle: string;
   };
   common: {
-    ready: string;
-    unavailable: string;
     cancel: string;
     printProgress: string;
     steps: [string, string, string, string];
@@ -26,10 +24,8 @@ export interface MessageCatalog {
     monochrome: string;
   };
   welcome: {
-    eyebrow: string;
     title: string;
     lead: string;
-    availableService: string;
     serviceTitle: string;
     serviceDescription: string;
     starting: string;
@@ -39,9 +35,6 @@ export interface MessageCatalog {
     printerUnavailableTitle: string;
     printerUnavailableError: string;
     printerOutOfPaperError: string;
-    footerSecure: string;
-    footerNoAccount: string;
-    footerTouchscreen: string;
   };
   upload: {
     step: string;
@@ -298,8 +291,6 @@ const english: MessageCatalog = {
     activeSubtitle: "Black-and-white documents"
   },
   common: {
-    ready: "Ready",
-    unavailable: "Unavailable",
     cancel: "Cancel",
     printProgress: "Print progress",
     steps: ["Upload", "Settings", "Pay", "Print"],
@@ -318,10 +309,8 @@ const english: MessageCatalog = {
     monochrome: "Black-and-white"
   },
   welcome: {
-    eyebrow: "Fast · private · self-service",
     title: "Print from your phone in a few simple steps.",
     lead: "Scan a QR code, upload your document, choose print settings, and pay at this screen.",
-    availableService: "Available service",
     serviceTitle: "Print documents",
     serviceDescription: "Upload from your phone. No account or app required.",
     starting: "Starting…",
@@ -331,10 +320,7 @@ const english: MessageCatalog = {
       "The previous paid print has not finished. Operator assistance is required before a new print can start.",
     printerUnavailableTitle: "Printer temporarily unavailable",
     printerUnavailableError: "Printer temporarily unavailable. Please contact support.",
-    printerOutOfPaperError: "The printer is out of paper — please contact staff.",
-    footerSecure: "Secure session",
-    footerNoAccount: "No account needed",
-    footerTouchscreen: "Touchscreen kiosk"
+    printerOutOfPaperError: "The printer is out of paper — please contact staff."
   },
   upload: {
     step: "Step 1 of 4",
@@ -589,8 +575,6 @@ const russian: MessageCatalog = {
     activeSubtitle: "Чёрно-белая печать документов"
   },
   common: {
-    ready: "Готов",
-    unavailable: "Недоступен",
     cancel: "Отменить",
     printProgress: "Этапы печати",
     steps: ["Загрузка", "Настройки", "Оплата", "Печать"],
@@ -609,10 +593,8 @@ const russian: MessageCatalog = {
     monochrome: "Чёрно-белая"
   },
   welcome: {
-    eyebrow: "Быстро · конфиденциально · самостоятельно",
     title: "Печатайте с телефона за несколько простых шагов.",
     lead: "Отсканируйте QR-код, загрузите документ, настройте печать и оплатите заказ на этом экране.",
-    availableService: "Доступная услуга",
     serviceTitle: "Печать документов",
     serviceDescription: "Загрузите файлы с телефона — без регистрации и установки приложения.",
     starting: "Создаём сеанс…",
@@ -622,10 +604,7 @@ const russian: MessageCatalog = {
       "Предыдущая оплаченная печать ещё не завершена. Для запуска новой печати обратитесь к оператору.",
     printerUnavailableTitle: "Принтер временно недоступен",
     printerUnavailableError: "Принтер временно недоступен. Обратитесь в поддержку.",
-    printerOutOfPaperError: "В принтере закончилась бумага — обратитесь к персоналу.",
-    footerSecure: "Защищённый сеанс",
-    footerNoAccount: "Без регистрации",
-    footerTouchscreen: "Сенсорный терминал"
+    printerOutOfPaperError: "В принтере закончилась бумага — обратитесь к персоналу."
   },
   upload: {
     step: "Шаг 1 из 4",
@@ -887,8 +866,6 @@ const armenian: MessageCatalog = {
     activeSubtitle: "Փաստաթղթերի սև-սպիտակ տպում"
   },
   common: {
-    ready: "Պատրաստ է",
-    unavailable: "Անհասանելի է",
     cancel: "Չեղարկել",
     printProgress: "Տպման փուլերը",
     steps: ["Վերբեռնում", "Կարգավորումներ", "Վճարում", "Տպում"],
@@ -907,10 +884,8 @@ const armenian: MessageCatalog = {
     monochrome: "Սև-սպիտակ"
   },
   welcome: {
-    eyebrow: "Արագ · անվտանգ · ինքնուրույն",
     title: "Տպեք հեռախոսից՝ ընդամենը մի քանի քայլով։",
     lead: "Սկանավորեք QR կոդը, հեռախոսից վերբեռնեք փաստաթուղթը, ընտրեք կարգավորումներն ու վճարեք տերմինալում։",
-    availableService: "Հասանելի ծառայություն",
     serviceTitle: "Փաստաթղթերի տպում",
     serviceDescription: "Վերբեռնեք հեռախոսից՝ առանց գրանցման կամ հավելվածի։",
     starting: "Սկսում ենք…",
@@ -920,10 +895,7 @@ const armenian: MessageCatalog = {
       "Նախորդ վճարված տպումը դեռ ավարտված չէ։ Նոր տպում սկսելու համար դիմեք սպասարկողին։",
     printerUnavailableTitle: "Տպիչը ժամանակավորապես անհասանելի է",
     printerUnavailableError: "Տպիչը ժամանակավորապես անհասանելի է։ Դիմեք սպասարկման ծառայությանը։",
-    printerOutOfPaperError: "Տպիչում թուղթը վերջացել է․ դիմեք սպասարկողին։",
-    footerSecure: "Անվտանգ կապ",
-    footerNoAccount: "Գրանցում պետք չէ",
-    footerTouchscreen: "Սենսորային էկրան"
+    printerOutOfPaperError: "Տպիչում թուղթը վերջացել է․ դիմեք սպասարկողին։"
   },
   upload: {
     step: "Քայլ 1 / 4",

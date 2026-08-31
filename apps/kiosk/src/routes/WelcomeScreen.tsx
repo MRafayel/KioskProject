@@ -79,17 +79,10 @@ export function WelcomeScreen() {
             <small>{messages.brand.welcomeSubtitle}</small>
           </span>
         </div>
-        <div className="welcome__actions">
-          <span className={unavailable ? "status-pill status-pill--down" : "status-pill"}>
-            <span aria-hidden="true">●</span>{" "}
-            {unavailable ? messages.common.unavailable : messages.common.ready}
-          </span>
-        </div>
       </header>
 
       <section className="welcome__content" aria-labelledby="welcome-title">
         <div>
-          <p className="eyebrow">{messages.welcome.eyebrow}</p>
           <h1 id="welcome-title">{messages.welcome.title}</h1>
           <p className="welcome__lead">{messages.welcome.lead}</p>
         </div>
@@ -99,7 +92,6 @@ export function WelcomeScreen() {
             ▤
           </div>
           <div>
-            <p className="eyebrow">{messages.welcome.availableService}</p>
             <h2>{messages.welcome.serviceTitle}</h2>
             <p>{messages.welcome.serviceDescription}</p>
           </div>
@@ -123,11 +115,6 @@ export function WelcomeScreen() {
 
       <footer className="welcome__footer">
         <LanguageSelector />
-        <div className="welcome__footer-notes">
-          <span>{messages.welcome.footerSecure}</span>
-          <span>{messages.welcome.footerNoAccount}</span>
-          <span>{messages.welcome.footerTouchscreen}</span>
-        </div>
       </footer>
 
       {unavailable ? (
