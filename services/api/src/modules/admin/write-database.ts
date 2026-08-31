@@ -8,12 +8,19 @@ import type { PrismaClient } from "@printing-kiosk/database";
  * *append* to a short allow-list of tables, and can read only what it needs to decide whether
  * the append is allowed.
  *
- * Every model below exposes either `create` or nothing but reads. There is no
- * `update`, no `delete`, no `upsert` and no `createMany` anywhere in this
+ * Every model below exposes either `create` or nothing but reads, with one
+ * named exception. There is no `delete` and no `createMany` anywhere in this
  * interface, so `database.printJob.update(...)` in an admin action is a compile
  * error rather than a review comment — and `database.refund.create(...)` does
  * not typecheck at all, because `refund` is absent. Money has its own pool with
  * its own role and its own narrowing: see `refund-database.ts`.
+ *
+ * The exception is `kioskPaperInventory`, and it is deliberate. The paper
+ * estimate stopped being a ledger summed over its own history and became a
+ * single current count, and a count that is kept current is a count somebody
+ * has to be able to change. Nothing else here gained anything: the writer
+ * role's grant for it is column-scoped to the number and the refill printed
+ * beside it, so even that connection cannot alter which kiosk a row belongs to.
  *
  * This is the third statement of the Phase 3 gate. The writer role's grants
  * refuse the statement at the database. The table triggers refuse the row. This
@@ -38,6 +45,16 @@ type ReadOnly<TDelegate> = Pick<
 type Appendable<TDelegate> = ReadOnly<TDelegate> &
   Pick<TDelegate, Extract<keyof TDelegate, "create">>;
 
+/**
+ * The one table an admin action may change in place.
+ *
+ * `upsert` rather than `update` because the first refill or correction at a
+ * kiosk is what starts tracking it, and until then there is no row. Still no
+ * `delete`: untracking a kiosk is not an operator action.
+ */
+type Settable<TDelegate> = Appendable<TDelegate> &
+  Pick<TDelegate, Extract<keyof TDelegate, "update" | "upsert">>;
+
 export interface AdminWriteDatabase {
   /** The observation itself. Append-only by trigger as well as by type. */
   printJobRecoveryResolution: Appendable<PrismaClient["printJobRecoveryResolution"]>;
@@ -52,8 +69,10 @@ export interface AdminWriteDatabase {
    * worker does after reading this, and not something an admin action does.
    */
   cleanupRetryRequest: Appendable<PrismaClient["cleanupRetryRequest"]>;
-  /** Refills and corrections. Automatic deductions use the print path. */
-  kioskPaperEvent: Appendable<PrismaClient["kioskPaperEvent"]>;
+  /** The current paper estimate. Refills and corrections write it directly. */
+  kioskPaperInventory: Settable<PrismaClient["kioskPaperInventory"]>;
+  /** One applied refill or correction, so a retried one is not applied twice. */
+  kioskPaperRequest: Appendable<PrismaClient["kioskPaperRequest"]>;
   /** Every admin action records itself, including the ones that were refused. */
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
 
@@ -88,7 +107,8 @@ export interface AdminWriteTransaction {
   printJobRecoveryResolution: Appendable<PrismaClient["printJobRecoveryResolution"]>;
   printJobRecoveryCorrection: Appendable<PrismaClient["printJobRecoveryCorrection"]>;
   cleanupRetryRequest: Appendable<PrismaClient["cleanupRetryRequest"]>;
-  kioskPaperEvent: Appendable<PrismaClient["kioskPaperEvent"]>;
+  kioskPaperInventory: Settable<PrismaClient["kioskPaperInventory"]>;
+  kioskPaperRequest: Appendable<PrismaClient["kioskPaperRequest"]>;
   auditEvent: Appendable<PrismaClient["auditEvent"]>;
   printJob: ReadOnly<PrismaClient["printJob"]>;
   printSession: ReadOnly<PrismaClient["printSession"]>;

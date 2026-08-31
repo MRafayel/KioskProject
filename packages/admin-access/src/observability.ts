@@ -277,29 +277,17 @@ export const adminKioskPaperSummarySchema = z.object({
     .nullable()
 });
 
-export const KIOSK_PAPER_EVENT_TYPES = ["REFILL", "CORRECTION", "PRINT_DEDUCTION"] as const;
-
-export const adminKioskPaperEventSchema = z.object({
-  id: z.string().uuid(),
-  type: z.enum(KIOSK_PAPER_EVENT_TYPES),
-  /** Added, corrected-to, or physically consumed, depending on the type. */
-  quantitySheets: z.number().int().min(0).max(1_000_000),
-  /** The signed change actually applied to the estimate. */
-  deltaSheets: z.number().int(),
-  estimateAffected: z.boolean(),
-  reason: z.string().max(280).nullable(),
-  printJobId: z.string().uuid().nullable(),
-  recordedByAdminUserId: z.string().uuid().nullable(),
-  recordedByDisplayName: z.string().max(120).nullable(),
-  recordedByRole: z.string().max(24).nullable(),
-  createdAt: isoTimestamp
-});
-
+/**
+ * One kiosk's current paper estimate.
+ *
+ * There is no event list beside it any more. The estimate stopped being a sum
+ * over a ledger and became a single count that is kept current, so there is no
+ * history to page through — and the record of who changed it, by how much and
+ * why, is in the admin audit log, where every other admin action already is.
+ */
 export const adminKioskPaperResponseSchema = z.object({
   kioskId: z.string().max(64),
-  paper: adminKioskPaperSummarySchema,
-  items: z.array(adminKioskPaperEventSchema),
-  nextCursor: z.string().nullable()
+  paper: adminKioskPaperSummarySchema
 });
 
 export const adminKioskSchema = z.object({
@@ -1177,7 +1165,6 @@ export type AdminOverviewResponse = z.infer<typeof adminOverviewResponseSchema>;
 export type AdminKiosksResponse = z.infer<typeof adminKiosksResponseSchema>;
 export type AdminKiosk = z.infer<typeof adminKioskSchema>;
 export type AdminKioskPaperSummary = z.infer<typeof adminKioskPaperSummarySchema>;
-export type AdminKioskPaperEvent = z.infer<typeof adminKioskPaperEventSchema>;
 export type AdminKioskPaperResponse = z.infer<typeof adminKioskPaperResponseSchema>;
 export type AdminSessionsResponse = z.infer<typeof adminSessionsResponseSchema>;
 export type AdminSessionSummary = z.infer<typeof adminSessionSummarySchema>;

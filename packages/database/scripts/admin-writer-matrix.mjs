@@ -7,8 +7,8 @@
  * admin backend move money" is a grant list rather than a code review.
  *
  * The shape of this policy is the whole point. It holds INSERT on a short list
- * of tables and nothing else — no UPDATE and no DELETE anywhere in the
- * database, on any table, ever. That is not a coincidence of the current
+ * of tables, one column-scoped UPDATE, and nothing else — no DELETE anywhere in
+ * the database, on any table, ever. That is not a coincidence of the current
  * feature set; it is the Phase 3 acceptance gate expressed as a privilege, and
  * Phase 4 kept it by giving money its own role rather than widening this one:
  *
@@ -25,9 +25,19 @@
  *     so it cannot erase its own tracks. Triggers refuse this too; the missing
  *     grant means the refusal does not depend on a trigger surviving.
  *
- * A future admin action that genuinely needs to change operational state has to
- * add a grant here, in a file whose diff says exactly what new power the
- * control plane gained. That is the review this file exists to force.
+ * The one UPDATE is that review having happened. The kiosk paper estimate stopped
+ * being a ledger summed over its own history and became a single current count,
+ * and a count that is kept current is a count somebody has to be able to change.
+ * It is scoped as narrowly as the grant system allows — one table, and only the
+ * columns that carry the number and the refill printed beside it, so this role
+ * still cannot alter which kiosk a row belongs to or when it was created.
+ *
+ * What it buys back is worth naming: an estimate nobody can correct is an
+ * estimate that drifts until it is refusing customers at a full machine.
+ *
+ * Any further admin action that needs to change operational state has to add a
+ * grant here, in a file whose diff says exactly what new power the control
+ * plane gained. That is the review this file exists to force.
  */
 
 /** The role the API's admin write pool connects as. Never owns anything. */
@@ -41,6 +51,17 @@ export const ADMIN_WRITER_ROLE = "printing_kiosk_admin_writer";
  * correction supersedes an observation without touching it, and a retry request
  * asks the worker to act rather than acting.
  */
+export const UPDATABLE_COLUMNS = Object.freeze({
+  kiosk_paper_inventory: [
+    "estimated_sheets",
+    "last_refill_sheets",
+    "last_refill_note",
+    "last_refill_by_admin_id",
+    "last_refill_at",
+    "updated_at"
+  ]
+});
+
 export const INSERTABLE_TABLES = Object.freeze({
   print_job_recovery_resolutions:
     "One operator observation per print job that the device could not settle.",
@@ -48,8 +69,10 @@ export const INSERTABLE_TABLES = Object.freeze({
     "A later account superseding one of those, by somebody who did not make it. Appends; the original stays exactly as written.",
   cleanup_retry_requests:
     "A person asking retention to try a dead-lettered run again. The worker re-arms its own run; this role holds nothing on cleanup_runs.",
-  kiosk_paper_events:
-    "A refill or reasoned correction to a software paper estimate. Print deductions are written by the print path, not by this role.",
+  kiosk_paper_inventory:
+    "The first refill or correction at a kiosk, which is what starts tracking it. Later ones update the row rather than adding to it.",
+  kiosk_paper_requests:
+    "One applied refill or correction, so a retried one is recognised and not applied twice. Never summed, and never consulted to work out the count.",
   audit_events: "Every admin action records itself here, including the ones that failed."
 });
 
@@ -121,9 +144,11 @@ export const READABLE_TABLES = Object.freeze({
   ],
   cleanup_retry_requests: "*",
 
-  // Refill/correction idempotency and the signed total used to calculate a
-  // correction. No device command or customer data is present.
-  kiosk_paper_events: "*",
+  // The current estimate, read back to calculate a correction and to answer
+  // with the resulting total. No device command or customer data is present.
+  kiosk_paper_inventory: "*",
+  // Read to recognise a retried request as one.
+  kiosk_paper_requests: "*",
 
   // The error centre's acknowledgements are audit events; reading them back is
   // how a repeat acknowledgement is recognised as one.

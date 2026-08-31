@@ -19,11 +19,11 @@ model SystemMetadata {
 }
 
 model Kiosk {
-  id                  String            @id @db.VarChar(64)
-  publicCode          String            @unique @map("public_code") @db.VarChar(64)
-  name                String            @db.VarChar(160)
-  status              String            @default("ACTIVE") @db.VarChar(32)
-  timezone            String            @default("Asia/Yerevan") @db.VarChar(64)
+  id                  String               @id @db.VarChar(64)
+  publicCode          String               @unique @map("public_code") @db.VarChar(64)
+  name                String               @db.VarChar(160)
+  status              String               @default("ACTIVE") @db.VarChar(32)
+  timezone            String               @default("Asia/Yerevan") @db.VarChar(64)
   /// What the attached device says it can do. A capability report replaces this
   /// wholesale, because the device is the only authority on it.
   capabilities        Json
@@ -32,12 +32,12 @@ model Kiosk {
   /// found to overwrite that column entire, silently deleting the allowlist and
   /// leaving the kiosk unable to approve any printer again. Its own column is
   /// what makes that class of accident impossible rather than merely avoided.
-  approvedQueues      String[]          @default([]) @map("approved_queues")
-  capabilitiesVersion Int               @default(1) @map("capabilities_version")
-  configVersion       Int               @default(1) @map("config_version")
-  lastSeenAt          DateTime?         @map("last_seen_at")
-  createdAt           DateTime          @default(now()) @map("created_at")
-  updatedAt           DateTime          @default(now()) @updatedAt @map("updated_at")
+  approvedQueues      String[]             @default([]) @map("approved_queues")
+  capabilitiesVersion Int                  @default(1) @map("capabilities_version")
+  configVersion       Int                  @default(1) @map("config_version")
+  lastSeenAt          DateTime?            @map("last_seen_at")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @default(now()) @updatedAt @map("updated_at")
   credentials         KioskCredential[]
   sessions            PrintSession[]
   sessionEvents       SessionEvent[]
@@ -46,7 +46,8 @@ model Kiosk {
   adminScopes         AdminKioskScope[]
   agents              KioskAgent[]
   printers            Printer[]
-  paperEvents         KioskPaperEvent[]
+  paperInventory      KioskPaperInventory?
+  paperRequests       KioskPaperRequest[]
 
   @@index([status])
   @@index([lastSeenAt])
@@ -145,37 +146,37 @@ model KioskCredential {
 }
 
 model PrintSession {
-  id                      String                 @id @db.Uuid
-  publicId                String                 @unique @map("public_id") @db.VarChar(80)
-  kioskId                 String                 @map("kiosk_id") @db.VarChar(64)
-  locale                  String                 @db.VarChar(10)
-  state                   String                 @db.VarChar(40)
-  stateVersion            Int                    @default(1) @map("state_version")
-  eventSequence           Int                    @default(1) @map("event_sequence")
-  currentSettingsRevision Int?                   @map("current_settings_revision")
-  activeQuoteId           String?                @unique @map("active_quote_id") @db.Uuid
-  idleExpiresAt           DateTime               @map("idle_expires_at")
-  hardExpiresAt           DateTime               @map("hard_expires_at")
-  terminalReason          String?                @map("terminal_reason") @db.VarChar(80)
+  id                      String                       @id @db.Uuid
+  publicId                String                       @unique @map("public_id") @db.VarChar(80)
+  kioskId                 String                       @map("kiosk_id") @db.VarChar(64)
+  locale                  String                       @db.VarChar(10)
+  state                   String                       @db.VarChar(40)
+  stateVersion            Int                          @default(1) @map("state_version")
+  eventSequence           Int                          @default(1) @map("event_sequence")
+  currentSettingsRevision Int?                         @map("current_settings_revision")
+  activeQuoteId           String?                      @unique @map("active_quote_id") @db.Uuid
+  idleExpiresAt           DateTime                     @map("idle_expires_at")
+  hardExpiresAt           DateTime                     @map("hard_expires_at")
+  terminalReason          String?                      @map("terminal_reason") @db.VarChar(80)
   /// Mirrors the cleanup run so operators can find overdue retention from one
   /// row. NOT_DUE until the session ends.
-  cleanupStatus           String                 @default("NOT_DUE") @map("cleanup_status") @db.VarChar(24)
-  cleanupDueAt            DateTime?              @map("cleanup_due_at")
+  cleanupStatus           String                       @default("NOT_DUE") @map("cleanup_status") @db.VarChar(24)
+  cleanupDueAt            DateTime?                    @map("cleanup_due_at")
   /// The tombstone. Set only by a cleanup run that proved nothing is left, and
   /// enforced by a trigger that consults the artifact ledger.
-  filesDeletedAt          DateTime?              @map("files_deleted_at")
-  createdAt               DateTime               @default(now()) @map("created_at")
-  updatedAt               DateTime               @default(now()) @updatedAt @map("updated_at")
-  canceledAt              DateTime?              @map("canceled_at")
-  expiredAt               DateTime?              @map("expired_at")
-  completedAt             DateTime?              @map("completed_at")
-  kiosk                   Kiosk                  @relation(fields: [kioskId], references: [id], onDelete: Restrict)
-  activeQuote             PriceQuote?            @relation("SessionActiveQuote", fields: [activeQuoteId], references: [id], onDelete: SetNull)
+  filesDeletedAt          DateTime?                    @map("files_deleted_at")
+  createdAt               DateTime                     @default(now()) @map("created_at")
+  updatedAt               DateTime                     @default(now()) @updatedAt @map("updated_at")
+  canceledAt              DateTime?                    @map("canceled_at")
+  expiredAt               DateTime?                    @map("expired_at")
+  completedAt             DateTime?                    @map("completed_at")
+  kiosk                   Kiosk                        @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  activeQuote             PriceQuote?                  @relation("SessionActiveQuote", fields: [activeQuoteId], references: [id], onDelete: SetNull)
   uploadGrants            SessionUploadGrant[]
   mobileClients           MobileClient[]
   uploadedFiles           UploadedFile[]
   settingRevisions        PrintSettingRevision[]
-  priceQuotes             PriceQuote[]           @relation("SessionQuotes")
+  priceQuotes             PriceQuote[]                 @relation("SessionQuotes")
   payments                Payment[]
   refunds                 Refund[]
   printJobs               PrintJob[]
@@ -201,25 +202,25 @@ model PrintSession {
 /// abandoned: when its attempts are spent it is dead-lettered for a person,
 /// because the documents are still there.
 model CleanupRun {
-  id                      String       @id @db.Uuid
-  sessionId               String       @unique @map("session_id") @db.Uuid
-  reason                  String       @db.VarChar(40)
-  status                  String       @default("PENDING") @db.VarChar(24)
-  checkpoint              String       @default("SCHEDULED") @db.VarChar(32)
-  attempts                Int          @default(0)
-  availableAt             DateTime     @default(now()) @map("available_at")
-  leaseToken              String?      @unique @map("lease_token") @db.Uuid
-  leaseExpiresAt          DateTime?    @map("lease_expires_at")
-  lastErrorCode           String?      @map("last_error_code") @db.VarChar(80)
-  objectsDeleted          Int          @default(0) @map("objects_deleted")
-  orphanObjectsDeleted    Int          @default(0) @map("orphan_objects_deleted")
-  multipartUploadsAborted Int          @default(0) @map("multipart_uploads_aborted")
-  createdAt               DateTime     @default(now()) @map("created_at")
-  updatedAt               DateTime     @default(now()) @updatedAt @map("updated_at")
-  startedAt               DateTime?    @map("started_at")
-  completedAt             DateTime?    @map("completed_at")
-  deadLetteredAt          DateTime?    @map("dead_lettered_at")
-  session                 PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id                      String                @id @db.Uuid
+  sessionId               String                @unique @map("session_id") @db.Uuid
+  reason                  String                @db.VarChar(40)
+  status                  String                @default("PENDING") @db.VarChar(24)
+  checkpoint              String                @default("SCHEDULED") @db.VarChar(32)
+  attempts                Int                   @default(0)
+  availableAt             DateTime              @default(now()) @map("available_at")
+  leaseToken              String?               @unique @map("lease_token") @db.Uuid
+  leaseExpiresAt          DateTime?             @map("lease_expires_at")
+  lastErrorCode           String?               @map("last_error_code") @db.VarChar(80)
+  objectsDeleted          Int                   @default(0) @map("objects_deleted")
+  orphanObjectsDeleted    Int                   @default(0) @map("orphan_objects_deleted")
+  multipartUploadsAborted Int                   @default(0) @map("multipart_uploads_aborted")
+  createdAt               DateTime              @default(now()) @map("created_at")
+  updatedAt               DateTime              @default(now()) @updatedAt @map("updated_at")
+  startedAt               DateTime?             @map("started_at")
+  completedAt             DateTime?             @map("completed_at")
+  deadLetteredAt          DateTime?             @map("dead_lettered_at")
+  session                 PrintSession          @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   retryRequests           CleanupRetryRequest[]
 
   @@index([status, availableAt])
@@ -231,30 +232,30 @@ model CleanupRun {
 /// exact revision; the sole later amendment is the database-guarded removal of
 /// per-document content digests after the session becomes terminal.
 model PrintSettingRevision {
-  id                 String       @id @db.Uuid
-  sessionId          String       @map("session_id") @db.Uuid
-  revision           Int
+  id                   String       @id @db.Uuid
+  sessionId            String       @map("session_id") @db.Uuid
+  revision             Int
   /// Copies, duplex and orientation live on each `selections` entry: they
   /// describe one document, and a session prints several.
-  paperSize          String       @map("paper_size") @db.VarChar(16)
-  scaling            String       @db.VarChar(16)
-  collate            Boolean
-  colorMode          String       @map("color_mode") @db.VarChar(16)
-  selections         Json
+  paperSize            String       @map("paper_size") @db.VarChar(16)
+  scaling              String       @db.VarChar(16)
+  collate              Boolean
+  colorMode            String       @map("color_mode") @db.VarChar(16)
+  selections           Json
   /// Set once by retention when raw per-document content digests are removed
   /// from selections. All priced paper/range aggregates remain immutable.
-  selectionsRedactedAt DateTime?  @map("selections_redacted_at")
-  selectedPages      Int          @map("selected_pages")
-  printedSides       Int          @map("printed_sides")
-  physicalSheets     Int          @map("physical_sheets")
-  capabilityVersion  Int          @map("capability_version")
-  manifestHash       String       @map("manifest_hash") @db.VarChar(64)
-  createdByActorType String       @map("created_by_actor_type") @db.VarChar(32)
-  createdByActorId   String       @map("created_by_actor_id") @db.VarChar(100)
-  createdAt          DateTime     @default(now()) @map("created_at")
-  session            PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  quotes             PriceQuote[]
-  printJobs          PrintJob[]
+  selectionsRedactedAt DateTime?    @map("selections_redacted_at")
+  selectedPages        Int          @map("selected_pages")
+  printedSides         Int          @map("printed_sides")
+  physicalSheets       Int          @map("physical_sheets")
+  capabilityVersion    Int          @map("capability_version")
+  manifestHash         String       @map("manifest_hash") @db.VarChar(64)
+  createdByActorType   String       @map("created_by_actor_type") @db.VarChar(32)
+  createdByActorId     String       @map("created_by_actor_id") @db.VarChar(100)
+  createdAt            DateTime     @default(now()) @map("created_at")
+  session              PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  quotes               PriceQuote[]
+  printJobs            PrintJob[]
 
   @@unique([sessionId, revision])
   @@index([sessionId, createdAt])
@@ -263,22 +264,22 @@ model PrintSettingRevision {
 
 /// A published rule set is immutable. Corrections create another version.
 model PricingRuleSet {
-  id                 String        @id @db.Uuid
-  version            String        @unique @db.VarChar(40)
-  scope              String        @db.VarChar(24)
-  scopeRef           String        @default("") @map("scope_ref") @db.VarChar(64)
-  currency           String        @db.Char(3)
-  currencyExponent   Int           @map("currency_exponent")
-  status             String        @db.VarChar(16)
-  rounding           String        @db.VarChar(16)
-  taxMode            String        @map("tax_mode") @db.VarChar(16)
-  minimumApplication String        @map("minimum_application") @db.VarChar(16)
-  validFrom          DateTime      @map("valid_from")
-  validUntil         DateTime?     @map("valid_until")
-  publishedAt        DateTime?     @map("published_at")
-  archivedAt         DateTime?     @map("archived_at")
-  createdAt          DateTime      @default(now()) @map("created_at")
-  updatedAt          DateTime      @default(now()) @updatedAt @map("updated_at")
+  id                 String                @id @db.Uuid
+  version            String                @unique @db.VarChar(40)
+  scope              String                @db.VarChar(24)
+  scopeRef           String                @default("") @map("scope_ref") @db.VarChar(64)
+  currency           String                @db.Char(3)
+  currencyExponent   Int                   @map("currency_exponent")
+  status             String                @db.VarChar(16)
+  rounding           String                @db.VarChar(16)
+  taxMode            String                @map("tax_mode") @db.VarChar(16)
+  minimumApplication String                @map("minimum_application") @db.VarChar(16)
+  validFrom          DateTime              @map("valid_from")
+  validUntil         DateTime?             @map("valid_until")
+  publishedAt        DateTime?             @map("published_at")
+  archivedAt         DateTime?             @map("archived_at")
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @default(now()) @updatedAt @map("updated_at")
   rules              PricingRule[]
   quotes             PriceQuote[]
   /// The approval that published it, when a person published it. Null for a
@@ -430,21 +431,21 @@ model PaymentWebhookInbox {
 /// A compensation record. It never rewrites the capture it refers to: money
 /// that moved stays recorded, and this row is the obligation to return it.
 model Refund {
-  id               String       @id @db.Uuid
-  paymentId        String       @map("payment_id") @db.Uuid
-  sessionId        String       @map("session_id") @db.Uuid
-  provider         String       @db.VarChar(24)
-  providerRefundId String?      @map("provider_refund_id") @db.VarChar(120)
-  reason           String       @db.VarChar(32)
-  amountMinor      Int          @map("amount_minor")
-  currency         String       @db.Char(3)
-  currencyExponent Int          @map("currency_exponent")
-  status           String       @db.VarChar(24)
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @default(now()) @updatedAt @map("updated_at")
-  completedAt      DateTime?    @map("completed_at")
-  payment          Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
-  session          PrintSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id               String               @id @db.Uuid
+  paymentId        String               @map("payment_id") @db.Uuid
+  sessionId        String               @map("session_id") @db.Uuid
+  provider         String               @db.VarChar(24)
+  providerRefundId String?              @map("provider_refund_id") @db.VarChar(120)
+  reason           String               @db.VarChar(32)
+  amountMinor      Int                  @map("amount_minor")
+  currency         String               @db.Char(3)
+  currencyExponent Int                  @map("currency_exponent")
+  status           String               @db.VarChar(24)
+  createdAt        DateTime             @default(now()) @map("created_at")
+  updatedAt        DateTime             @default(now()) @updatedAt @map("updated_at")
+  completedAt      DateTime?            @map("completed_at")
+  payment          Payment              @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  session          PrintSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   authorization    RefundAuthorization?
 
   @@unique([paymentId, reason])
@@ -457,54 +458,53 @@ model Refund {
 /// refuse a job without a capture applied to its own session, and refuse to
 /// move a settled job. There is at most one per session.
 model PrintJob {
-  id                   String               @id @db.Uuid
-  sessionId            String               @map("session_id") @db.Uuid
-  kioskId              String               @map("kiosk_id") @db.VarChar(64)
-  quoteId              String               @map("quote_id") @db.Uuid
-  paymentId            String               @map("payment_id") @db.Uuid
-  settingsRevision     Int                  @map("settings_revision")
-  settingsManifestHash String               @map("settings_manifest_hash") @db.VarChar(64)
-  jobManifest          Json                 @map("job_manifest")
-  jobManifestHash      String               @map("job_manifest_hash") @db.VarChar(64)
-  status               String               @db.VarChar(24)
+  id                   String                       @id @db.Uuid
+  sessionId            String                       @map("session_id") @db.Uuid
+  kioskId              String                       @map("kiosk_id") @db.VarChar(64)
+  quoteId              String                       @map("quote_id") @db.Uuid
+  paymentId            String                       @map("payment_id") @db.Uuid
+  settingsRevision     Int                          @map("settings_revision")
+  settingsManifestHash String                       @map("settings_manifest_hash") @db.VarChar(64)
+  jobManifest          Json                         @map("job_manifest")
+  jobManifestHash      String                       @map("job_manifest_hash") @db.VarChar(64)
+  status               String                       @db.VarChar(24)
   /// Acceptance by a queue is not proof that paper came out. UNCONFIRMED is a
   /// real answer and is never rounded up to a success.
-  resultConfidence     String               @default("UNKNOWN") @map("result_confidence") @db.VarChar(16)
-  failureCode          String?              @map("failure_code") @db.VarChar(48)
-  warningCode          String?              @map("warning_code") @db.VarChar(32)
+  resultConfidence     String                       @default("UNKNOWN") @map("result_confidence") @db.VarChar(16)
+  failureCode          String?                      @map("failure_code") @db.VarChar(48)
+  warningCode          String?                      @map("warning_code") @db.VarChar(32)
   /// Development only; a production configuration cannot set it.
-  simulatedOutcome     String?              @map("simulated_outcome") @db.VarChar(32)
+  simulatedOutcome     String?                      @map("simulated_outcome") @db.VarChar(32)
   /// Set once by retention, when the per-document digests in `jobManifest` are
   /// replaced by a count. The manifest hash and the outcome stay: what was paid
   /// for and what the device reported is evidence; which files it was is not.
-  manifestRedactedAt   DateTime?            @map("manifest_redacted_at")
+  manifestRedactedAt   DateTime?                    @map("manifest_redacted_at")
   copies               Int
-  printedSides         Int                  @map("printed_sides")
-  physicalSheets       Int                  @map("physical_sheets")
-  sheetsProduced       Int?                 @map("sheets_produced")
-  dispatchAttempts     Int                  @default(0) @map("dispatch_attempts")
-  availableAt          DateTime             @default(now()) @map("available_at")
-  deadlineAt           DateTime             @map("deadline_at")
-  cancelRequestedAt    DateTime?            @map("cancel_requested_at")
-  createdByActorType   String               @map("created_by_actor_type") @db.VarChar(32)
-  createdByActorId     String               @map("created_by_actor_id") @db.VarChar(100)
-  createdAt            DateTime             @default(now()) @map("created_at")
-  updatedAt            DateTime             @default(now()) @updatedAt @map("updated_at")
-  dispatchedAt         DateTime?            @map("dispatched_at")
-  startedAt            DateTime?            @map("started_at")
-  completedAt          DateTime?            @map("completed_at")
-  failedAt             DateTime?            @map("failed_at")
-  session              PrintSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  kiosk                Kiosk                @relation(fields: [kioskId], references: [id], onDelete: Restrict)
-  payment              Payment              @relation(fields: [paymentId, sessionId], references: [id, sessionId], onDelete: Restrict)
-  quote                PriceQuote           @relation(fields: [quoteId, sessionId], references: [id, sessionId], onDelete: Restrict)
-  settings             PrintSettingRevision @relation(fields: [sessionId, settingsRevision], references: [sessionId, revision], onDelete: Restrict)
+  printedSides         Int                          @map("printed_sides")
+  physicalSheets       Int                          @map("physical_sheets")
+  sheetsProduced       Int?                         @map("sheets_produced")
+  dispatchAttempts     Int                          @default(0) @map("dispatch_attempts")
+  availableAt          DateTime                     @default(now()) @map("available_at")
+  deadlineAt           DateTime                     @map("deadline_at")
+  cancelRequestedAt    DateTime?                    @map("cancel_requested_at")
+  createdByActorType   String                       @map("created_by_actor_type") @db.VarChar(32)
+  createdByActorId     String                       @map("created_by_actor_id") @db.VarChar(100)
+  createdAt            DateTime                     @default(now()) @map("created_at")
+  updatedAt            DateTime                     @default(now()) @updatedAt @map("updated_at")
+  dispatchedAt         DateTime?                    @map("dispatched_at")
+  startedAt            DateTime?                    @map("started_at")
+  completedAt          DateTime?                    @map("completed_at")
+  failedAt             DateTime?                    @map("failed_at")
+  session              PrintSession                 @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kiosk                Kiosk                        @relation(fields: [kioskId], references: [id], onDelete: Restrict)
+  payment              Payment                      @relation(fields: [paymentId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  quote                PriceQuote                   @relation(fields: [quoteId, sessionId], references: [id, sessionId], onDelete: Restrict)
+  settings             PrintSettingRevision         @relation(fields: [sessionId, settingsRevision], references: [sessionId, revision], onDelete: Restrict)
   events               PrintJobEvent[]
   commands             AgentCommand[]
   recoveryResolution   PrintJobRecoveryResolution?
   recoveryCorrections  PrintJobRecoveryCorrection[]
   refundAuthorization  RefundAuthorization?
-  paperEvent            KioskPaperEvent?
 
   @@unique([sessionId], map: "print_jobs_one_per_session_idx")
   @@index([status, availableAt])
@@ -680,22 +680,22 @@ model CleanupRetryRequest {
 /// The operation ledger. Append-only: what the device said is evidence, and a
 /// retry writes the next entry rather than rewriting the previous one.
 model PrintJobEvent {
-  id          String   @id @db.Uuid
-  printJobId  String   @map("print_job_id") @db.Uuid
-  sequence    Int
-  type        String   @db.VarChar(32)
-  operationId String?  @map("operation_id") @db.Uuid
-  status      String   @db.VarChar(24)
-  confidence  String?  @db.VarChar(16)
-  failureCode String?  @map("failure_code") @db.VarChar(48)
-  warningCode String?  @map("warning_code") @db.VarChar(32)
-  detail      Json?
+  id           String   @id @db.Uuid
+  printJobId   String   @map("print_job_id") @db.Uuid
+  sequence     Int
+  type         String   @db.VarChar(32)
+  operationId  String?  @map("operation_id") @db.Uuid
+  status       String   @db.VarChar(24)
+  confidence   String?  @db.VarChar(16)
+  failureCode  String?  @map("failure_code") @db.VarChar(48)
+  warningCode  String?  @map("warning_code") @db.VarChar(32)
+  detail       Json?
   /// What the device reported seeing. Separate from `detail` because that is
   /// free-form and ungranted: this holds only the bounded operational shape the
   /// agent contract validates, so the control plane can read it.
-  deviceDetail Json?   @map("device_detail")
-  createdAt   DateTime @default(now()) @map("created_at")
-  printJob    PrintJob @relation(fields: [printJobId], references: [id], onDelete: Cascade)
+  deviceDetail Json?    @map("device_detail")
+  createdAt    DateTime @default(now()) @map("created_at")
+  printJob     PrintJob @relation(fields: [printJobId], references: [id], onDelete: Cascade)
 
   @@unique([printJobId, sequence])
   @@index([printJobId, createdAt])
@@ -704,39 +704,67 @@ model PrintJobEvent {
 
 /// One immutable change to a kiosk's software paper estimate.
 ///
-/// Refills add sheets, corrections set the estimate by recording the delta from
-/// its previous value, and confirmed print completions deduct the physical
-/// sheets the device reported producing. The signed delta makes the current
-/// estimate a sum over history; the quantity preserves what physically
-/// happened even when an estimate was unavailable or had already reached zero.
-model KioskPaperEvent {
-  id                String     @id @db.Uuid
-  kioskId           String     @map("kiosk_id") @db.VarChar(64)
-  type              String     @db.VarChar(24)
-  /// Sheets added, corrected-to, or consumed, depending on `type`.
-  quantitySheets    Int        @map("quantity_sheets")
-  /// The signed change applied to the estimate. A deduction may apply zero
-  /// when tracking had not started or the estimate had already reached zero.
-  deltaSheets       Int        @map("delta_sheets")
-  estimateAffected  Boolean    @default(true) @map("estimate_affected")
-  reason            String?    @db.VarChar(280)
-  printJobId        String?    @unique @map("print_job_id") @db.Uuid
-  recordedByAdminId String?    @map("recorded_by_admin_id") @db.Uuid
-  recordedByRole    String?    @map("recorded_by_role") @db.VarChar(24)
-  actorType         String     @map("actor_type") @db.VarChar(32)
-  actorId           String     @map("actor_id") @db.VarChar(100)
-  /// Stable across a browser retry. Null for automatic deductions, whose print
-  /// job identifier is already their idempotency key.
-  requestKey        String?    @unique @map("request_key") @db.Uuid
-  requestDigest     String?    @map("request_digest") @db.VarChar(64)
-  createdAt         DateTime   @default(now()) @map("created_at")
-  kiosk             Kiosk      @relation(fields: [kioskId], references: [id], onDelete: Restrict)
-  printJob          PrintJob?  @relation(fields: [printJobId], references: [id], onDelete: Restrict)
-  recordedBy        AdminUser? @relation(fields: [recordedByAdminId], references: [id], onDelete: Restrict)
+/// How much paper a kiosk is believed to hold, as one number that is kept
+/// current rather than a history that has to be replayed to find out.
+///
+/// The row is the estimate. A refill adds to it, a confirmed print subtracts
+/// from it, a correction sets it, and every one of those is a single atomic
+/// statement against this row — so reading the count is a primary-key lookup
+/// and never an aggregation over anything.
+///
+/// The absence of a row is the third state and it matters: a kiosk nobody has
+/// recorded paper for is not a kiosk with no paper. Until somebody refills or
+/// corrects, there is no row, the estimate reads null, and the terminal prints
+/// exactly as it did before any of this existed.
+///
+/// What was lost deliberately: the per-event history. The admin audit log still
+/// records every refill and correction — who, when, how many, why — because
+/// that is evidence about people rather than arithmetic about sheets.
+model KioskPaperInventory {
+  kioskId          String     @id @map("kiosk_id") @db.VarChar(64)
+  /// The current count. Clamped to 0..100000 by the database, not by hope.
+  estimatedSheets  Int        @map("estimated_sheets")
+  /// The most recent refill, denormalized because the fleet view shows it and
+  /// there is no longer a history to find it in.
+  lastRefillSheets Int?       @map("last_refill_sheets")
+  lastRefillNote   String?    @map("last_refill_note") @db.VarChar(280)
+  lastRefillById   String?    @map("last_refill_by_admin_id") @db.Uuid
+  lastRefillAt     DateTime?  @map("last_refill_at")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @default(now()) @updatedAt @map("updated_at")
+  kiosk            Kiosk      @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+  lastRefillBy     AdminUser? @relation(fields: [lastRefillById], references: [id], onDelete: SetNull)
+
+  @@map("kiosk_paper_inventory")
+}
+
+/// One admin paper request that has already been applied.
+///
+/// This exists for exactly one reason: a refill or correction must not be
+/// applied twice when the browser retries it, and with no ledger to check
+/// against there is nothing else that would notice. It is never read to work
+/// out the count — that is the inventory row above and only ever that row.
+///
+/// Rows are safe to prune by age; nothing depends on an old one.
+model KioskPaperRequest {
+  requestKey      String    @id @map("request_key") @db.Uuid
+  kioskId         String    @map("kiosk_id") @db.VarChar(64)
+  type            String    @db.VarChar(24)
+  requestDigest   String    @map("request_digest") @db.VarChar(64)
+  /// What the request asked for and what the estimate became, so a replay can
+  /// answer identically without recomputing anything.
+  quantitySheets  Int       @map("quantity_sheets")
+  appliedSheets   Int       @map("applied_sheets")
+  resultingSheets Int       @map("resulting_sheets")
+  reason          String?   @db.VarChar(280)
+  adminUserId     String    @map("admin_user_id") @db.Uuid
+  adminRole       String    @map("admin_role") @db.VarChar(24)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  kiosk           Kiosk     @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+  admin           AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
 
   @@index([kioskId, createdAt])
-  @@index([type, createdAt])
-  @@map("kiosk_paper_events")
+  @@map("kiosk_paper_requests")
 }
 
 /// Durable work for a kiosk agent. The kiosk opens no inbound port: it leases
@@ -744,27 +772,27 @@ model KioskPaperEvent {
 /// The operation identifier is stable across redeliveries, so a device that
 /// already saw it can recognise it rather than printing twice.
 model AgentCommand {
-  id              String        @id @db.Uuid
-  kioskId         String        @map("kiosk_id") @db.VarChar(64)
-  sessionId       String?       @map("session_id") @db.Uuid
-  printJobId      String?       @map("print_job_id") @db.Uuid
-  operationId     String        @unique @map("operation_id") @db.Uuid
-  type            String        @db.VarChar(32)
-  status          String        @db.VarChar(24)
-  payload         Json
-  attempts        Int           @default(0)
-  availableAt     DateTime      @default(now()) @map("available_at")
-  claimToken      String?       @unique @map("claim_token") @db.Uuid
-  claimedAt       DateTime?     @map("claimed_at")
-  leaseExpiresAt  DateTime?     @map("lease_expires_at")
-  expiresAt       DateTime      @map("expires_at")
-  resultCode      String?       @map("result_code") @db.VarChar(48)
-  completedAt     DateTime?     @map("completed_at")
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @default(now()) @updatedAt @map("updated_at")
-  kiosk           Kiosk         @relation(fields: [kioskId], references: [id], onDelete: Cascade)
-  session         PrintSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  printJob        PrintJob?     @relation(fields: [printJobId], references: [id], onDelete: Cascade)
+  id             String        @id @db.Uuid
+  kioskId        String        @map("kiosk_id") @db.VarChar(64)
+  sessionId      String?       @map("session_id") @db.Uuid
+  printJobId     String?       @map("print_job_id") @db.Uuid
+  operationId    String        @unique @map("operation_id") @db.Uuid
+  type           String        @db.VarChar(32)
+  status         String        @db.VarChar(24)
+  payload        Json
+  attempts       Int           @default(0)
+  availableAt    DateTime      @default(now()) @map("available_at")
+  claimToken     String?       @unique @map("claim_token") @db.Uuid
+  claimedAt      DateTime?     @map("claimed_at")
+  leaseExpiresAt DateTime?     @map("lease_expires_at")
+  expiresAt      DateTime      @map("expires_at")
+  resultCode     String?       @map("result_code") @db.VarChar(48)
+  completedAt    DateTime?     @map("completed_at")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @default(now()) @updatedAt @map("updated_at")
+  kiosk          Kiosk         @relation(fields: [kioskId], references: [id], onDelete: Cascade)
+  session        PrintSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  printJob       PrintJob?     @relation(fields: [printJobId], references: [id], onDelete: Cascade)
 
   @@unique([printJobId], map: "agent_commands_one_per_print_job_idx")
   @@index([kioskId, status, availableAt])
@@ -945,38 +973,39 @@ model AuditEvent {
 /// about how their capabilities combine, and the answer would eventually be
 /// "the union", which is how a superuser appears by accident.
 model AdminUser {
-  id           String   @id @db.Uuid
+  id          String    @id @db.Uuid
   /// The WebAuthn user handle. Random, opaque and stable: never an email
   /// address, so a stolen authenticator database reveals no identities.
-  userHandle   Bytes    @unique @map("user_handle")
+  userHandle  Bytes     @unique @map("user_handle")
   /// The sign-in name. Lowercase, short, safe to say over a phone.
-  username     String   @unique @db.VarChar(32)
-  displayName  String   @map("display_name") @db.VarChar(120)
-  role         String   @db.VarChar(24)
-  status       String   @default("PROVISIONING") @db.VarChar(24)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
-  activatedAt  DateTime? @map("activated_at")
-  suspendedAt  DateTime? @map("suspended_at")
-  disabledAt   DateTime? @map("disabled_at")
-  lastLoginAt  DateTime? @map("last_login_at")
+  username    String    @unique @db.VarChar(32)
+  displayName String    @map("display_name") @db.VarChar(120)
+  role        String    @db.VarChar(24)
+  status      String    @default("PROVISIONING") @db.VarChar(24)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+  activatedAt DateTime? @map("activated_at")
+  suspendedAt DateTime? @map("suspended_at")
+  disabledAt  DateTime? @map("disabled_at")
+  lastLoginAt DateTime? @map("last_login_at")
 
-  authenticators AdminAuthenticator[]
-  sessions       AdminSession[]
-  kioskScopes    AdminKioskScope[]
-  challenges     AdminWebAuthnChallenge[]
-  breakGlass     AdminBreakGlassCredential[]
-  password       AdminPassword?
-  invitations    AdminInvitation[] @relation("AdminInvitationTarget")
-  issuedInvitations AdminInvitation[] @relation("AdminInvitationIssuer")
-  passwordResets AdminPasswordReset[] @relation("AdminPasswordResetTarget")
-  issuedPasswordResets AdminPasswordReset[] @relation("AdminPasswordResetIssuer")
-  recoveryResolutions PrintJobRecoveryResolution[]
-  recoveryCorrections PrintJobRecoveryCorrection[]
+  authenticators       AdminAuthenticator[]
+  sessions             AdminSession[]
+  kioskScopes          AdminKioskScope[]
+  challenges           AdminWebAuthnChallenge[]
+  breakGlass           AdminBreakGlassCredential[]
+  password             AdminPassword?
+  invitations          AdminInvitation[]            @relation("AdminInvitationTarget")
+  issuedInvitations    AdminInvitation[]            @relation("AdminInvitationIssuer")
+  passwordResets       AdminPasswordReset[]         @relation("AdminPasswordResetTarget")
+  issuedPasswordResets AdminPasswordReset[]         @relation("AdminPasswordResetIssuer")
+  recoveryResolutions  PrintJobRecoveryResolution[]
+  recoveryCorrections  PrintJobRecoveryCorrection[]
   refundAuthorizations RefundAuthorization[]
   cleanupRetryRequests CleanupRetryRequest[]
   changeExecutions     AdminChangeExecution[]
-  paperEvents          KioskPaperEvent[]
+  paperRefills         KioskPaperInventory[]
+  paperRequests        KioskPaperRequest[]
 
   @@index([status, role])
   @@map("admin_users")
@@ -993,10 +1022,10 @@ model AdminUser {
 /// column-level UPDATE on that table, and a password digest must never be a
 /// column an account-management connection can reach.
 model AdminPassword {
-  adminUserId String   @id @map("admin_user_id") @db.Uuid
-  digest      String   @db.VarChar(255)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  adminUserId String    @id @map("admin_user_id") @db.Uuid
+  digest      String    @db.VarChar(255)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
   adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
 
   @@map("admin_passwords")
@@ -1166,15 +1195,15 @@ model AdminWebAuthnChallenge {
 /// can never perform an operational action. Consuming it is a single-use event
 /// that raises an alert.
 model AdminBreakGlassCredential {
-  id            String    @id @db.Uuid
-  adminUserId   String    @map("admin_user_id") @db.Uuid
-  label         String    @db.VarChar(80)
-  secretDigest  String    @unique @map("secret_digest") @db.VarChar(64)
-  createdAt     DateTime  @default(now()) @map("created_at")
-  expiresAt     DateTime  @map("expires_at")
-  consumedAt    DateTime? @map("consumed_at")
-  revokedAt     DateTime? @map("revoked_at")
-  adminUser     AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+  id           String    @id @db.Uuid
+  adminUserId  String    @map("admin_user_id") @db.Uuid
+  label        String    @db.VarChar(80)
+  secretDigest String    @unique @map("secret_digest") @db.VarChar(64)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  revokedAt    DateTime? @map("revoked_at")
+  adminUser    AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
 
   @@index([adminUserId, consumedAt])
   @@map("admin_break_glass_credentials")

@@ -126,9 +126,12 @@ const OWNED_TABLES = Object.freeze({
   print_job_recovery_corrections: ["SELECT"],
   refund_authorizations: ["SELECT"],
   cleanup_retry_requests: ["SELECT"],
-  // The product print path appends automatic deductions; it never rewrites
-  // inventory history.
-  kiosk_paper_events: ["SELECT", "INSERT"]
+  // The product print path subtracts confirmed output from the current count.
+  // It holds no INSERT: starting to track a kiosk is a person's decision, made
+  // through the control plane, and a completed print is never that decision.
+  kiosk_paper_inventory: ["SELECT", "UPDATE"],
+  // Admin request keys. The product never reads or writes them.
+  kiosk_paper_requests: []
 });
 
 const ALL_PRIVILEGES = [
@@ -239,7 +242,11 @@ async function provision() {
       // Ownership carried the application's rights until a moment ago. Grant
       // back exactly what it needs, which for the audit log is not everything.
       await client.query(`REVOKE ALL ON ${target} FROM ${applicationLiteral}`);
-      await client.query(`GRANT ${privileges.join(", ")} ON ${target} TO ${applicationLiteral}`);
+      // An empty list is a decision, not an omission: the table is moved out of
+      // the application's reach and nothing is granted back.
+      if (privileges.length > 0) {
+        await client.query(`GRANT ${privileges.join(", ")} ON ${target} TO ${applicationLiteral}`);
+      }
     }
 
     // A table a future migration creates as this role must not leave the

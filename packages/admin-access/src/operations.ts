@@ -5,7 +5,6 @@ import {
   PAPER_ESTIMATE_MAX_SHEETS,
   PAPER_ESTIMATE_STATUSES,
   RECOVERY_OUTCOMES,
-  adminKioskPaperEventSchema,
   adminRecoveryCorrectionSchema,
   adminRecoveryResolutionSchema,
   adminRefundAuthorizationSchema,
@@ -64,9 +63,12 @@ export const correctKioskPaperBodySchema = z
   .strict();
 
 export const kioskPaperMutationResponseSchema = z.object({
-  event: adminKioskPaperEventSchema,
+  /** What the estimate became. The count is the answer, not an event id. */
   estimatedSheets: z.number().int().min(0).max(PAPER_ESTIMATE_MAX_SHEETS),
+  /** The signed change this request applied to it. */
+  appliedSheets: z.number().int(),
   status: z.enum(PAPER_ESTIMATE_STATUSES),
+  /** True when this exact request had already been applied and was not redone. */
   replayed: z.boolean()
 });
 

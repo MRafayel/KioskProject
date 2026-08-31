@@ -139,9 +139,7 @@ describe("Kiosks", () => {
     vi.spyOn(observabilityApi, "kiosks").mockResolvedValue(kiosks());
     vi.spyOn(observabilityApi, "kioskPaper").mockResolvedValue({
       kioskId: "k1",
-      paper: kiosks().items[0]!.paper,
-      items: [],
-      nextCursor: null
+      paper: kiosks().items[0]!.paper
     });
   });
 
@@ -162,14 +160,14 @@ describe("Kiosks", () => {
   it("filters low estimates and records refills and corrections in the kiosk sheet", async () => {
     const user = userEvent.setup();
     const add = vi.spyOn(observabilityApi, "addKioskPaper").mockResolvedValue({
-      event: paperEvent("REFILL", 500, 500),
       estimatedSheets: 520,
+      appliedSheets: 500,
       status: "HEALTHY",
       replayed: false
     });
     const correct = vi.spyOn(observabilityApi, "correctKioskPaper").mockResolvedValue({
-      event: paperEvent("CORRECTION", 200, 180),
       estimatedSheets: 200,
+      appliedSheets: -320,
       status: "HEALTHY",
       replayed: false
     });
@@ -440,22 +438,6 @@ function kiosks(): AdminKiosksResponse {
       { ...base, id: "k2", publicCode: "K-2", name: "Back office", liveness: "OFFLINE" }
     ]
   };
-}
-
-function paperEvent(type: "REFILL" | "CORRECTION", quantitySheets: number, deltaSheets: number) {
-  return {
-    id: uuid(type === "REFILL" ? 9 : 10),
-    type,
-    quantitySheets,
-    deltaSheets,
-    estimateAffected: true,
-    reason: type === "CORRECTION" ? "Tray counted" : null,
-    printJobId: null,
-    recordedByAdminUserId: uuid(8),
-    recordedByDisplayName: "Operator One",
-    recordedByRole: "OPERATOR",
-    createdAt: "2026-08-23T12:00:00.000Z"
-  } as const;
 }
 
 function retention(): AdminRetentionResponse {

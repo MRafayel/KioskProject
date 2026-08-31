@@ -30,6 +30,11 @@ import { quoteIdentifier, quoteLiteral } from "./sql-identifiers.mjs";
  * The privileges that would let a role change or destroy something that already
  * exists. INSERT is absent on purpose: it is the one an append-only role is
  * allowed to hold, and only on the tables its matrix names.
+ *
+ * UPDATE is here too, and stays here. A role that needs it holds it per column
+ * on a named table through `updatable` below, which is checked separately —
+ * so a table-wide UPDATE is still a failure even where a column-scoped one is
+ * expected.
  */
 const MUTATING_PRIVILEGES = ["UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"];
 const ALL_PRIVILEGES = ["SELECT", "INSERT", ...MUTATING_PRIVILEGES];
@@ -42,6 +47,7 @@ const ALL_PRIVILEGES = ["SELECT", "INSERT", ...MUTATING_PRIVILEGES];
  * @property {string} matrixPath               the policy file, named in errors
  * @property {string} command                  the pnpm script, named in errors
  * @property {Record<string,string>} insertable tables it may append to
+ * @property {Record<string,string[]>} [updatable] table columns it may UPDATE
  * @property {Record<string,string[]|"*">} readable tables and columns it may read
  * @property {Record<string,string>} forbidden tables it may not touch at all
  * @property {Record<string,string>} settings  connection settings pinned on it
@@ -49,6 +55,13 @@ const ALL_PRIVILEGES = ["SELECT", "INSERT", ...MUTATING_PRIVILEGES];
  */
 
 const MINIMUM_ROLE_PASSWORD_LENGTH = 24;
+
+/** What the provisioning summary and the verified line say about UPDATE. */
+function describeUpdatable(updatable) {
+  const entries = Object.entries(updatable ?? {});
+  if (entries.length === 0) return "nothing";
+  return entries.map(([table, columns]) => `${table}(${columns.join(", ")})`).join(", ");
+}
 
 /**
  * Resolve the credential used while creating or synchronising a role.
@@ -281,6 +294,16 @@ class AppendRoleSession {
         await client.query(`GRANT INSERT ON public.${quoteIdentifier(table)} TO ${roleLiteral}`);
       }
 
+      // Column-scoped on purpose. A role that may change a count must not
+      // thereby be able to change who recorded it or when.
+      for (const [table, columns] of Object.entries(policy.updatable ?? {})) {
+        if (!existingTables.includes(table)) continue;
+        const columnList = columns.map(quoteIdentifier).join(", ");
+        await client.query(
+          `GRANT UPDATE (${columnList}) ON public.${quoteIdentifier(table)} TO ${roleLiteral}`
+        );
+      }
+
       // A table added by a future migration must not inherit a grant. Default
       // privileges are the one place PostgreSQL would hand one out silently.
       await client.query(
@@ -300,7 +323,7 @@ class AppendRoleSession {
         `Provisioned ${policy.role}.`,
         `  may INSERT into : ${Object.keys(policy.insertable).join(", ")}`,
         `  may SELECT from : ${Object.keys(policy.readable).length} tables`,
-        "  may UPDATE      : nothing",
+        `  may UPDATE      : ${describeUpdatable(policy.updatable)}`,
         "  may DELETE      : nothing",
         "",
         policy.summary,
@@ -358,6 +381,32 @@ class AppendRoleSession {
       }
     }
 
+    for (const [table, columns] of Object.entries(policy.updatable ?? {})) {
+      if (!existingTables.includes(table)) continue;
+      for (const column of columns) {
+        if (!(await this.hasColumnPrivilege(table, column, "UPDATE"))) {
+          this.report(`${table}.${column}: expected UPDATE, role has none`);
+        }
+      }
+      for (const column of await this.listColumns(table)) {
+        if (columns.includes(column)) continue;
+        if (await this.hasColumnPrivilege(table, column, "UPDATE")) {
+          this.report(`${table}.${column}: MUST NOT be updatable but the role can UPDATE it`);
+        }
+      }
+    }
+
+    // UPDATE anywhere the policy did not name it, at any scope.
+    const updatable = new Set(Object.keys(policy.updatable ?? {}));
+    for (const table of existingTables) {
+      if (updatable.has(table)) continue;
+      for (const column of await this.listColumns(table)) {
+        if (await this.hasColumnPrivilege(table, column, "UPDATE")) {
+          this.report(`${table}.${column}: role holds UPDATE on a table it must not change`);
+        }
+      }
+    }
+
     for (const [table, columns] of Object.entries(policy.readable)) {
       if (!existingTables.includes(table)) continue;
       const existingColumns = await this.listColumns(table);
@@ -411,7 +460,8 @@ class AppendRoleSession {
     process.stdout.write(
       this.failures === 0
         ? `${policy.role}: privilege matrix verified. ` +
-            `${Object.keys(policy.insertable).length} INSERT(s), no UPDATE, no DELETE.\n`
+            `${Object.keys(policy.insertable).length} INSERT(s), ` +
+            `${describeUpdatable(policy.updatable)} updatable, no DELETE.\n`
         : `\n${this.failures} privilege problem(s). ` +
             "The control plane is not safe to point at this role.\n"
     );
@@ -442,7 +492,7 @@ class AppendRoleSession {
   assertPolicyMatchesSchema(existingTables) {
     const { policy } = this;
 
-    const contradictory = Object.keys(policy.insertable)
+    const contradictory = [...Object.keys(policy.insertable), ...Object.keys(policy.updatable ?? {})]
       .filter((table) => table in policy.forbidden)
       .sort();
     if (contradictory.length > 0) {
@@ -456,6 +506,7 @@ class AppendRoleSession {
 
     const decided = new Set([
       ...Object.keys(policy.insertable),
+      ...Object.keys(policy.updatable ?? {}),
       ...Object.keys(policy.readable),
       ...Object.keys(policy.forbidden)
     ]);

@@ -100,8 +100,9 @@ export const READABLE_TABLES = Object.freeze({
   // Who asked retention to try again, and about which failure. Operational
   // state the retention screen reports; it names no document and no object key.
   cleanup_retry_requests: "*",
-  // Software inventory only: counts, actors and timestamps. No document data.
-  kiosk_paper_events: "*",
+  // The current software estimate and the last refill recorded against it.
+  // Counts, actors and timestamps; no document data.
+  kiosk_paper_inventory: "*",
 
   // `selections` carries per-document content digests until retention strips
   // them. The priced aggregates beside it answer every operational question.
@@ -383,6 +384,8 @@ export const DENIED_TABLES = Object.freeze({
     "Object keys: the storage address of original uploads, normalized PDFs and rendered page images. The control plane must not be able to name them, let alone hold a credential for them.",
   admin_webauthn_challenges: "In-flight ceremony state.",
   admin_break_glass_credentials: "Recovery credential digests.",
+  kiosk_paper_requests:
+    "Idempotency plumbing: applied refill and correction keys, kept so a retried request is recognised as one. The panel shows the count, and who changed it is in the audit log; nothing renders from here.",
   idempotency_records: "Stored response bodies from every replayed request.",
   system_metadata: "Free-form configuration values.",
   _prisma_migrations: "Schema management, not operational data."

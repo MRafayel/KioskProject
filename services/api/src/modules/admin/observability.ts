@@ -21,7 +21,6 @@ import {
   type AdminDocumentsResponse,
   type AdminErrorsResponse,
   type AdminKiosksResponse,
-  type AdminKioskPaperEvent,
   type AdminKioskPaperResponse,
   type AdminKioskPaperSummary,
   type AdminMoneySummaryResponse,
@@ -401,31 +400,21 @@ export class AdminObservabilityService {
         status: true,
         timezone: true,
         lastSeenAt: true,
-        paperEvents: {
-          where: { type: "REFILL" },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: 1,
+        paperInventory: {
           select: {
-            quantitySheets: true,
-            reason: true,
-            recordedByAdminId: true,
-            createdAt: true,
-            recordedBy: { select: { displayName: true } }
+            estimatedSheets: true,
+            lastRefillSheets: true,
+            lastRefillNote: true,
+            lastRefillById: true,
+            lastRefillAt: true,
+            lastRefillBy: { select: { displayName: true } }
           }
         }
       }
     });
 
     const kioskIds = kiosks.map((kiosk) => kiosk.id);
-    const [
-      liveSessions,
-      openJobs,
-      recoveryJobs,
-      agents,
-      printers,
-      paperTotals,
-      paperInitializations
-    ] = await Promise.all([
+    const [liveSessions, openJobs, recoveryJobs, agents, printers] = await Promise.all([
       this.options.database.printSession.groupBy({
         by: ["kioskId"],
         where: { kioskId: { in: kioskIds }, state: { in: [...LIVE_SESSION_STATES] } },
@@ -473,16 +462,6 @@ export class AdminObservabilityService {
           shared: true,
           lastSeenAt: true
         }
-      }),
-      this.options.database.kioskPaperEvent.groupBy({
-        by: ["kioskId"],
-        where: { kioskId: { in: kioskIds } },
-        _sum: { deltaSheets: true }
-      }),
-      this.options.database.kioskPaperEvent.findMany({
-        where: { kioskId: { in: kioskIds }, type: { in: ["REFILL", "CORRECTION"] } },
-        distinct: ["kioskId"],
-        select: { kioskId: true }
       })
     ]);
 
@@ -494,10 +473,6 @@ export class AdminObservabilityService {
       if (!agentByKiosk.has(agent.kioskId)) agentByKiosk.set(agent.kioskId, agent);
     }
     const printerByKiosk = new Map(printers.map((printer) => [printer.kioskId, printer]));
-    const initializedPaper = new Set(paperInitializations.map((row) => row.kioskId));
-    const paperByKiosk = new Map(
-      paperTotals.map((row) => [row.kioskId, Math.max(0, row._sum.deltaSheets ?? 0)])
-    );
 
     return {
       scoped: scope.kioskIds !== null,
@@ -541,77 +516,45 @@ export class AdminObservabilityService {
           liveSessions: live[kiosk.id] ?? 0,
           openPrintJobs: open[kiosk.id] ?? 0,
           recoveryRequiredJobs: recovery[kiosk.id] ?? 0,
-          paper: paperSummary(
-            initializedPaper.has(kiosk.id) ? (paperByKiosk.get(kiosk.id) ?? 0) : null,
-            kiosk.paperEvents[0] ?? null
-          )
+          // No row is a kiosk nobody has started tracking, which is not the
+          // same as an empty tray.
+          paper: paperSummary(kiosk.paperInventory)
         };
       })
     };
   }
 
-  /** One kiosk's software inventory and immutable event history. */
+  /**
+   * One kiosk's current paper estimate.
+   *
+   * It used to page an event history beside this. There is no history to page:
+   * the estimate is a single count that refills, corrections and confirmed
+   * prints write directly, and who changed it and why is in the admin audit
+   * log with every other admin action.
+   */
   public async kioskPaper(
     scope: AdminReadScope,
-    kioskId: string,
-    cursorText?: string
+    kioskId: string
   ): Promise<AdminKioskPaperResponse | null> {
     const kiosk = await this.options.database.kiosk.findFirst({
       where: scopedKioskIdFilter(scope, kioskId),
-      select: { id: true }
+      select: {
+        id: true,
+        paperInventory: {
+          select: {
+            estimatedSheets: true,
+            lastRefillSheets: true,
+            lastRefillNote: true,
+            lastRefillById: true,
+            lastRefillAt: true,
+            lastRefillBy: { select: { displayName: true } }
+          }
+        }
+      }
     });
     if (!kiosk) return null;
 
-    const cursor = cursorText ? decodeAdminCursor(cursorText) : null;
-    const [rows, initialized, total, refill] = await Promise.all([
-      this.options.database.kioskPaperEvent.findMany({
-        where: { kioskId, ...keysetWhere("createdAt", cursor) },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: ADMIN_PAGE_SIZE + 1,
-        select: {
-          id: true,
-          type: true,
-          quantitySheets: true,
-          deltaSheets: true,
-          estimateAffected: true,
-          reason: true,
-          printJobId: true,
-          recordedByAdminId: true,
-          recordedByRole: true,
-          createdAt: true,
-          recordedBy: { select: { displayName: true } }
-        }
-      }),
-      this.options.database.kioskPaperEvent.findFirst({
-        where: { kioskId, type: { in: ["REFILL", "CORRECTION"] } },
-        select: { id: true }
-      }),
-      this.options.database.kioskPaperEvent.groupBy({
-        by: ["kioskId"],
-        where: { kioskId },
-        _sum: { deltaSheets: true }
-      }),
-      this.options.database.kioskPaperEvent.findFirst({
-        where: { kioskId, type: "REFILL" },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        select: {
-          quantitySheets: true,
-          reason: true,
-          recordedByAdminId: true,
-          createdAt: true,
-          recordedBy: { select: { displayName: true } }
-        }
-      })
-    ]);
-
-    const page = rows.slice(0, ADMIN_PAGE_SIZE);
-    const estimatedSheets = initialized ? Math.max(0, total[0]?._sum.deltaSheets ?? 0) : null;
-    return {
-      kioskId,
-      paper: paperSummary(estimatedSheets, refill),
-      items: page.map(presentPaperEvent),
-      nextCursor: nextCursorFrom(rows, page, (row) => ({ at: row.createdAt, id: row.id }))
-    };
+    return { kioskId, paper: paperSummary(kiosk.paperInventory) };
   }
 
   // -------------------------------------------------------------------------
@@ -2285,63 +2228,48 @@ function toPrintJob(job: PrintJobRow, now: Date): AdminPrintJobsResponse["items"
   };
 }
 
+/**
+ * One inventory row, or its absence, as the panel reads it.
+ *
+ * No row is a kiosk nobody has started tracking. That is reported as unknown
+ * rather than as zero, here as everywhere else, because a wrong pessimistic
+ * answer closes a machine that could have served somebody.
+ *
+ * The clamp stays even though a check constraint now enforces the same bounds.
+ * It costs nothing and it means a value that somehow got past the database
+ * still cannot render as a negative sheet count on an operator's screen.
+ */
 function paperSummary(
-  estimatedSheets: number | null,
-  lastRefill: {
-    quantitySheets: number;
-    reason: string | null;
-    recordedByAdminId: string | null;
-    createdAt: Date;
-    recordedBy: { displayName: string } | null;
+  inventory: {
+    estimatedSheets: number;
+    lastRefillSheets: number | null;
+    lastRefillNote: string | null;
+    lastRefillById: string | null;
+    lastRefillAt: Date | null;
+    lastRefillBy: { displayName: string } | null;
   } | null
 ): AdminKioskPaperSummary {
   const safeEstimate =
-    estimatedSheets === null
+    inventory === null
       ? null
-      : Math.min(PAPER_ESTIMATE_MAX_SHEETS, Math.max(0, estimatedSheets));
+      : Math.min(PAPER_ESTIMATE_MAX_SHEETS, Math.max(0, inventory.estimatedSheets));
   return {
     estimatedSheets: safeEstimate,
     status: classifyPaperEstimate(safeEstimate),
     gettingLowAtSheets: PAPER_GETTING_LOW_THRESHOLD_SHEETS,
     refillSoonAtSheets: PAPER_REFILL_SOON_THRESHOLD_SHEETS,
     lastRefill:
-      lastRefill?.recordedByAdminId === null || lastRefill === null
+      inventory?.lastRefillSheets == null ||
+      inventory.lastRefillById === null ||
+      inventory.lastRefillAt === null
         ? null
         : {
-            sheetsAdded: lastRefill.quantitySheets,
-            note: lastRefill.reason,
-            recordedByAdminUserId: lastRefill.recordedByAdminId,
-            recordedByDisplayName: lastRefill.recordedBy?.displayName ?? null,
-            recordedAt: lastRefill.createdAt.toISOString()
+            sheetsAdded: inventory.lastRefillSheets,
+            note: inventory.lastRefillNote,
+            recordedByAdminUserId: inventory.lastRefillById,
+            recordedByDisplayName: inventory.lastRefillBy?.displayName ?? null,
+            recordedAt: inventory.lastRefillAt.toISOString()
           }
-  };
-}
-
-function presentPaperEvent(row: {
-  id: string;
-  type: string;
-  quantitySheets: number;
-  deltaSheets: number;
-  estimateAffected: boolean;
-  reason: string | null;
-  printJobId: string | null;
-  recordedByAdminId: string | null;
-  recordedByRole: string | null;
-  createdAt: Date;
-  recordedBy: { displayName: string } | null;
-}): AdminKioskPaperEvent {
-  return {
-    id: row.id,
-    type: row.type as AdminKioskPaperEvent["type"],
-    quantitySheets: row.quantitySheets,
-    deltaSheets: row.deltaSheets,
-    estimateAffected: row.estimateAffected,
-    reason: row.reason,
-    printJobId: row.printJobId,
-    recordedByAdminUserId: row.recordedByAdminId,
-    recordedByDisplayName: row.recordedBy?.displayName ?? null,
-    recordedByRole: row.recordedByRole,
-    createdAt: row.createdAt.toISOString()
   };
 }
 

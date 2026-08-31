@@ -188,15 +188,33 @@ const FORBIDDEN_ADMIN_WRITE_PRIVILEGES: readonly (readonly [string, string])[] =
   ["public.audit_events", "DELETE"],
   ["public.print_job_recovery_resolutions", "UPDATE"],
   ["public.print_job_recovery_resolutions", "DELETE"],
-  ["public.kiosk_paper_events", "UPDATE"],
-  ["public.kiosk_paper_events", "DELETE"]
+  // Table-wide, which stays forbidden. The paper estimate is now a count this
+  // role keeps current, but through a grant scoped to the columns carrying the
+  // number — so a whole-table UPDATE here is still the wrong shape.
+  ["public.kiosk_paper_inventory", "UPDATE"],
+  ["public.kiosk_paper_inventory", "DELETE"],
+  ["public.kiosk_paper_requests", "UPDATE"],
+  ["public.kiosk_paper_requests", "DELETE"]
 ];
 
 /** The core grants without which admin actions cannot complete. */
 const REQUIRED_ADMIN_WRITE_PRIVILEGES: readonly (readonly [string, string])[] = [
   ["public.print_job_recovery_resolutions", "INSERT"],
   ["public.audit_events", "INSERT"],
-  ["public.kiosk_paper_events", "INSERT"]
+  // The first refill at a kiosk creates its row; later ones update it.
+  ["public.kiosk_paper_inventory", "INSERT"],
+  ["public.kiosk_paper_requests", "INSERT"]
+];
+
+/**
+ * Grants held per column rather than per table.
+ *
+ * `has_table_privilege` answers false for a column-scoped grant, which is what
+ * makes the forbidden list above still meaningful for the same table: one
+ * asserts there is no whole-table UPDATE, this asserts there is a column one.
+ */
+const REQUIRED_ADMIN_WRITE_COLUMN_PRIVILEGES: readonly (readonly [string, string])[] = [
+  ["public.kiosk_paper_inventory", "UPDATE"]
 ];
 
 /**
@@ -225,6 +243,12 @@ export async function assertAdminWriteClientIsAppendOnly(client: PrismaClient): 
   }
   for (const [table, privilege] of REQUIRED_ADMIN_WRITE_PRIVILEGES) {
     if (!(await held(table, privilege))) violations.push(`lacks ${privilege} on ${table}`);
+  }
+  for (const [table, privilege] of REQUIRED_ADMIN_WRITE_COLUMN_PRIVILEGES) {
+    const rows = await client.$queryRaw<
+      { held: boolean }[]
+    >`SELECT has_any_column_privilege(${table}, ${privilege}) AS held`;
+    if (rows[0]?.held !== true) violations.push(`lacks column ${privilege} on ${table}`);
   }
 
   if (violations.length > 0) {
@@ -622,8 +646,13 @@ export type {
   PrintJobLedgerType,
   PrintJobSettlementOutcome
 } from "./print-jobs.js";
-export { readKioskPaperEstimate } from "./kiosk-paper.js";
-export type { KioskPaperEstimateReader } from "./kiosk-paper.js";
+export {
+  applyKioskPaperDeduction,
+  lockKioskPaperEstimate,
+  readKioskPaperEstimate,
+  PAPER_INVENTORY_MAX_SHEETS
+} from "./kiosk-paper.js";
+export type { KioskPaperDeduction, KioskPaperEstimateReader } from "./kiosk-paper.js";
 export {
   MAX_UPLOAD_ARTIFACT_SETTLE_MILLISECONDS,
   processingArtifactCleanupDueAt,

@@ -82,8 +82,10 @@ const ALLOWED_METADATA_KEYS = new Set([
   "physicalSheets",
   "status",
   // Software paper inventory. Counts only; the estimate is explicitly not a
-  // sensor reading, and the event id ties the audit row to its immutable ledger.
-  "paperEventId",
+  // sensor reading. There is no ledger behind it any more, so these rows are
+  // the record of who changed the estimate and why — the request key ties one
+  // to the applied request that a retry would replay.
+  "paperRequestKey",
   "sheetsAdded",
   "estimatedSheets",
   "paperSheetsConsumed",

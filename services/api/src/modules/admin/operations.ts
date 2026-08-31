@@ -8,7 +8,6 @@ import {
   type AcknowledgeIncidentBody,
   type AddKioskPaperBody,
   type AdminIncidentAcknowledgement,
-  type AdminKioskPaperEvent,
   type AdminRecoveryCorrection,
   type AdminRecoveryResolution,
   type AdminRetentionRetry,
@@ -113,10 +112,19 @@ export class AdminOperationsService {
   }
 
   /**
-   * Append one human paper event and its ordinary admin audit row together.
+   * Apply one human paper change to the kiosk's current count.
    *
-   * A correction is represented as the signed delta from the current estimate,
-   * so it resets the total without rewriting any refill or print deduction.
+   * There is no ledger behind this any more, which removes the step that used
+   * to be the subtle one: a correction was stored as a signed delta from a
+   * total the database had to derive under a lock. It is now what it always
+   * meant — the new count, written to the row.
+   *
+   * The refill row is the one place the two cases differ. `upsert` is doing
+   * real work there: the first refill or correction at a kiosk is what starts
+   * tracking it, and until then there is no row to update.
+   *
+   * The audit row is written in the same transaction, as before. It is now the
+   * only record of who changed the estimate and why, so it is not optional.
    */
   private async recordKioskPaperChange(
     admin: AuthenticatedAdmin,
@@ -128,6 +136,7 @@ export class AdminOperationsService {
     const now = this.options.clock.now();
     const digest = digestPaperRequest(kioskId, type, body);
     const reason = "reason" in body ? body.reason : body.note;
+    const action = type === "REFILL" ? "admin.kiosk.paper.refill" : "admin.kiosk.paper.correct";
 
     try {
       return await this.options.database.$transaction(
@@ -138,22 +147,32 @@ export class AdminOperationsService {
           });
           if (!kiosk || !(await this.mayActOnKiosk(transaction, admin, kioskId))) {
             throw new RefusedAction(adminNotFound(), {
-              action: type === "REFILL" ? "admin.kiosk.paper.refill" : "admin.kiosk.paper.correct",
+              action,
               failureCode: "NOT_FOUND_OR_OUT_OF_SCOPE",
               reason: reason ?? "Paper refill"
             });
           }
 
-          const existing = await transaction.kioskPaperEvent.findUnique({
+          // Applied already? Answer with what it did rather than doing it
+          // twice. With no ledger to notice a repeated insert, this record is
+          // the only thing standing between a retried refill and doubled paper.
+          const existing = await transaction.kioskPaperRequest.findUnique({
             where: { requestKey: body.requestKey },
-            select: PAPER_EVENT_FIELDS
+            select: {
+              kioskId: true,
+              type: true,
+              requestDigest: true,
+              adminUserId: true,
+              appliedSheets: true,
+              resultingSheets: true
+            }
           });
           if (existing) {
             if (
               existing.requestDigest !== digest ||
               existing.kioskId !== kioskId ||
               existing.type !== type ||
-              existing.recordedByAdminId !== admin.adminUserId
+              existing.adminUserId !== admin.adminUserId
             ) {
               throw new RefusedAction(
                 new ApiError(
@@ -162,8 +181,7 @@ export class AdminOperationsService {
                   "This paper update key has already been used. Start the update again."
                 ),
                 {
-                  action:
-                    type === "REFILL" ? "admin.kiosk.paper.refill" : "admin.kiosk.paper.correct",
+                  action,
                   failureCode: "REQUEST_KEY_REUSED",
                   reason: reason ?? "Paper refill",
                   kioskId
@@ -171,22 +189,24 @@ export class AdminOperationsService {
               );
             }
 
-            const estimatedSheets = await paperEstimateIn(transaction, kioskId);
-            const currentEstimate = estimatedSheets ?? 0;
+            // The count as it stands now, not as it stood when this request was
+            // first applied: a print may have completed since.
+            const currentEstimate = (await readKioskPaperEstimate(transaction, kioskId)) ?? 0;
             return {
-              event: await this.presentPaperEvent(transaction, existing),
               estimatedSheets: currentEstimate,
+              appliedSheets: existing.appliedSheets,
               status: classifyPaperEstimate(currentEstimate),
               replayed: true
             };
           }
 
-          const current = (await paperEstimateIn(transaction, kioskId)) ?? 0;
+          const current = await readKioskPaperEstimate(transaction, kioskId);
           const quantitySheets = "sheetsAdded" in body ? body.sheetsAdded : body.estimatedSheets;
-          const deltaSheets = type === "REFILL" ? quantitySheets : quantitySheets - current;
-          const proposedEstimate = current + deltaSheets;
 
-          if (proposedEstimate > PAPER_ESTIMATE_MAX_SHEETS) {
+          // Refused here with an explanation the operator can act on. The check
+          // constraint refuses the same thing without one, and catches the case
+          // this read cannot see: a second refill landing in between.
+          if (type === "REFILL" && (current ?? 0) + quantitySheets > PAPER_ESTIMATE_MAX_SHEETS) {
             throw new RefusedAction(
               new ApiError(
                 409,
@@ -194,8 +214,7 @@ export class AdminOperationsService {
                 `The paper estimate cannot exceed ${PAPER_ESTIMATE_MAX_SHEETS.toLocaleString()} sheets. Correct the estimate instead.`
               ),
               {
-                action:
-                  type === "REFILL" ? "admin.kiosk.paper.refill" : "admin.kiosk.paper.correct",
+                action,
                 failureCode: "ESTIMATE_LIMIT_EXCEEDED",
                 reason: reason ?? "Paper refill",
                 kioskId
@@ -203,36 +222,65 @@ export class AdminOperationsService {
             );
           }
 
-          const created = await transaction.kioskPaperEvent.create({
+          const refill =
+            type === "REFILL"
+              ? {
+                  lastRefillSheets: quantitySheets,
+                  lastRefillNote: reason ?? null,
+                  lastRefillById: admin.adminUserId,
+                  lastRefillAt: now
+                }
+              : {};
+
+          // One statement, and the write is what makes it correct rather than
+          // the read above. A refill increments the stored value in place, so a
+          // print completing at this kiosk between the read and here is
+          // subtracted from the total rather than overwritten by it; a
+          // correction is a person saying what is actually in the tray, so it
+          // sets the value and is meant to win.
+          //
+          // `upsert` is load-bearing: the first refill or correction at a kiosk
+          // is what starts tracking it, and until then there is no row.
+          const inventory = await transaction.kioskPaperInventory.upsert({
+            where: { kioskId },
+            create: {
+              kioskId,
+              estimatedSheets: quantitySheets,
+              createdAt: now,
+              updatedAt: now,
+              ...refill
+            },
+            update: {
+              estimatedSheets: type === "REFILL" ? { increment: quantitySheets } : quantitySheets,
+              updatedAt: now,
+              ...refill
+            },
+            select: { estimatedSheets: true }
+          });
+          const estimatedSheets = inventory.estimatedSheets;
+          const appliedSheets = estimatedSheets - (current ?? 0);
+
+          await transaction.kioskPaperRequest.create({
             data: {
-              id: this.options.random.uuid(now),
+              requestKey: body.requestKey,
               kioskId,
               type,
-              quantitySheets,
-              deltaSheets,
-              estimateAffected: true,
-              reason: reason ?? null,
-              recordedByAdminId: admin.adminUserId,
-              recordedByRole: admin.role,
-              actorType: "ADMIN_USER",
-              actorId: admin.adminUserId,
-              requestKey: body.requestKey,
               requestDigest: digest,
+              quantitySheets,
+              appliedSheets,
+              resultingSheets: estimatedSheets,
+              reason: reason ?? null,
+              adminUserId: admin.adminUserId,
+              adminRole: admin.role,
               createdAt: now
-            },
-            select: PAPER_EVENT_FIELDS
+            }
           });
-          // The database derives the delta under a per-kiosk lock, so a refill,
-          // correction and confirmed print that race cannot calculate from the
-          // same old estimate. Read the final sum rather than trusting the
-          // optimistic value calculated before the insert.
-          const estimatedSheets = (await paperEstimateIn(transaction, kioskId)) ?? quantitySheets;
 
           await writeAdminAuditEvent(transaction, {
             id: this.options.random.uuid(now),
             occurredAt: now,
             actorId: admin.adminUserId,
-            action: type === "REFILL" ? "admin.kiosk.paper.refill" : "admin.kiosk.paper.correct",
+            action,
             outcome: "SUCCESS",
             requestId,
             kioskId,
@@ -240,8 +288,8 @@ export class AdminOperationsService {
               role: admin.role,
               capability: "kiosk.paper.manage",
               risk: "R1",
-              paperEventId: created.id,
-              paperEstimateDelta: created.deltaSheets,
+              paperRequestKey: body.requestKey,
+              paperEstimateDelta: appliedSheets,
               estimatedSheets,
               ...(type === "REFILL" ? { sheetsAdded: quantitySheets } : {}),
               ...(reason ? { reason } : {})
@@ -249,8 +297,8 @@ export class AdminOperationsService {
           });
 
           return {
-            event: await this.presentPaperEvent(transaction, created),
             estimatedSheets,
+            appliedSheets,
             status: classifyPaperEstimate(estimatedSheets),
             replayed: false
           };
@@ -901,32 +949,6 @@ export class AdminOperationsService {
   // Shared
   // -------------------------------------------------------------------------
 
-  private async presentPaperEvent(
-    transaction: AdminWriteTransaction,
-    row: StoredPaperEvent
-  ): Promise<AdminKioskPaperEvent> {
-    const person = row.recordedByAdminId
-      ? await transaction.adminUser.findUnique({
-          where: { id: row.recordedByAdminId },
-          select: { displayName: true }
-        })
-      : null;
-
-    return {
-      id: row.id,
-      type: row.type as AdminKioskPaperEvent["type"],
-      quantitySheets: row.quantitySheets,
-      deltaSheets: row.deltaSheets,
-      estimateAffected: row.estimateAffected,
-      reason: row.reason,
-      printJobId: row.printJobId,
-      recordedByAdminUserId: row.recordedByAdminId,
-      recordedByDisplayName: person?.displayName ?? null,
-      recordedByRole: row.recordedByRole,
-      createdAt: row.createdAt.toISOString()
-    };
-  }
-
   /**
    * Whether this person may act on this kiosk, asked of the database rather
    * than of the session.
@@ -1086,47 +1108,6 @@ export class AdminOperationsService {
       } satisfies Record<string, AdminAuditMetadataValue>
     });
   }
-}
-
-const PAPER_EVENT_FIELDS = {
-  id: true,
-  kioskId: true,
-  type: true,
-  quantitySheets: true,
-  deltaSheets: true,
-  estimateAffected: true,
-  reason: true,
-  printJobId: true,
-  recordedByAdminId: true,
-  recordedByRole: true,
-  requestDigest: true,
-  createdAt: true
-} as const;
-
-interface StoredPaperEvent {
-  id: string;
-  kioskId: string;
-  type: string;
-  quantitySheets: number;
-  deltaSheets: number;
-  estimateAffected: boolean;
-  reason: string | null;
-  printJobId: string | null;
-  recordedByAdminId: string | null;
-  recordedByRole: string | null;
-  requestDigest: string | null;
-  createdAt: Date;
-}
-
-/**
- * The same sum the kiosk's own screen reads, so a correction and the number a
- * customer was shown a second earlier can never be two different opinions.
- */
-async function paperEstimateIn(
-  transaction: AdminWriteTransaction,
-  kioskId: string
-): Promise<number | null> {
-  return readKioskPaperEstimate(transaction, kioskId);
 }
 
 function digestPaperRequest(

@@ -96,11 +96,12 @@ export const observabilityApi = {
   // SCREAMING_SNAKE next to a button that goes nowhere useful.
   overview: () => adminRequestParsed(adminOverviewResponseSchema, "GET", "/v1/admin/overview"),
   kiosks: () => adminRequest<AdminKiosksResponse>("GET", "/v1/admin/kiosks"),
-  kioskPaper: (kioskId: string, cursor?: string) =>
+  // No cursor: the estimate is one count, not a page of history.
+  kioskPaper: (kioskId: string) =>
     adminRequestParsed<AdminKioskPaperResponse>(
       adminKioskPaperResponseSchema,
       "GET",
-      `/v1/admin/kiosks/${encodeURIComponent(kioskId)}/paper${query({ cursor })}`
+      `/v1/admin/kiosks/${encodeURIComponent(kioskId)}/paper`
     ),
 
   sessions: (filters: ListFilters = {}) =>

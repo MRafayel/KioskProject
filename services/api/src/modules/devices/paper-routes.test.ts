@@ -25,10 +25,12 @@ afterEach(async () => {
   await Promise.all(openApps.splice(0).map((app) => app.close()));
 });
 
-function buildApp(paper: { initialized: boolean; sum: number | null }) {
-  const findFirst = vi.fn().mockResolvedValue(paper.initialized ? { id: "event" } : null);
-  const aggregate = vi.fn().mockResolvedValue({ _sum: { deltaSheets: paper.sum } });
-  const database = { kioskPaperEvent: { findFirst, aggregate } } as unknown as PrismaClient;
+function buildApp(estimatedSheets: number | null) {
+  // No row is a kiosk nobody has started tracking.
+  const findUnique = vi
+    .fn()
+    .mockResolvedValue(estimatedSheets === null ? null : { estimatedSheets });
+  const database = { kioskPaperInventory: { findUnique } } as unknown as PrismaClient;
 
   const app = Fastify();
   openApps.push(app);
@@ -51,12 +53,12 @@ function buildApp(paper: { initialized: boolean; sum: number | null }) {
     printerReadiness: {} as unknown as PrinterReadinessGate
   });
 
-  return { app, findFirst };
+  return { app, findUnique };
 }
 
 describe("the kiosk paper estimate route", () => {
-  it("answers with the sheets its own ledger sums to", async () => {
-    const { app } = buildApp({ initialized: true, sum: 118 });
+  it("answers with the count its own kiosk holds", async () => {
+    const { app } = buildApp(118);
 
     const response = await app.inject({ method: "GET", url: `/v1/kiosks/${KIOSK_ID}/paper` });
 
@@ -67,7 +69,7 @@ describe("the kiosk paper estimate route", () => {
   });
 
   it("answers null rather than zero for a kiosk nobody tracks", async () => {
-    const { app } = buildApp({ initialized: false, sum: null });
+    const { app } = buildApp(null);
 
     const response = await app.inject({ method: "GET", url: `/v1/kiosks/${KIOSK_ID}/paper` });
 
@@ -75,20 +77,20 @@ describe("the kiosk paper estimate route", () => {
   });
 
   it("tells a credential nothing about another kiosk, including that it exists", async () => {
-    const { app, findFirst } = buildApp({ initialized: true, sum: 118 });
+    const { app, findUnique } = buildApp(118);
 
     const response = await app.inject({ method: "GET", url: "/v1/kiosks/kiosk_someone_else/paper" });
 
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: { code: "KIOSK_NOT_FOUND" } });
-    // Refused before the ledger was read at all.
-    expect(findFirst).not.toHaveBeenCalled();
+    // Refused before the count was read at all.
+    expect(findUnique).not.toHaveBeenCalled();
   });
 
-  it("carries no ledger, no operator and no timestamps", async () => {
+  it("carries no operator and no timestamps", async () => {
     // A screen strangers stand in front of is told a count and nothing else.
     // Who refilled the tray and when is an operator's business.
-    const { app } = buildApp({ initialized: true, sum: 40 });
+    const { app } = buildApp(40);
 
     const response = await app.inject({ method: "GET", url: `/v1/kiosks/${KIOSK_ID}/paper` });
 

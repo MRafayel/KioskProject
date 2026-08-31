@@ -41,7 +41,8 @@ import {
   FORBIDDEN_TABLES,
   INSERTABLE_TABLES,
   READABLE_TABLES,
-  ROLE_SETTINGS
+  ROLE_SETTINGS,
+  UPDATABLE_COLUMNS
 } from "./admin-writer-matrix.mjs";
 
 const packageDirectory = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -58,6 +59,7 @@ const exitCode = await runAppendRoleCommand(
     matrixPath: "scripts/admin-writer-matrix.mjs",
     command: "pnpm db:admin-writer",
     insertable: INSERTABLE_TABLES,
+    updatable: UPDATABLE_COLUMNS,
     readable: READABLE_TABLES,
     forbidden: FORBIDDEN_TABLES,
     settings: ROLE_SETTINGS,

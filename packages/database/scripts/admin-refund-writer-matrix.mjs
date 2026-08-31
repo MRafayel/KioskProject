@@ -130,8 +130,9 @@ export const READABLE_TABLES = Object.freeze({
  * wrote on purpose.
  */
 export const FORBIDDEN_TABLES = Object.freeze({
-  kiosk_paper_events:
-    "Paper inventory is a kiosk operation, not part of authorizing or settling a refund.",
+  kiosk_paper_inventory:
+    "The paper estimate is a kiosk operation, not part of authorizing or settling a refund.",
+  kiosk_paper_requests: "The idempotency record beside it, for the same reason.",
   payment_attempts: "The provider ledger. Written by the payment path, never by a person.",
   payment_webhook_inbox: "Provider callbacks. A forged row here is a forged payment.",
   print_job_events: "The device's own ledger.",

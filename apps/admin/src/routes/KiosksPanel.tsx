@@ -2,7 +2,6 @@ import { useCallback, useState } from "react";
 
 import type {
   AddKioskPaperBody,
-  AdminKioskPaperEvent,
   AdminKiosksResponse,
   CorrectKioskPaperBody,
   PaperEstimateStatus
@@ -10,14 +9,7 @@ import type {
 
 import { useSession } from "../features/auth/SessionProvider.js";
 import { observabilityApi } from "../features/observability/api.js";
-import {
-  Empty,
-  Pagination,
-  Panel,
-  StateBadge,
-  Table,
-  When
-} from "../features/observability/components.js";
+import { Empty, Panel, StateBadge, Table, When } from "../features/observability/components.js";
 import {
   FilterKpi,
   KpiRow,
@@ -28,7 +20,6 @@ import {
 import { useAdminAction } from "../features/observability/useAdminAction.js";
 import { useAdminData } from "../features/observability/useAdminData.js";
 import { useDetailSheet } from "../features/observability/useDetailSheet.js";
-import { usePageTrail } from "../features/observability/usePageTrail.js";
 
 type Kiosk = AdminKiosksResponse["items"][number];
 
@@ -442,19 +433,15 @@ function KioskPaperSheet({
   onChanged: () => void;
   onClose: () => void;
 }) {
-  const pages = usePageTrail();
-  const cursor = pages.cursor;
   const kioskId = kiosk?.id ?? "";
-  const load = useCallback(() => observabilityApi.kioskPaper(kioskId, cursor), [cursor, kioskId]);
+  const load = useCallback(() => observabilityApi.kioskPaper(kioskId), [kioskId]);
   const detail = useAdminData(load);
-  const nextCursor = detail.data?.nextCursor ?? null;
   const paper = detail.data?.paper ?? kiosk?.paper ?? null;
 
   const changed = useCallback(() => {
-    pages.reset();
     detail.reload();
     onChanged();
-  }, [detail, onChanged, pages]);
+  }, [detail, onChanged]);
 
   return (
     <Sheet
@@ -496,7 +483,9 @@ function KioskPaperSheet({
           </div>
           <p className="paper-summary__note">
             Software estimate only — this printer has no paper-level sensor. Confirmed physical
-            sheets are deducted automatically.
+            sheets are deducted automatically. This is the current count, not a running total: every
+            refill, correction and print writes it directly, and who changed it is recorded in the
+            audit log.
           </p>
           <dl className="detail-grid">
             <div>
@@ -537,25 +526,7 @@ function KioskPaperSheet({
         />
       ) : null}
 
-      <h3>Paper history</h3>
       {detail.loading && !detail.data ? <p className="panel__status">Loading…</p> : null}
-      {detail.data && detail.data.items.length === 0 ? (
-        <Empty>No paper activity has been recorded.</Empty>
-      ) : null}
-      {detail.data && detail.data.items.length > 0 ? (
-        <ol className="paper-history">
-          {detail.data.items.map((event) => (
-            <PaperEvent key={event.id} event={event} />
-          ))}
-        </ol>
-      ) : null}
-      <Pagination
-        label="Paper history pages"
-        page={pages.page}
-        pageCount={pages.pageCount}
-        hasNext={pages.hasNext(nextCursor)}
-        onGo={(target) => pages.go(target, nextCursor)}
-      />
     </Sheet>
   );
 }
@@ -726,40 +697,6 @@ function PaperActions({
         </form>
       )}
     </section>
-  );
-}
-
-function PaperEvent({ event }: { event: AdminKioskPaperEvent }) {
-  const title =
-    event.type === "REFILL"
-      ? `Added ${event.quantitySheets.toLocaleString()} sheets`
-      : event.type === "CORRECTION"
-        ? `Set estimate to ${event.quantitySheets.toLocaleString()} sheets`
-        : `${event.quantitySheets.toLocaleString()} sheets printed`;
-  const actor =
-    event.type === "PRINT_DEDUCTION"
-      ? "Automatic after confirmed print"
-      : (event.recordedByDisplayName ?? "Admin user");
-  const consequence = !event.estimateAffected
-    ? "Estimate was not active, so no stock was changed"
-    : event.deltaSheets === 0
-      ? "Estimate unchanged"
-      : `${event.deltaSheets > 0 ? "+" : ""}${event.deltaSheets.toLocaleString()} sheets`;
-
-  return (
-    <li className="paper-history__item">
-      <div className="paper-history__head">
-        <strong>{title}</strong>
-        <When value={event.createdAt} />
-      </div>
-      <span className="key-list__meta">
-        {actor} · {consequence}
-      </span>
-      {event.reason ? <span className="paper-history__reason">{event.reason}</span> : null}
-      {event.printJobId ? (
-        <span className="key-list__meta">Print job {event.printJobId}</span>
-      ) : null}
-    </li>
   );
 }
 

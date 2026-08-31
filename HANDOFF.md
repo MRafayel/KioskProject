@@ -603,6 +603,39 @@ review including deviations and known gaps, printing performance impact, setup,
 what remains), and **let the owner make the commit** — that is the convention
 here, one commit per phase.
 
+### The kiosk paper estimate is a count, not a ledger
+
+It used to be `kiosk_paper_events`: every refill, correction and confirmed print
+deduction appended a row, and the estimate was the sum of their signed deltas,
+derived by an insert trigger under a per-kiosk advisory lock. Reading it meant
+two queries and an aggregate over a table that only grew.
+
+It is now one row per kiosk in `kiosk_paper_inventory` holding one number.
+Reading it is a primary-key lookup. A refill increments it, a correction sets
+it, a confirmed print subtracts from it under the row's own lock. There is no
+trigger, no advisory lock and no history.
+
+Three things about it are load-bearing and easy to undo by accident:
+
+- **No row means untracked, and untracked is not zero.** A kiosk nobody has
+  recorded paper for prints exactly as it did before this feature existed. The
+  terminal, the admin panel and the API all have to keep telling those apart —
+  reporting an untracked kiosk as zero would refuse customers at a full machine.
+  This is why the application role holds `UPDATE` but **not** `INSERT` on the
+  table: starting to track a kiosk is a person's decision.
+- **`kiosk_paper_requests` is not history.** It records applied refill and
+  correction keys so a retried request is not applied twice, and nothing reads
+  it to work out the count. Rows are safe to prune by age. The admin reader is
+  denied it outright.
+- **Who changed the estimate lives in `audit_events`**, as it does for every
+  other admin action. That is the only record now, so the audit write in
+  `recordKioskPaperChange` is not optional bookkeeping.
+
+The admin writer role gained a column-scoped `UPDATE` on that one table — the
+number and the last refill printed beside it, not `kiosk_id` and not
+`created_at`. It is the same shape of grant the people and pricing writers
+already use, and `pnpm db:admin-writer verify` prints exactly which columns.
+
 ### Two traps worth knowing before touching the database
 
 Every migration invalidates every role. `verify` fails on any table it has no
@@ -610,11 +643,11 @@ decision for, so after a migration each of the five least-privilege roles must b
 re-provisioned before deploy. That is the mechanism working, not a nuisance — but
 it does mean `pnpm db:migrate:owner` is never the last step.
 
-And **the migrator now owns sixteen tables, not nine.** Any migration that
+And **the migrator now owns seventeen tables, not nine.** Any migration that
 alters `print_job_recovery_resolutions`, `print_job_recovery_corrections`,
 `refund_authorizations`, `cleanup_retry_requests`, `admin_passwords`,
-`admin_invitations`, `admin_password_resets` or `kiosk_paper_events` has to run
-as the owner too,
+`admin_invitations`, `admin_password_resets`, `kiosk_paper_inventory` or
+`kiosk_paper_requests` has to run as the owner too,
 and a role script that grants on one of them needs the owner connection — which
 is the defect Phase 5 found in `admin-append-role.mjs` and Phase 6 found again in
 `admin-reader.mjs`. If a third script is ever written, check which connection it

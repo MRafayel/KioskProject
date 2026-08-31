@@ -186,12 +186,8 @@ export function registerAdminObservabilityRoutes(
     const admin = await authorizeAdmin(request, dependencies, "kiosk.read");
     await throttleAccount(request, admin.sessionId);
     const params = kioskParams.parse(request.params);
-    const query = cursorQuerySchema.parse(request.query);
-    const paper = await dependencies.observability.kioskPaper(
-      scopeForAdmin(admin),
-      params.kioskId,
-      query.cursor
-    );
+    // No cursor: there is no history behind this any more, only the count.
+    const paper = await dependencies.observability.kioskPaper(scopeForAdmin(admin), params.kioskId);
     if (!paper) throw adminNotFound();
     return sendNoStore(reply, adminKioskPaperResponseSchema.parse(paper));
   });
