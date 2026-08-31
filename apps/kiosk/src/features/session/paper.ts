@@ -1,5 +1,4 @@
-import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import type { QueryClient } from "@tanstack/react-query";
 
 import { getKioskPaperResponseSchema, type KioskPaperEstimate } from "@printing-kiosk/contracts";
 
@@ -25,14 +24,24 @@ import { getKioskPaperResponseSchema, type KioskPaperEstimate } from "@printing-
 export const KIOSK_PAPER_QUERY_KEY = ["kiosk-paper"] as const;
 
 /**
- * Re-read while a job is being put together. Slower than the availability poll
- * because this number only moves when a print completes or somebody refills the
- * tray, and the check that matters runs again on the way to the checkout anyway.
+ * How long an answer stands before opening a screen is a reason to ask again.
+ *
+ * This is the whole refresh policy now: nothing is on a timer, and the count is
+ * re-read when a screen that shows or acts on it opens and the answer in hand is
+ * older than this. That covers the two moments that matter — the upload screen
+ * opening as a customer starts, and the configure screen opening before their
+ * job is measured against the tray — while a customer stepping between the two,
+ * which the "Add document" and "Back" buttons make easy, reuses the answer
+ * rather than asking again for the same second.
+ *
+ * Short, because the only thing it buys is that step. Anything longer would let
+ * the configure screen block or clear a job on a count from another customer's
+ * session.
  */
-export const PAPER_POLL_MS = 20_000;
+export const PAPER_FRESH_MS = 10_000;
 
 /**
- * What the screen believes before it has ever managed to ask.
+ * What the screen shows before it has an answer.
  *
  * Unknown rather than empty, deliberately, and for the same reason the
  * availability poll assumes available: a wrong pessimistic answer refuses a
@@ -77,43 +86,50 @@ export async function readKioskPaper(signal?: AbortSignal): Promise<KioskPaperEs
  * The one query both screens share, so the number a customer is shown while
  * uploading and the number their job is checked against a minute later are the
  * same answer rather than two reads that happened to agree.
+ *
+ * There is no interval here and nothing runs in the background. Opening a
+ * screen is the trigger, and `staleTime` is the whole of the policy: React
+ * Query refetches on mount exactly when the answer in hand has aged past
+ * `PAPER_FRESH_MS`, which is the deduplication and the freshness rule in one
+ * setting rather than a timer plus the bookkeeping a timer needs.
+ *
+ * Two details are load-bearing and neither is obvious.
+ *
+ * The first is `placeholderData` rather than `initialData`. `UNKNOWN_PAPER` is
+ * not an answer, it is what to show before there is one, and `initialData`
+ * would write it into the cache stamped with the current time — where a
+ * non-zero `staleTime` then treats it as a fresh answer and asks nothing. A
+ * kiosk that had only just started would tell its first customer the count was
+ * unavailable while knowing perfectly well what it held. A placeholder is never
+ * cached, so the first mount always asks.
+ *
+ * The second is that this app defaults every query to
+ * `staleTime: Number.POSITIVE_INFINITY`. That suits the reads it was written
+ * for — a session, a document's pages, a printer's capabilities — none of which
+ * change behind the screen showing them. A sheet count does exactly that, so it
+ * has to opt out, and this is where.
  */
 export function kioskPaperQueryOptions() {
   return {
     queryKey: KIOSK_PAPER_QUERY_KEY,
     queryFn: ({ signal }: { signal: AbortSignal }) => readKioskPaper(signal),
-    refetchInterval: PAPER_POLL_MS,
-    initialData: UNKNOWN_PAPER,
-    /**
-     * Overrides this app's `staleTime: Number.POSITIVE_INFINITY` default, and
-     * has to.
-     *
-     * That default suits the reads it was written for — a session, a document's
-     * pages, a printer's capabilities — none of which change behind the screen
-     * that is showing them. A sheet count does exactly that: it moves whenever
-     * a print completes or somebody refills the tray, both of which happen
-     * without this browser being involved.
-     *
-     * Left on the default, data already in the cache is never stale, so
-     * mounting the upload screen would show whatever was last polled and wait
-     * out the interval before asking again — which is the customer pressing
-     * Start printing and being told the count from twenty seconds ago. On a
-     * kiosk that had only just started, it is worse: the estimate begins as
-     * unknown, never goes stale, and the first customer is told the count is
-     * unavailable on a kiosk that knows perfectly well.
-     */
-    staleTime: 0
+    placeholderData: UNKNOWN_PAPER,
+    staleTime: PAPER_FRESH_MS
   };
 }
 
 /**
- * Take a finished print out of the estimate without waiting for the next poll.
+ * Take a finished print out of the estimate as soon as it finishes.
  *
  * The control plane already deducted these sheets, in the same transaction that
  * moved the job to a confirmed completion. This is not a second opinion about
- * that: it is the same subtraction, applied locally so the screen stops showing
- * a count the kiosk stopped having up to twenty seconds ago. The next poll is
- * still the reconciliation, and it overwrites whatever this left behind.
+ * that: it is the same subtraction, applied locally.
+ *
+ * It matters more without a poll behind it, not less. The receipt closes after
+ * five seconds, so the next customer can be on the upload screen well inside
+ * the freshness window, reusing this answer rather than asking for a new one —
+ * and without the deduction that answer would be the count from before their
+ * predecessor's job. The next read past the window is still the reconciliation.
  *
  * Applied only to a *known* estimate. A kiosk nobody tracks records the
  * completion as history with a zero delta and stays untracked, so inventing a
@@ -121,8 +137,8 @@ export function kioskPaperQueryOptions() {
  *
  * A read that was already in flight was sent before the deduction was
  * committed, so landing it afterwards would put the old count back. Cancelling
- * first is what keeps the event-driven update and the poll from fighting; if
- * one slips through anyway the poll after it is correct.
+ * first is what stops that; if one slips through anyway the next read corrects
+ * it.
  */
 export async function applyPrintedSheets(
   queryClient: QueryClient,
@@ -135,43 +151,6 @@ export async function applyPrintedSheets(
     // The same floor the ledger keeps: a tray cannot hold fewer than no sheets.
     return { estimatedSheets: Math.max(0, current.estimatedSheets - sheetsProduced) };
   });
-}
-
-/**
- * One early read after a kiosk that had closed opens again.
- *
- * A kiosk goes unavailable when its printer runs out. What happens next is a
- * person putting paper in it and then typing the new count into the admin
- * panel, and those two are minutes apart from the terminal's point of view: the
- * printer recovers first, the count arrives second. A screen that only asked
- * again on its ordinary interval would spend that interval offering the count
- * from before the refill.
- *
- * So the reopening schedules exactly one extra read, and then nothing. The
- * interval is unchanged, no state polls faster than any other, and a kiosk that
- * closes and reopens twenty times in an hour costs twenty reads.
- */
-export const PAPER_RELOAD_REFRESH_MS = 7_000;
-
-export function usePaperReloadRefresh(available: boolean): void {
-  const queryClient = useQueryClient();
-  // Seeded from the first answer, so mounting is not itself a reopening.
-  const wasAvailable = useRef(available);
-
-  useEffect(() => {
-    const reopened = available && !wasAvailable.current;
-    wasAvailable.current = available;
-    if (!reopened) return;
-
-    const timer = window.setTimeout(() => {
-      // Prefetch rather than refetch: this runs on the welcome screen, where
-      // nothing is subscribed to the estimate yet, and the point is to have the
-      // new count already in hand when the next customer reaches the upload
-      // screen. It swallows its own failures — the ordinary poll follows.
-      void queryClient.prefetchQuery({ ...kioskPaperQueryOptions(), staleTime: 0 });
-    }, PAPER_RELOAD_REFRESH_MS);
-    return () => window.clearTimeout(timer);
-  }, [available, queryClient]);
 }
 
 /**

@@ -238,7 +238,14 @@ function renderKiosk(
     }
   });
   if (seedPaperSheets !== undefined) {
-    queryClient.setQueryData(KIOSK_PAPER_QUERY_KEY, { estimatedSheets: seedPaperSheets });
+    // Stamped as an old answer on purpose. A seed written with the current time
+    // would count as fresh, and a test asserting that opening a screen asks
+    // again would pass without ever asking.
+    queryClient.setQueryData(
+      KIOSK_PAPER_QUERY_KEY,
+      { estimatedSheets: seedPaperSheets },
+      { updatedAt: 0 }
+    );
   }
   const tree = (
     <LanguageProvider>
@@ -327,6 +334,36 @@ describe("the count is re-read when a screen that shows it opens", () => {
   });
 });
 
+describe("nothing asks in the background", () => {
+  it("makes no further request while a customer sits on the upload screen", async () => {
+    // There is no interval any more. Opening a screen asks; standing on one
+    // does not, however long the customer takes to photograph the code and send
+    // their documents.
+    await openInEnglish("/upload", uploadingState);
+    await waitFor(() => expect(paperReads).toBe(1));
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    });
+
+    expect(paperReads).toBe(1);
+  });
+
+  it("reuses the answer when a customer steps straight on to the settings", async () => {
+    // The "Continue", "Add document" and "Back" buttons make this a step a
+    // customer takes repeatedly, and asking the kiosk again for the same second
+    // would be a request per tap.
+    // A document is already validated, so the continue button is live.
+    const { user } = await openInEnglish("/upload", configuringState);
+    await waitFor(() => expect(paperReads).toBe(1));
+
+    await user.click(screen.getByRole("button", { name: new RegExp(copy.upload.continue) }));
+
+    expect(await screen.findByRole("heading", { name: copy.configure.title })).toBeVisible();
+    expect(paperReads).toBe(1);
+  });
+});
+
 describe("a job that does not fit is stopped before it is paid for", () => {
   it("explains the shortfall in sheets and refuses to continue", async () => {
     requiredSheets = 24;
@@ -358,19 +395,6 @@ describe("a job that does not fit is stopped before it is paid for", () => {
     expect(payButton()).toBeDisabled();
     expect(screen.getByText(copy.configure.paperShortHelp)).toBeVisible();
   });
-
-  it("reopens on its own once somebody refills the tray", async () => {
-    requiredSheets = 24;
-    estimatedSheets = 18;
-    await openInEnglish("/configure", configuringState);
-    await screen.findByRole("alertdialog");
-
-    estimatedSheets = 500;
-
-    // No reload and no tap: the screen re-asks on its own timer.
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull(), { timeout: 30_000 });
-    await waitFor(() => expect(payButton()).toBeEnabled());
-  }, 35_000);
 });
 
 describe("a job that fits is left alone", () => {

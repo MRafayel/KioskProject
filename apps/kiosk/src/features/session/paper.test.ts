@@ -1,17 +1,13 @@
 // @vitest-environment jsdom
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook } from "@testing-library/react";
-import { createElement, type ReactNode } from "react";
+import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyPrintedSheets,
   exceedsPaperEstimate,
   readKioskPaper,
-  usePaperReloadRefresh,
   KIOSK_PAPER_QUERY_KEY,
-  PAPER_RELOAD_REFRESH_MS,
   PaperReadError,
   UNKNOWN_PAPER
 } from "./paper.js";
@@ -110,8 +106,8 @@ describe("taking a finished print out of the estimate", () => {
 
   it("subtracts the sheets the device reported producing", async () => {
     // The same subtraction the control plane already made when it confirmed the
-    // completion, applied locally so the screen does not spend an interval
-    // offering paper the kiosk no longer has.
+    // completion, applied locally so the next customer inside the freshness
+    // window is not offered paper the kiosk no longer has.
     const queryClient = clientHolding(40);
 
     await applyPrintedSheets(queryClient, 6);
@@ -121,7 +117,7 @@ describe("taking a finished print out of the estimate", () => {
 
   it("stops at zero rather than going into debt", async () => {
     // The ledger keeps the same floor, so drifting apart here would make the
-    // next poll look like a correction nobody made.
+    // next read look like a correction nobody made.
     const queryClient = clientHolding(4);
 
     await applyPrintedSheets(queryClient, 10);
@@ -147,7 +143,7 @@ describe("taking a finished print out of the estimate", () => {
     expect(held(queryClient)).toEqual({ estimatedSheets: 40 });
   });
 
-  it("is the poll's to overwrite, not the other way round", async () => {
+  it("is the next read's to overwrite, not the other way round", async () => {
     // The event-driven update is a head start, never a second source of truth.
     // Whatever the kiosk answers next is what stands.
     const queryClient = clientHolding(40);
@@ -156,96 +152,5 @@ describe("taking a finished print out of the estimate", () => {
     queryClient.setQueryData(KIOSK_PAPER_QUERY_KEY, { estimatedSheets: 31 });
 
     expect(held(queryClient)).toEqual({ estimatedSheets: 31 });
-  });
-});
-
-describe("asking again after a kiosk reopens", () => {
-  function harness() {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      createElement(QueryClientProvider, { client: queryClient }, children);
-    return renderHook(({ available }: { available: boolean }) => usePaperReloadRefresh(available), {
-      initialProps: { available: true },
-      wrapper
-    });
-  }
-
-  function paperReads(): number {
-    return vi
-      .mocked(fetch)
-      .mock.calls.filter(([input]) => typeof input === "string" && input.endsWith("/v1/paper"))
-      .length;
-  }
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn<typeof fetch>().mockResolvedValue(
-        new Response(JSON.stringify({ paper: { estimatedSheets: 500 } }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
-    );
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  it("asks nothing at all while the kiosk stays open", async () => {
-    // Mounting is not a reopening, and an open kiosk has nothing to catch up on.
-    harness();
-
-    await vi.advanceTimersByTimeAsync(PAPER_RELOAD_REFRESH_MS * 3);
-
-    expect(paperReads()).toBe(0);
-  });
-
-  it("asks nothing while the kiosk is still closed", async () => {
-    // Somebody is putting paper in it. There is no new count to fetch yet, and
-    // asking on a timer while a kiosk is shut is exactly the polling this
-    // change is meant to avoid.
-    const { rerender } = harness();
-
-    rerender({ available: false });
-    await vi.advanceTimersByTimeAsync(PAPER_RELOAD_REFRESH_MS * 3);
-
-    expect(paperReads()).toBe(0);
-  });
-
-  it("asks once, a few seconds after it opens again", async () => {
-    const { rerender } = harness();
-    rerender({ available: false });
-
-    rerender({ available: true });
-    // Not immediately: the printer recovers before the person has finished
-    // typing the new count into the admin panel.
-    await vi.advanceTimersByTimeAsync(PAPER_RELOAD_REFRESH_MS - 1_000);
-    expect(paperReads()).toBe(0);
-
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(paperReads()).toBe(1);
-
-    // And then nothing. The ordinary interval takes it from here; this must not
-    // become a second, faster poll of its own.
-    await vi.advanceTimersByTimeAsync(PAPER_RELOAD_REFRESH_MS * 5);
-    expect(paperReads()).toBe(1);
-  });
-
-  it("costs one read per reopening and no more", async () => {
-    const { rerender } = harness();
-
-    for (let cycle = 0; cycle < 3; cycle += 1) {
-      rerender({ available: false });
-      await vi.advanceTimersByTimeAsync(PAPER_RELOAD_REFRESH_MS);
-      rerender({ available: true });
-      await vi.advanceTimersByTimeAsync(PAPER_RELOAD_REFRESH_MS);
-    }
-
-    expect(paperReads()).toBe(3);
   });
 });

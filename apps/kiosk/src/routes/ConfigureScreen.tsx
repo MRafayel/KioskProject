@@ -22,7 +22,11 @@ import {
   type PagePrintState,
   type ReadyPrototypeFile
 } from "../features/session/model.js";
-import { exceedsPaperEstimate, kioskPaperQueryOptions } from "../features/session/paper.js";
+import {
+  exceedsPaperEstimate,
+  kioskPaperQueryOptions,
+  UNKNOWN_PAPER
+} from "../features/session/paper.js";
 import {
   readKioskPrintCapabilities,
   readKioskSessionVersion
@@ -149,8 +153,11 @@ export function ConfigureScreen() {
   // the customer can see are never two different claims.
   const requiredSheets = summary.totalSheets;
 
+  // Read again as this screen opens, unless the upload screen asked within the
+  // freshness window — a customer stepping between the two does not re-ask for
+  // the same second.
   const paperQuery = useQuery(kioskPaperQueryOptions());
-  const availableSheets = paperQuery.data.estimatedSheets;
+  const availableSheets = (paperQuery.data ?? UNKNOWN_PAPER).estimatedSheets;
   const paperShort = exceedsPaperEstimate(requiredSheets, availableSheets);
 
   // Shown the moment the job stops fitting rather than when the customer

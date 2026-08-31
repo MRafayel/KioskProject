@@ -17,7 +17,7 @@ import {
   isReadyFile,
   type PrototypeFile
 } from "../features/session/model.js";
-import { kioskPaperQueryOptions } from "../features/session/paper.js";
+import { kioskPaperQueryOptions, UNKNOWN_PAPER } from "../features/session/paper.js";
 import { listKioskSessionFiles } from "../features/session/sessionService.js";
 
 export function UploadScreen() {
@@ -41,11 +41,11 @@ export function UploadScreen() {
     retry: false
   });
 
-  // Read here as well as on the configure screen, and shared by query key, so
-  // the number the customer is told about while uploading is the same one the
-  // job is checked against a moment later.
+  // Opening this screen is what asks. Nothing polls behind it, so the count a
+  // customer is shown here is read as they arrive and the configure screen
+  // re-reads it when they move on — see `kioskPaperQueryOptions`.
   const paperQuery = useQuery(kioskPaperQueryOptions());
-  const paper = paperQuery.data;
+  const paper = paperQuery.data ?? UNKNOWN_PAPER;
 
   useEffect(() => {
     if (!filesQuery.data) return;
