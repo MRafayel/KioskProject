@@ -227,8 +227,15 @@ function renderKiosk(
   seedPaperSheets?: number,
   strict = false
 ) {
+  // The same defaults `main.tsx` builds, `staleTime` included. Without it these
+  // tests would exercise a client no terminal ever runs, and the app-wide
+  // "never goes stale" rule — the one thing the paper query has to opt out of —
+  // would be invisible here.
   const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } }
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY }
+    }
   });
   if (seedPaperSheets !== undefined) {
     queryClient.setQueryData(KIOSK_PAPER_QUERY_KEY, { estimatedSheets: seedPaperSheets });
@@ -287,6 +294,36 @@ describe("what the upload screen says about paper", () => {
     await openInEnglish("/upload", uploadingState);
 
     expect(await screen.findByText(copy.upload.paperUnavailable)).toBeVisible();
+  });
+});
+
+describe("the count is re-read when a screen that shows it opens", () => {
+  it("asks again as the upload screen opens rather than showing what was cached", async () => {
+    // What a customer sees a second after pressing Start printing. The estimate
+    // moves while nobody is looking at it — a print completes, somebody refills
+    // the tray and types the new count into the admin panel — so opening a
+    // screen that shows it has to be a reason to ask, not a reason to reuse.
+    //
+    // This app sets `staleTime: Number.POSITIVE_INFINITY` for every query, and
+    // under that default this mount would fetch nothing and the customer would
+    // wait out the poll interval looking at the old number.
+    const queryClient = renderKiosk("/upload", uploadingState, 18);
+
+    await waitFor(() => expect(paperReads).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(queryClient.getQueryData(KIOSK_PAPER_QUERY_KEY)).toEqual({ estimatedSheets: 120 })
+    );
+  });
+
+  it("tells a kiosk that has only just started what it holds, without waiting", async () => {
+    // Nothing has been polled yet, so the cache begins at unknown. Under the
+    // app-wide default that unknown would never go stale, and the first
+    // customer of the day would be told the count is unavailable on a kiosk
+    // that knows exactly what it holds.
+    estimatedSheets = 120;
+    await openInEnglish("/upload", uploadingState);
+
+    expect(await screen.findByText(copy.upload.paperAvailable(120))).toBeVisible();
   });
 });
 

@@ -184,19 +184,17 @@ test("shows only the server total and unlocks payment when a quote exists", asyn
   await expect(page.locator(".print-stage-pill .pulse")).toBeVisible();
   await expect(page.getByRole("timer")).toHaveCount(0);
   await expect(page.locator(".progress-bar")).toHaveCount(0);
-  await expect(page.locator(".print-success-page .success-motion")).toBeVisible({
+  // Printing is a request naming the capture, and the receipt appears only
+  // once the control plane reports a confirmed completion. Nothing stands
+  // between the two any more: the success animation that used to play here has
+  // been removed, and the wait for it with it.
+  await expect(page.getByRole("heading", { name: "Your documents are ready" })).toBeVisible({
     timeout: 15_000
   });
   await expect(page.locator(".topbar")).toBeVisible();
   await expect(page.locator(".session-footer")).toBeVisible();
   await expect(page.locator(".print-stage-pill")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Printing your document" })).toHaveCount(0);
-
-  // Printing is a request naming the capture, and the receipt appears only
-  // once the control plane reports a confirmed completion.
-  await expect(page.getByRole("heading", { name: "Your documents are ready" })).toBeVisible({
-    timeout: 15_000
-  });
   await expect(page.getByText(/Collect all 1 sheet/)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 

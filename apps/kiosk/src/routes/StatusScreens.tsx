@@ -24,12 +24,7 @@ import {
   requestSimulatedOutcome
 } from "../features/session/paymentService.js";
 import { applyPrintedSheets } from "../features/session/paper.js";
-import {
-  SUCCESS_MOTION_MS,
-  SUCCESS_POST_MOTION_HOLD_MS,
-  usePrintStage,
-  type PrintStage
-} from "../features/session/printProgress.js";
+import { usePrintStage, type PrintStage } from "../features/session/printProgress.js";
 import {
   isPrintJobSettled,
   isPrintJobSuccessful,
@@ -178,7 +173,7 @@ export function PrintingScreen() {
   const observedPrintJobSuccessful = observedPrintJob
     ? isPrintJobSuccessful(observedPrintJob)
     : false;
-  const showSuccessMotion = observedPrintJobId !== null && observedPrintJobSuccessful;
+  const printCompleted = observedPrintJobId !== null && observedPrintJobSuccessful;
   // Presentation only. It reads the job this screen already polls and cannot
   // reach the device, so it can neither delay a print nor change its outcome.
   const stage = usePrintStage(observedPrintJob);
@@ -200,22 +195,14 @@ export function PrintingScreen() {
     void applyPrintedSheets(queryClient, observedPrintJob.sheetsProduced ?? 0);
   }, [observedPrintJob, observedPrintJobSuccessful, queryClient]);
 
+  // Straight to the receipt. There used to be a success animation between the
+  // two, and the wait for it to play was the only reason this was ever delayed:
+  // a customer whose documents are already in the tray is standing there
+  // waiting to be told to take them, not watching a check mark being drawn.
   useEffect(() => {
-    if (!showSuccessMotion) return;
-    let pauseTimer: number | undefined;
-    // This clock starts only when the animation-only state has mounted. Once
-    // the motion completes, a separate 1.3-second pause begins. The Completed
-    // page is not mounted yet, so none of its five-second lifetime is consumed.
-    const motionTimer = window.setTimeout(() => {
-      pauseTimer = window.setTimeout(() => {
-        void navigate("/complete", { replace: true });
-      }, SUCCESS_POST_MOTION_HOLD_MS);
-    }, SUCCESS_MOTION_MS);
-    return () => {
-      window.clearTimeout(motionTimer);
-      if (pauseTimer !== undefined) window.clearTimeout(pauseTimer);
-    };
-  }, [navigate, showSuccessMotion]);
+    if (!printCompleted) return;
+    void navigate("/complete", { replace: true });
+  }, [navigate, printCompleted]);
 
   useEffect(() => {
     if (!sessionId || !paymentId) return;
@@ -315,9 +302,9 @@ export function PrintingScreen() {
   // Printing is only ever watched, never invented: without a capture the
   // control plane applied to this session, this screen has nothing to show.
   if (!paymentId) return <KioskRedirect to="/checkout" />;
-  if (showSuccessMotion) {
-    return <PrintSuccessMotion label={messages.status.printingStages.FINISHING} />;
-  }
+  // `FINISHING` is only ever a ceiling now — the effect above leaves for the
+  // receipt the moment it is reached — but the last frame before that
+  // navigation still has to say something, and it says what it was saying.
   const activeStage: ActivePrintStage = stage === "FINISHING" ? "PRINTING" : stage;
 
   return (
@@ -490,13 +477,28 @@ export function CompleteScreen() {
   const { state, dispatch } = usePrototypeSession();
   const navigate = useKioskNavigate();
   const finishStartedRef = useRef(false);
+  const autoCloseTimerRef = useRef<number | undefined>(undefined);
 
   const documents = readyFiles(state.files);
   const completedSuccessfully = state.print.job !== null && isPrintJobSuccessful(state.print.job);
   const sessionId = state.session?.id;
+  /**
+   * Ending the session, whoever asked for it.
+   *
+   * The button and the timer are two ways of reaching one action rather than
+   * two implementations of it, which is what keeps them from doing the cleanup
+   * twice or navigating over each other. The ref closes the door on the second
+   * caller; cancelling the timer here means a customer who presses the button
+   * is not followed a moment later by a timeout that fires into an unmounted
+   * screen. A customer who presses nothing still gets the timer.
+   */
   const finish = useCallback(() => {
     if (finishStartedRef.current) return;
     finishStartedRef.current = true;
+    if (autoCloseTimerRef.current !== undefined) {
+      window.clearTimeout(autoCloseTimerRef.current);
+      autoCloseTimerRef.current = undefined;
+    }
     clearStoredSessionKeys(sessionId);
     clearFulfillmentState();
     dispatch({ type: "RESET" });
@@ -506,11 +508,14 @@ export function CompleteScreen() {
 
   useEffect(() => {
     if (documents.length === 0 || !completedSuccessfully) return;
-    // Only the success route mounts this timer. It reuses the same reset action
-    // and local cleanup as the former Finish action, and the ref keeps cleanup
-    // idempotent if another customer interaction races the timeout.
-    const timer = window.setTimeout(finish, COMPLETE_SCREEN_HOLD_MS);
-    return () => window.clearTimeout(timer);
+    // Only the success route mounts this timer.
+    autoCloseTimerRef.current = window.setTimeout(finish, COMPLETE_SCREEN_HOLD_MS);
+    return () => {
+      if (autoCloseTimerRef.current !== undefined) {
+        window.clearTimeout(autoCloseTimerRef.current);
+        autoCloseTimerRef.current = undefined;
+      }
+    };
   }, [completedSuccessfully, documents.length, finish]);
 
   if (documents.length === 0) return <KioskRedirect to="/" />;
@@ -569,27 +574,9 @@ export function CompleteScreen() {
           <dd>{messages.status.deletionScheduled}</dd>
         </div>
       </dl>
-      <p className="completion-auto-close">{messages.status.completeAutoClose}</p>
-    </div>
-  );
-}
-
-/**
- * The illustration for a stage.
- *
- * Every one of these is CSS on a handful of elements: no images, no timers of
- * its own and nothing to load, so the animation cannot become the next source
- * of latency on a machine that is already busy rasterising a PDF. All of it is
- * `aria-hidden`, because the stage is announced as text by the live region
- * around it, and the whole set stops moving under `prefers-reduced-motion`.
- */
-function PrintSuccessMotion({ label }: { label: string }) {
-  return (
-    <div className="print-success-page" role="status" aria-label={label} aria-live="polite">
-      <div className="success-motion" aria-hidden="true">
-        <span className="success-motion__ring" />
-        <span className="success-motion__check" />
-      </div>
+      <button className="button button--primary" type="button" onClick={finish}>
+        {messages.status.finish}
+      </button>
     </div>
   );
 }

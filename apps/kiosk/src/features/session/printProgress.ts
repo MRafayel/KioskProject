@@ -27,11 +27,6 @@ export const PRINT_STAGES = [
 
 export type PrintStage = (typeof PRINT_STAGES)[number];
 
-/** The ring and check finish together after this presentation-only interval. */
-export const SUCCESS_MOTION_MS = 1_500;
-/** The completed motion stays alone in the content area for 1.3 more seconds. */
-export const SUCCESS_POST_MOTION_HOLD_MS = 1_300;
-
 /**
  * The shortest time a stage may stay on screen.
  *
@@ -47,7 +42,11 @@ export const MINIMUM_HOLD_MS: Record<PrintStage, number> = {
   PREPARING_PAGES: 2_000,
   SENDING_PAGES: 2_600,
   PRINTING: 900,
-  FINISHING: SUCCESS_MOTION_MS + SUCCESS_POST_MOTION_HOLD_MS
+  // Nothing follows it and nothing waits on it: reaching `FINISHING` means the
+  // device confirmed the print, and the screen leaves for the receipt in the
+  // same tick. It held for the length of a success animation until that
+  // animation was removed.
+  FINISHING: 0
 };
 
 export interface StagePresentation {

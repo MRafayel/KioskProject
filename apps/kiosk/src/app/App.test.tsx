@@ -1262,48 +1262,22 @@ describe("kiosk prototype journey", () => {
       screen.getByRole("heading", { name: "Please wait until all papers come out" })
     ).toBeVisible();
 
+    // Straight from the last progress frame to the receipt. There is nothing
+    // between them any more: the success animation that used to hold the screen
+    // for 2.8 seconds is gone, and so is the wait for it.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    const successPage = document.querySelector(".print-success-page");
-    expect(successPage).not.toBeNull();
-    expect(successPage?.parentElement).toHaveAttribute("id", "main-content");
-    expect(document.querySelector(".success-motion")).toBeInTheDocument();
-    expect(successPage?.children).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
     expect(document.querySelector(".topbar")).toBeVisible();
     expect(document.querySelector(".session-footer")).toBeVisible();
-    expect(screen.queryByText("Finishing your print")).not.toBeInTheDocument();
     expect(screen.queryByText("Please wait until all papers come out")).not.toBeInTheDocument();
     expect(document.querySelector(".print-stage-pill")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "Your documents are ready" })
-    ).not.toBeInTheDocument();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_499);
-    });
-    expect(document.querySelector(".print-success-page")).toBeInTheDocument();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
-    });
-    // The full motion has finished; its separate 1.3-second pause starts now.
-    expect(document.querySelector(".print-success-page")).toBeInTheDocument();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_299);
-    });
-    expect(document.querySelector(".print-success-page")).toBeInTheDocument();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
-    });
-    expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
     // The receipt counts the sheets the device reported, never sheets this
     // screen worked out for itself.
     expect(screen.getByText("Collect all 3 sheets from the output area below.")).toBeVisible();
 
-    // The Completed page receives its own complete five seconds. None of the
-    // animation or post-animation pause has spent this clock.
+    // The Completed page receives its own complete five seconds.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(4_999);
     });
@@ -1314,7 +1288,7 @@ describe("kiosk prototype journey", () => {
     expect(screen.getByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
   });
 
-  it("plays the success motion for an already-observed confirmed completion", async () => {
+  it("goes straight to the receipt for an already-observed confirmed completion", async () => {
     vi.useFakeTimers();
     renderKiosk({
       initialEntries: ["/printing"],
@@ -1328,16 +1302,10 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(document.querySelector(".success-motion")).toBeInTheDocument();
-    expect(printJobRequests).toHaveLength(0);
-    expect(
-      screen.queryByRole("heading", { name: "Your documents are ready" })
-    ).not.toBeInTheDocument();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_800);
-    });
+    // A job that is already settled has nothing left to narrate, and asking the
+    // control plane to start it again would print it twice.
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
+    expect(printJobRequests).toHaveLength(0);
   });
 
   it("replays a lost print start response without discarding the paid session", async () => {
@@ -1413,10 +1381,6 @@ describe("kiosk prototype journey", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
-    expect(document.querySelector(".success-motion")).toBeInTheDocument();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_800);
-    });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
   });
 
@@ -1484,10 +1448,6 @@ describe("kiosk prototype journey", () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(printReadRequests).toBe(6);
-    expect(document.querySelector(".success-motion")).toBeInTheDocument();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_800);
-    });
     expect(screen.getByRole("heading", { name: "Your documents are ready" })).toBeVisible();
     expect(window.sessionStorage.getItem(printKeySlot ?? "")).toContain(originalIdempotencyKey);
   });
@@ -2242,9 +2202,10 @@ describe("kiosk prototype journey", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "English" }));
     expect(screen.getByText("Secure deletion scheduled")).toBeVisible();
-    expect(screen.getByText("This screen will close automatically.")).toBeVisible();
     expect(screen.queryByRole("timer")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Finish" })).not.toBeInTheDocument();
+    // The button is back beside the timer, and a customer who never touches it
+    // still has the session ended for them.
+    expect(screen.getByRole("button", { name: "Finish" })).toBeVisible();
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
 
@@ -2269,6 +2230,56 @@ describe("kiosk prototype journey", () => {
     expect(
       window.sessionStorage.getItem(`printing-kiosk.pending-cancel.${testSession.id}`)
     ).toBeNull();
+  });
+
+  it("ends the session on the button without letting the timer act afterwards", async () => {
+    // The button and the auto-close are two ways of asking for one thing. A
+    // customer who presses it must be finished immediately, and the timeout
+    // behind them must not then fire into a session that is already gone.
+    vi.useFakeTimers();
+    window.sessionStorage.setItem("printing-kiosk.pending-create", "private-create-key");
+    renderKiosk({
+      initialEntries: ["/complete"],
+      initialState: {
+        ...initialPrototypeState,
+        session: testSession,
+        files: [readyFixture],
+        payment: {
+          payment: {
+            ...paymentFixture,
+            status: "CAPTURED",
+            appliedToSession: true,
+            capturedAt: "2030-01-01T00:01:00.000Z"
+          },
+          attempt: 1,
+          errorCode: null
+        },
+        print: { job: settledPrintJob, errorCode: null, failureDisposition: null }
+      }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+
+    // Well before the five seconds are up.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_200);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Finish" }));
+
+    expect(screen.getByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
+    expect(window.sessionStorage.getItem("printing-kiosk.pending-create")).toBeNull();
+
+    // Past the moment the timeout would have fired, and past the whole window
+    // again. The cleanup ran once and the welcome screen stays where it is.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByRole("heading", { name: /Տպեք հեռախոսից/i })).toBeVisible();
+    const settlementCalls = fetchMock.mock.calls.filter(
+      ([input]) => !requestUrl(input).includes("/availability")
+    );
+    expect(settlementCalls).toHaveLength(0);
   });
 
   it("shows only the two alternative languages and resets to Armenian for the next customer", async () => {

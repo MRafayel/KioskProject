@@ -6,8 +6,6 @@ import {
   MINIMUM_HOLD_MS,
   nextPresentation,
   PRINT_STAGES,
-  SUCCESS_MOTION_MS,
-  SUCCESS_POST_MOTION_HOLD_MS,
   stageCeiling,
   stageIndex,
   type PrintStage,
@@ -153,11 +151,11 @@ describe("nextPresentation", () => {
     expect(nextPresentation(current, "PREPARING_FILES", true, 500).stage).toBe("PRINTING");
   });
 
-  it("holds the finishing stage long enough for the success motion", () => {
+  it("parks on the finishing stage rather than holding it", () => {
+    // It is a ceiling, not a step somebody reads: the screen leaves for the
+    // receipt as soon as the device confirms the print, so nothing waits here.
     const current = at("FINISHING", 0);
-    expect(SUCCESS_MOTION_MS).toBe(1_500);
-    expect(SUCCESS_POST_MOTION_HOLD_MS).toBe(1_300);
-    expect(MINIMUM_HOLD_MS.FINISHING).toBe(SUCCESS_MOTION_MS + SUCCESS_POST_MOTION_HOLD_MS);
+    expect(MINIMUM_HOLD_MS.FINISHING).toBe(0);
     // Nothing follows it, so it stays put whatever the clock does.
     expect(nextPresentation(current, "FINISHING", true, 10_000).stage).toBe("FINISHING");
   });

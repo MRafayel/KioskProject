@@ -83,7 +83,26 @@ export function kioskPaperQueryOptions() {
     queryKey: KIOSK_PAPER_QUERY_KEY,
     queryFn: ({ signal }: { signal: AbortSignal }) => readKioskPaper(signal),
     refetchInterval: PAPER_POLL_MS,
-    initialData: UNKNOWN_PAPER
+    initialData: UNKNOWN_PAPER,
+    /**
+     * Overrides this app's `staleTime: Number.POSITIVE_INFINITY` default, and
+     * has to.
+     *
+     * That default suits the reads it was written for — a session, a document's
+     * pages, a printer's capabilities — none of which change behind the screen
+     * that is showing them. A sheet count does exactly that: it moves whenever
+     * a print completes or somebody refills the tray, both of which happen
+     * without this browser being involved.
+     *
+     * Left on the default, data already in the cache is never stale, so
+     * mounting the upload screen would show whatever was last polled and wait
+     * out the interval before asking again — which is the customer pressing
+     * Start printing and being told the count from twenty seconds ago. On a
+     * kiosk that had only just started, it is worse: the estimate begins as
+     * unknown, never goes stale, and the first customer is told the count is
+     * unavailable on a kiosk that knows perfectly well.
+     */
+    staleTime: 0
   };
 }
 

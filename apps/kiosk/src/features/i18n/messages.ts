@@ -253,7 +253,6 @@ export interface MessageCatalog {
     paid: string;
     files: string;
     deletionScheduled: string;
-    completeAutoClose: string;
     finish: string;
   };
   idle: {
@@ -563,7 +562,6 @@ const english: MessageCatalog = {
     paid: "Paid",
     files: "Files",
     deletionScheduled: "Secure deletion scheduled",
-    completeAutoClose: "This screen will close automatically.",
     finish: "Finish"
   },
   idle: {
@@ -862,7 +860,6 @@ const russian: MessageCatalog = {
     paid: "Оплачено",
     files: "Файлы",
     deletionScheduled: "Безопасное удаление запланировано",
-    completeAutoClose: "Этот экран закроется автоматически.",
     finish: "Завершить"
   },
   idle: {
@@ -1153,7 +1150,6 @@ const armenian: MessageCatalog = {
     paid: "Վճարված է",
     files: "Ֆայլեր",
     deletionScheduled: "Անվտանգ հեռացումը նախատեսված է",
-    completeAutoClose: "Այս էկրանն ավտոմատ կփակվի։",
     finish: "Ավարտել"
   },
   idle: {

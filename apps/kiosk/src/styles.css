@@ -1812,81 +1812,6 @@ p {
 
 /* Only ever reached once the control plane confirmed the completion. The ring
    draws first, then the check settles into place like the supplied reference. */
-@property --success-ring-progress {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-
-.print-success-page {
-  display: grid;
-  width: 100%;
-  min-height: 100%;
-  align-self: stretch;
-  place-items: center;
-}
-
-.success-motion {
-  position: relative;
-  width: 148px;
-  height: 148px;
-}
-
-.success-motion__ring {
-  position: absolute;
-  border-radius: 50%;
-  background: conic-gradient(var(--green) var(--success-ring-progress), var(--green-light) 0);
-  animation: success-ring-fill 1s cubic-bezier(0.18, 0.75, 0.2, 1) forwards;
-  inset: 0;
-  transform: rotate(-90deg);
-}
-
-.success-motion__ring::after {
-  position: absolute;
-  border-radius: inherit;
-  background: white;
-  content: "";
-  inset: 8px;
-}
-
-.success-motion__check {
-  position: absolute;
-  top: 47px;
-  left: 39px;
-  width: 69px;
-  height: 37px;
-  border-bottom: 11px solid var(--green);
-  border-left: 11px solid var(--green);
-  opacity: 0;
-  animation: success-check-pop 500ms cubic-bezier(0.2, 0.8, 0.2, 1) 1s forwards;
-  transform: rotate(-45deg) scale(0.55);
-  transform-origin: center;
-}
-
-@keyframes success-ring-fill {
-  to {
-    --success-ring-progress: 360deg;
-  }
-}
-
-@keyframes success-check-pop {
-  0% {
-    opacity: 0;
-    transform: rotate(-45deg) scale(0.55);
-  }
-  45% {
-    opacity: 1;
-    transform: rotate(-45deg) scale(1.1);
-  }
-  68% {
-    opacity: 1;
-    transform: rotate(-45deg) scale(0.96);
-  }
-  100% {
-    opacity: 1;
-    transform: rotate(-45deg) scale(1);
-  }
-}
 
 .print-stage-pill {
   display: flex;
@@ -2011,12 +1936,6 @@ p {
   border-radius: 1rem;
   background: white;
   text-align: left;
-}
-
-.completion-auto-close {
-  margin: -0.7rem auto 1rem !important;
-  font-size: 0.88rem !important;
-  font-weight: 750;
 }
 
 .modal-backdrop {
