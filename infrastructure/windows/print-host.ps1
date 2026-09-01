@@ -102,6 +102,7 @@ $MaximumObserveSeconds = 1500
 $JobPresenceAttempts = 10
 $JobPresenceDelayMilliseconds = 100
 $script:SubmissionTouched = $false
+$script:FirstPageDrawn = $false
 $script:DiagnosticOperation = 'startup'
 $script:DiagnosticOperationId = $null
 $script:DiagnosticStage = 'startup'
@@ -429,8 +430,8 @@ function Complete-WinRtAction {
   $task = $script:AsTaskActionMethod.Invoke($null, @($Action))
   # PowerShell dispatches against the task's runtime Task<VoidTaskResult> type,
   # so GetResult emits a value even though IAsyncAction is logically void. If
-  # that value escapes, Render-PdfSelection returns an array of completion
-  # values plus its result object and strict-mode property access fails.
+  # that value escapes, Render-PdfPage returns an array of completion values
+  # plus the path it meant to return, and the caller draws the wrong thing.
   [void]$task.GetAwaiter().GetResult()
 }
 
@@ -783,13 +784,27 @@ function Get-RenderLongEdge {
   }
 }
 
-function Render-PdfSelection {
+<#
+.SYNOPSIS
+  Open a document and settle which of its pages print. Draws nothing.
+
+.DESCRIPTION
+  Split out from rendering so that everything which can refuse a submission
+  happens before any page reaches a spooler. Opening the file, reading its page
+  count and resolving the requested ranges are the only steps that can reject a
+  document on its own contents, and all three are cheap — no page is rasterised
+  here.
+
+  That split is what makes page-at-a-time printing safe. A manifest naming a
+  page the document does not have, a file that is not a PDF, a document that
+  will not open: each is still a definite refusal with nothing submitted,
+  exactly as when every page was rasterised up front.
+#>
+function Open-PdfSelection {
   param(
     [string] $Path,
     $PageRanges,
-    [string] $TargetDirectory,
-    [int] $Position,
-    [int] $LongEdgePixels = $FallbackRenderLongEdgePixels
+    [int] $Position
   )
 
   $script:DiagnosticStage = "submit.document.$Position.pdf-open"
@@ -800,49 +815,66 @@ function Render-PdfSelection {
   $pdf = Complete-WinRtOperation -Operation $pdfOperation -ResultType ([Windows.Data.Pdf.PdfDocument])
   $script:DiagnosticStage = "submit.document.$Position.page-selection"
   $pageNumbers = @(Get-SelectedPageNumbers -PageRanges $PageRanges -PageCount ([int]$pdf.PageCount))
-  $paths = @()
 
-  for ($index = 0; $index -lt $pageNumbers.Count; $index++) {
-    $script:DiagnosticStage = "submit.document.$Position.page.$index.open"
-    $pageNumber = [int]$pageNumbers[$index]
-    $page = $pdf.GetPage([uint32]($pageNumber - 1))
-    $stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
-    $reader = $null
-    try {
-      $options = [Windows.Data.Pdf.PdfPageRenderOptions]::new()
-      $width = [double]$page.Size.Width
-      $height = [double]$page.Size.Height
-      if ($width -ge $height) {
-        $renderWidth = $LongEdgePixels
-        $renderHeight = [Math]::Max(1, [int][Math]::Round($LongEdgePixels * $height / $width))
-      } else {
-        $renderHeight = $LongEdgePixels
-        $renderWidth = [Math]::Max(1, [int][Math]::Round($LongEdgePixels * $width / $height))
-      }
-      $options.DestinationWidth = [uint32]$renderWidth
-      $options.DestinationHeight = [uint32]$renderHeight
+  return [pscustomobject]@{ pdf = $pdf; pageNumbers = $pageNumbers }
+}
 
-      $script:DiagnosticStage = "submit.document.$Position.page.$index.render"
-      Complete-WinRtAction -Action ($page.RenderToStreamAsync($stream, $options))
-      $stream.Seek(0)
-      $script:DiagnosticStage = "submit.document.$Position.page.$index.read"
-      $reader = [Windows.Storage.Streams.DataReader]::new($stream.GetInputStreamAt(0))
-      [void](Complete-WinRtOperation -Operation ($reader.LoadAsync([uint32]$stream.Size)) -ResultType ([uint32]))
-      $bytes = New-Object byte[] ([int]$stream.Size)
-      $reader.ReadBytes($bytes)
+<#
+.SYNOPSIS
+  Rasterise one page to a file and return its path.
 
-      $outputPath = Join-Path $TargetDirectory ("{0:D3}-{1:D4}.png" -f $Position, $index)
-      $script:DiagnosticStage = "submit.document.$Position.page.$index.write"
-      [System.IO.File]::WriteAllBytes($outputPath, $bytes)
-      $paths += $outputPath
-    } finally {
-      if ($null -ne $reader) { $reader.Dispose() }
-      $stream.Dispose()
-      $page.Dispose()
+.DESCRIPTION
+  One page, because the caller draws each one as soon as it exists rather than
+  waiting for the whole document. On a two-page job that ordering is worth about
+  a second; on a two-hundred-sheet one it is the difference between the printer
+  starting now and starting after several minutes of silence.
+#>
+function Render-PdfPage {
+  param(
+    $Pdf,
+    [int] $PageNumber,
+    [string] $TargetDirectory,
+    [int] $Position,
+    [int] $Index,
+    [int] $LongEdgePixels = $FallbackRenderLongEdgePixels
+  )
+
+  $script:DiagnosticStage = "submit.document.$Position.page.$Index.open"
+  $page = $Pdf.GetPage([uint32]($PageNumber - 1))
+  $stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
+  $reader = $null
+  try {
+    $options = [Windows.Data.Pdf.PdfPageRenderOptions]::new()
+    $width = [double]$page.Size.Width
+    $height = [double]$page.Size.Height
+    if ($width -ge $height) {
+      $renderWidth = $LongEdgePixels
+      $renderHeight = [Math]::Max(1, [int][Math]::Round($LongEdgePixels * $height / $width))
+    } else {
+      $renderHeight = $LongEdgePixels
+      $renderWidth = [Math]::Max(1, [int][Math]::Round($LongEdgePixels * $width / $height))
     }
-  }
+    $options.DestinationWidth = [uint32]$renderWidth
+    $options.DestinationHeight = [uint32]$renderHeight
 
-  return [pscustomobject]@{ paths = $paths; selectedPages = $pageNumbers.Count }
+    $script:DiagnosticStage = "submit.document.$Position.page.$Index.render"
+    Complete-WinRtAction -Action ($page.RenderToStreamAsync($stream, $options))
+    $stream.Seek(0)
+    $script:DiagnosticStage = "submit.document.$Position.page.$Index.read"
+    $reader = [Windows.Storage.Streams.DataReader]::new($stream.GetInputStreamAt(0))
+    [void](Complete-WinRtOperation -Operation ($reader.LoadAsync([uint32]$stream.Size)) -ResultType ([uint32]))
+    $bytes = New-Object byte[] ([int]$stream.Size)
+    $reader.ReadBytes($bytes)
+
+    $outputPath = Join-Path $TargetDirectory ("{0:D3}-{1:D4}.png" -f $Position, $Index)
+    $script:DiagnosticStage = "submit.document.$Position.page.$Index.write"
+    [System.IO.File]::WriteAllBytes($outputPath, $bytes)
+    return $outputPath
+  } finally {
+    if ($null -ne $reader) { $reader.Dispose() }
+    $stream.Dispose()
+    $page.Dispose()
+  }
 }
 
 
@@ -1113,6 +1145,10 @@ function Invoke-Submit {
 
   $prepared = @()
   try {
+    # Everything that can refuse this submission happens here, before a spooler
+    # is touched: the manifest fields, the artifact's presence, the document
+    # opening at all, and every requested page existing in it. No page is
+    # rasterised yet, so this stays cheap on a two-hundred-sheet job.
     foreach ($document in @($Request.documents)) {
       $position = [int]$document.position
       $script:DiagnosticStage = "submit.document.$position.validation"
@@ -1127,28 +1163,29 @@ function Invoke-Submit {
         Write-Failure -Code 'ARTIFACT_UNAVAILABLE' -Ambiguous $false
       }
 
-      $script:DiagnosticStage = "submit.document.$position.render"
-      $rendered = Render-PdfSelection -Path $document.path -PageRanges $document.pageRanges `
-        -TargetDirectory $renderPath -Position $position -LongEdgePixels $renderLongEdge
+      $selection = Open-PdfSelection -Path $document.path -PageRanges $document.pageRanges `
+        -Position $position
+      $selectedPages = @($selection.pageNumbers).Count
       $isDuplex = $sides -eq 'two-sided-long-edge'
-      $blankSeparators = if ($isDuplex -and $rendered.selectedPages % 2 -eq 1) { $copies - 1 } else { 0 }
-      $expectedPages = ($rendered.selectedPages * $copies) + $blankSeparators
+      $blankSeparators = if ($isDuplex -and $selectedPages % 2 -eq 1) { $copies - 1 } else { 0 }
+      $expectedPages = ($selectedPages * $copies) + $blankSeparators
       $expectedSheets = if ($isDuplex) {
-        [int][Math]::Ceiling($rendered.selectedPages / 2.0) * $copies
+        [int][Math]::Ceiling($selectedPages / 2.0) * $copies
       } else {
-        $rendered.selectedPages * $copies
+        $selectedPages * $copies
       }
       $prepared += [pscustomobject]@{
         document = $document
-        paths = @($rendered.paths)
+        pdf = $selection.pdf
+        pageNumbers = [int[]]@($selection.pageNumbers)
         copies = $copies
         duplex = $isDuplex
-        selectedPages = $rendered.selectedPages
+        selectedPages = $selectedPages
         expectedPages = $expectedPages
         expectedSheets = $expectedSheets
       }
     }
-    Add-PhaseMark -Name 'rendered'
+    Add-PhaseMark -Name 'prepared'
 
     $script:DiagnosticStage = 'submit.state.initialize'
     $state = [pscustomobject]@{
@@ -1230,9 +1267,38 @@ function Invoke-Submit {
         }
         Add-PhaseMark -Name "document.$position.jobObserved"
 
+        # Rasterise and draw one page at a time, so the spooler has page one
+        # while page two is still being drawn. The first copy renders; any
+        # further copy redraws the files it left behind, which keeps the total
+        # rasterising work identical to drawing them all up front.
         $script:DiagnosticStage = "submit.document.$position.draw-pages"
+        $renderedPaths = New-Object 'System.Collections.Generic.List[string]'
         for ($copy = 0; $copy -lt $item.copies; $copy++) {
-          foreach ($path in $item.paths) { $job.PrintImage($path) }
+          for ($index = 0; $index -lt $item.pageNumbers.Count; $index++) {
+            if ($copy -eq 0) {
+              $path = Render-PdfPage -Pdf $item.pdf -PageNumber ([int]$item.pageNumbers[$index]) `
+                -TargetDirectory $renderPath -Position $position -Index $index `
+                -LongEdgePixels $renderLongEdge
+              if ($item.copies -gt 1) { $renderedPaths.Add($path) }
+            } else {
+              $path = $renderedPaths[$index]
+            }
+            $script:DiagnosticStage = "submit.document.$position.page.$index.draw"
+            $job.PrintImage($path)
+            if (-not $script:FirstPageDrawn) {
+              # The moment a page first reached the spooler. It is the number
+              # this ordering exists to reduce, so it is reported on its own
+              # rather than inferred from the totals around it.
+              Add-PhaseMark -Name 'firstPageDrawn'
+              $script:FirstPageDrawn = $true
+            }
+            # One page of a customer's document on disk at a time rather than
+            # the whole job. A two-hundred-sheet duplex job held four hundred
+            # rendered pages here at once; now it holds one.
+            if ($item.copies -eq 1) {
+              Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
+          }
           if ($item.duplex -and $item.selectedPages % 2 -eq 1 -and $copy -lt $item.copies - 1) {
             # Keep odd-length copies from sharing a duplex sheet.
             $job.PrintBlankPage()

@@ -177,8 +177,34 @@ describe("Windows print host prohibitions", () => {
   });
 
   it("does not let a WinRT completion value escape into the renderer's output", () => {
-    // Another hardware-only defect: the escaped value made Render-PdfSelection
-    // return an array, and strict-mode property access then failed.
+    // Another hardware-only defect: the escaped value made the renderer return
+    // an array, and strict-mode property access then failed.
     expect(hostSource).toContain("[void]$task.GetAwaiter().GetResult()");
+  });
+
+  it("settles every page a document will print before it opens a job", () => {
+    // Pages are rasterised one at a time now, as each is drawn, so that the
+    // printer starts on page one instead of waiting out the whole document.
+    // What may not move with them is the refusal: opening the file and
+    // resolving the requested ranges decide whether this submission is
+    // possible at all, and both have to stay on the side of StartDoc where
+    // nothing has reached a spooler yet. Past it the same failure would be an
+    // ambiguous partial print rather than a clean "nothing was submitted".
+    const preflight = hostSource.indexOf("Add-PhaseMark -Name 'prepared'");
+    const startDoc = hostSource.indexOf("Add-PhaseMark -Name \"document.$position.startDoc\"");
+    const renderPage = hostSource.indexOf("$path = Render-PdfPage -Pdf $item.pdf");
+
+    expect(preflight).toBeGreaterThan(-1);
+    expect(startDoc).toBeGreaterThan(preflight);
+    expect(renderPage).toBeGreaterThan(startDoc);
+    // The whole-document renderer is gone; leaving it callable would let the
+    // old ordering come back without anything here noticing.
+    expect(hostSource).not.toContain("function Render-PdfSelection");
+  });
+
+  it("keeps one page of a customer's document on disk at a time", () => {
+    // A two-hundred-sheet duplex job used to leave four hundred rendered pages
+    // in the render directory until the whole operation finished.
+    expect(hostSource).toContain("Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue");
   });
 });

@@ -190,7 +190,7 @@ deadline.
     "queue": "Kiosk A4",
     "pollCount": 1,
     "processStartMs": 812,
-    "phaseMs": { "queueResolved": 40, "rendered": 900, "document.0.endDoc": 1500 },
+    "phaseMs": { "queueResolved": 40, "prepared": 120, "firstPageDrawn": 1400, "document.0.endDoc": 4200 },
     "jobs": [
       {
         "position": 0,
@@ -329,9 +329,9 @@ hardware and made the warning codes unreachable.
 
 `infrastructure/windows/print-host.ps1` implements this protocol with
 `Get-Printer`, `Get-PrintJob`, `Windows.Data.Pdf` and a GDI printer device
-context. The selected PDF pages are rendered locally, then drawn through the
-installed Canon UFR II driver. `StartDoc` supplies the operating-system job
-identifier before the first rendered page is drawn.
+context. Each selected PDF page is rendered locally and drawn through the installed
+Canon UFR II driver as soon as it exists. `StartDoc` supplies the
+operating-system job identifier before the first rendered page is drawn.
 
 The reference profile refuses anything except a local, non-shared `USBnnn`
 queue using `Canon Generic Plus UFR II`. The queue name is deployment data, so
@@ -370,6 +370,32 @@ because the cost is quadratic in that number: doubling it quadruples both the
 rasterise and the draw, measured at ~1.4 s and ~2.4 s respectively at 3508 px on
 the reference printer. A driver that will not describe its surface falls back to
 3508. The measured values are recorded locally as `submit.surface`.
+
+### Page at a time
+
+A page is rasterised immediately before it is drawn, not with the rest of its
+document beforehand. The printer therefore starts on page one while page two is
+still being prepared, instead of waiting out the whole document in silence. At
+~1.4 s to rasterise a page that is about a second on a two-page job and about
+seven minutes on a two-hundred-sheet one; total job time is unchanged, because
+the same pages are prepared either way, but nothing is idle while it happens.
+
+What deliberately did **not** move past `StartDoc` is the part that can refuse
+the submission. Opening each document, reading its page count and resolving the
+requested ranges all happen first, for every document, before a spooler is
+touched — so a manifest naming a page that does not exist, or a file that will
+not open, is still a definite refusal with nothing submitted. Only the pixel
+rendering of pages two onward now happens after a job exists, and a failure
+there is reported as ambiguous, which the marker comparison then resolves.
+
+That ordering is safe here because of what the kiosk actually prints. The
+document processor has already rasterised every page with `pdftoppm` to build
+the canonical PDF, so a page that cannot be rendered never reaches a kiosk, and
+the agent verifies the file's SHA-256 before the first page is drawn.
+
+One rendered page exists on disk at a time when a document prints once; a
+document printing several copies keeps its pages for the copies that follow, so
+the rasterising work is the same either way.
 
 The driver name and the port pattern are **deployment configuration**, sent on
 every request as `profiles`. Approving a second printer model is an operator
