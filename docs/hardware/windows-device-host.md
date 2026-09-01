@@ -371,14 +371,28 @@ rasterise and the draw, measured at ~1.4 s and ~2.4 s respectively at 3508 px on
 the reference printer. A driver that will not describe its surface falls back to
 3508. The measured values are recorded locally as `submit.surface`.
 
-### Page at a time
+### Page at a time, one page ahead
 
 A page is rasterised immediately before it is drawn, not with the rest of its
 document beforehand. The printer therefore starts on page one while page two is
 still being prepared, instead of waiting out the whole document in silence. At
 ~1.4 s to rasterise a page that is about a second on a two-page job and about
-seven minutes on a two-hundred-sheet one; total job time is unchanged, because
-the same pages are prepared either way, but nothing is idle while it happens.
+seven minutes on a two-hundred-sheet one.
+
+Rasterising and drawing overlap, and that part is not optional. Done one after
+the other they delivered a page every ~2.9 s while the engine printed one every
+~1.8 s, and a laser engine that runs out of pages does not idle politely — it
+stops, parks, and spins back up when the next page arrives. A ten-page job
+printed two or three sheets, paused, printed two or three more. The renderer is
+therefore started on the next page *before* the current one is handed to the
+driver, so a page costs the larger of the two rather than their sum.
+
+One page is in flight at a time, which is enough to cover the gap and keeps peak
+memory to two uncompressed pages rather than a document's worth. Pages go to GDI
+as bytes: no encode to a file, no read back, no decode, and no customer document
+on this machine's disk while it prints. A page already rasterised at the
+device's own printable area is drawn unscaled, because interpolating it
+one-to-one walks eight million pixels and changes none of them.
 
 What deliberately did **not** move past `StartDoc` is the part that can refuse
 the submission. Opening each document, reading its page count and resolving the
@@ -393,9 +407,9 @@ document processor has already rasterised every page with `pdftoppm` to build
 the canonical PDF, so a page that cannot be rendered never reaches a kiosk, and
 the agent verifies the file's SHA-256 before the first page is drawn.
 
-One rendered page exists on disk at a time when a document prints once; a
-document printing several copies keeps its pages for the copies that follow, so
-the rasterising work is the same either way.
+Further copies re-rasterise rather than keeping pages in hand. While rendering
+overlaps drawing it costs no wall-clock time, and holding a whole document's
+pages to avoid it is exactly what this stopped doing.
 
 The driver name and the port pattern are **deployment configuration**, sent on
 every request as `profiles`. Approving a second printer model is an operator

@@ -183,8 +183,8 @@ describe("Windows print host prohibitions", () => {
   });
 
   it("settles every page a document will print before it opens a job", () => {
-    // Pages are rasterised one at a time now, as each is drawn, so that the
-    // printer starts on page one instead of waiting out the whole document.
+    // Pages are rasterised as they are drawn, not all of them beforehand, so
+    // the printer starts on page one instead of waiting out the document.
     // What may not move with them is the refusal: opening the file and
     // resolving the requested ranges decide whether this submission is
     // possible at all, and both have to stay on the side of StartDoc where
@@ -192,19 +192,45 @@ describe("Windows print host prohibitions", () => {
     // ambiguous partial print rather than a clean "nothing was submitted".
     const preflight = hostSource.indexOf("Add-PhaseMark -Name 'prepared'");
     const startDoc = hostSource.indexOf("Add-PhaseMark -Name \"document.$position.startDoc\"");
-    const renderPage = hostSource.indexOf("$path = Render-PdfPage -Pdf $item.pdf");
+    const firstRender = hostSource.indexOf("$pending = Start-PdfPageRender -Pdf $item.pdf");
 
     expect(preflight).toBeGreaterThan(-1);
     expect(startDoc).toBeGreaterThan(preflight);
-    expect(renderPage).toBeGreaterThan(startDoc);
+    expect(firstRender).toBeGreaterThan(startDoc);
     // The whole-document renderer is gone; leaving it callable would let the
     // old ordering come back without anything here noticing.
     expect(hostSource).not.toContain("function Render-PdfSelection");
   });
 
-  it("keeps one page of a customer's document on disk at a time", () => {
-    // A two-hundred-sheet duplex job used to leave four hundred rendered pages
-    // in the render directory until the whole operation finished.
-    expect(hostSource).toContain("Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue");
+  it("starts the next page rendering before drawing the current one", () => {
+    // The regression this guards is one real hardware showed: rasterise, draw,
+    // rasterise, draw delivered a page more slowly than the engine printed one,
+    // so the printer ran two or three sheets, stopped, spun back up and did it
+    // again. Overlapping the two is what keeps it fed, and the only thing that
+    // makes it an overlap is that the render below is started above the draw.
+    const drawLoop = hostSource.slice(
+      hostSource.indexOf('$script:DiagnosticStage = "submit.document.$position.draw-pages"')
+    );
+    const lookahead = drawLoop.indexOf("if ($emitted -lt $totalPages)");
+    const draw = drawLoop.indexOf("$job.PrintImageBytes($bytes)");
+
+    expect(lookahead).toBeGreaterThan(-1);
+    expect(draw).toBeGreaterThan(lookahead);
+  });
+
+  it("never writes a customer's page image to disk while printing", () => {
+    // The page goes from the renderer to GDI as bytes. Nothing encodes it to a
+    // file and reads it back, which is both two fewer seconds a minute and one
+    // fewer place a document exists on this machine.
+    expect(hostSource).toContain("public void PrintImageBytes(byte[] bytes)");
+    expect(hostSource).not.toContain("[System.IO.File]::WriteAllBytes($outputPath, $bytes)");
+    expect(hostSource).not.toContain("function Get-RenderPath");
+  });
+
+  it("does not resample a page that was rasterised at the device's own size", () => {
+    // Interpolating one-to-one walks eight million pixels and changes none of
+    // them. The high-quality path stays for the sizes that really differ.
+    expect(hostSource).toContain("graphics.DrawImageUnscaled(image, left, top)");
+    expect(hostSource).toContain("InterpolationMode.HighQualityBicubic");
   });
 });

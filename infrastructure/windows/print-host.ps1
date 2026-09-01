@@ -154,10 +154,12 @@ Add-Type -AssemblyName System.Runtime.WindowsRuntime
 [void][Windows.Storage.Streams.DataReader, Windows.Storage.Streams, ContentType = WindowsRuntime]
 [void][Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType = WindowsRuntime]
 [void][Windows.Data.Pdf.PdfPageRenderOptions, Windows.Data.Pdf, ContentType = WindowsRuntime]
+[void][Windows.Graphics.Imaging.BitmapEncoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
 
 Add-Type -ReferencedAssemblies 'System.Drawing.dll' -TypeDefinition @'
 using System;
 using System.Drawing;
+using System.IO;
 using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
 using System.Runtime.InteropServices;
@@ -304,6 +306,27 @@ public sealed class DriverRenderedPrintJob : IDisposable
     public void PrintImage(string path)
     {
         EnsureActive();
+        using (Image image = Image.FromFile(path))
+        {
+            DrawPage(image);
+        }
+    }
+
+    // The printing path uses this one. The page arrives as the bytes the PDF
+    // renderer just produced, so nothing is written to disk and read back, and
+    // no customer document touches the filesystem on this machine at all.
+    public void PrintImageBytes(byte[] bytes)
+    {
+        EnsureActive();
+        using (MemoryStream source = new MemoryStream(bytes, false))
+        using (Image image = Image.FromStream(source))
+        {
+            DrawPage(image);
+        }
+    }
+
+    private void DrawPage(Image image)
+    {
         if (StartPage(deviceContext) <= 0)
             throw new InvalidOperationException("START_PAGE_FAILED:" + Marshal.GetLastWin32Error());
 
@@ -315,7 +338,6 @@ public sealed class DriverRenderedPrintJob : IDisposable
             if (width <= 0 || height <= 0)
                 throw new InvalidOperationException("PRINTABLE_AREA_UNAVAILABLE");
 
-            using (Image image = Image.FromFile(path))
             using (Graphics graphics = Graphics.FromHdc(deviceContext))
             {
                 // HORZRES and VERTRES are device pixels. Printer Graphics
@@ -331,17 +353,29 @@ public sealed class DriverRenderedPrintJob : IDisposable
                     image.RotateFlip(RotateFlipType.Rotate90FlipNone);
 
                 graphics.Clear(Color.White);
-                graphics.CompositingQuality = CompositingQuality.HighQuality;
-                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                graphics.SmoothingMode = SmoothingMode.HighQuality;
 
                 double scale = Math.Min((double)width / image.Width, (double)height / image.Height);
                 int targetWidth = Math.Max(1, (int)Math.Round(image.Width * scale));
                 int targetHeight = Math.Max(1, (int)Math.Round(image.Height * scale));
                 int left = (width - targetWidth) / 2;
                 int top = (height - targetHeight) / 2;
-                graphics.DrawImage(image, new Rectangle(left, top, targetWidth, targetHeight));
+
+                if (targetWidth == image.Width && targetHeight == image.Height)
+                {
+                    // The page was rasterised to this device's own printable
+                    // area, so there is nothing to resample. Interpolating
+                    // one-to-one costs a full pass over eight million pixels
+                    // and changes not a single one of them.
+                    graphics.DrawImageUnscaled(image, left, top);
+                }
+                else
+                {
+                    graphics.CompositingQuality = CompositingQuality.HighQuality;
+                    graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    graphics.SmoothingMode = SmoothingMode.HighQuality;
+                    graphics.DrawImage(image, new Rectangle(left, top, targetWidth, targetHeight));
+                }
             }
 
             if (EndPage(deviceContext) <= 0)
@@ -414,6 +448,14 @@ $script:AsTaskActionMethod = [System.WindowsRuntimeSystemExtensions].GetMethods(
   } |
   Select-Object -First 1
 
+  # Pages go to GDI as an uncompressed bitmap rather than a PNG. Nothing here
+  # keeps a page, so deflating eight million pixels and immediately inflating
+  # them again bought only a smaller buffer — and buffer size is not what
+  # somebody standing at the kiosk is waiting for. A page costs more memory
+  # this way (tens of megabytes, briefly); set this back to `PngEncoderId` if a
+  # deployment ever needs the bytes rather than the seconds.
+  $script:PageEncoderId = [Windows.Graphics.Imaging.BitmapEncoder]::BmpEncoderId
+
   $script:PrintingRuntimeReady = $true
   Add-PhaseMark -Name 'printingRuntimeReady'
 }
@@ -425,13 +467,18 @@ function Complete-WinRtOperation {
   return $task.GetAwaiter().GetResult()
 }
 
+function Start-WinRtAction {
+  param($Action)
+  return $script:AsTaskActionMethod.Invoke($null, @($Action))
+}
+
 function Complete-WinRtAction {
   param($Action)
-  $task = $script:AsTaskActionMethod.Invoke($null, @($Action))
+  $task = Start-WinRtAction -Action $Action
   # PowerShell dispatches against the task's runtime Task<VoidTaskResult> type,
   # so GetResult emits a value even though IAsyncAction is logically void. If
-  # that value escapes, Render-PdfPage returns an array of completion values
-  # plus the path it meant to return, and the caller draws the wrong thing.
+  # that value escapes, the renderer returns an array of completion values plus
+  # the page it meant to return, and the caller draws the wrong thing.
   [void]$task.GetAwaiter().GetResult()
 }
 
@@ -682,15 +729,6 @@ function Get-StatePath {
   return Join-Path $StateDirectory ("{0}.json" -f $OperationId.ToLowerInvariant())
 }
 
-function Get-RenderPath {
-  param([string] $OperationId)
-  [void](Get-StatePath -OperationId $OperationId)
-  if (-not (Test-Path $RenderDirectory)) {
-    New-Item -ItemType Directory -Path $RenderDirectory -Force | Out-Null
-  }
-  return Join-Path $RenderDirectory $OperationId.ToLowerInvariant()
-}
-
 function Read-OperationState {
   param([string] $OperationId)
   $path = Get-StatePath -OperationId $OperationId
@@ -821,30 +859,32 @@ function Open-PdfSelection {
 
 <#
 .SYNOPSIS
-  Rasterise one page to a file and return its path.
+  Begin rasterising one page. Returns immediately; the work runs on its own.
 
 .DESCRIPTION
-  One page, because the caller draws each one as soon as it exists rather than
-  waiting for the whole document. On a two-page job that ordering is worth about
-  a second; on a two-hundred-sheet one it is the difference between the printer
-  starting now and starting after several minutes of silence.
+  The render is started rather than waited for, so the caller can hand the
+  *previous* page to the driver while this one is still being produced. That
+  overlap is the whole point: rasterising and drawing each take a second or two,
+  and doing them one after the other delivered a page more slowly than the
+  engine could print one. A laser engine that runs out of pages does not idle
+  politely — it stops, parks, and spins back up when the next page arrives,
+  which is what the stop-start-stop cadence on a ten-page job was.
+
+  One page is in flight at a time. That is enough to cover the gap, and it keeps
+  peak memory to two uncompressed pages rather than a whole document.
 #>
-function Render-PdfPage {
+function Start-PdfPageRender {
   param(
     $Pdf,
     [int] $PageNumber,
-    [string] $TargetDirectory,
-    [int] $Position,
-    [int] $Index,
     [int] $LongEdgePixels = $FallbackRenderLongEdgePixels
   )
 
-  $script:DiagnosticStage = "submit.document.$Position.page.$Index.open"
   $page = $Pdf.GetPage([uint32]($PageNumber - 1))
   $stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
-  $reader = $null
   try {
     $options = [Windows.Data.Pdf.PdfPageRenderOptions]::new()
+    $options.BitmapEncoderId = $script:PageEncoderId
     $width = [double]$page.Size.Width
     $height = [double]$page.Size.Height
     if ($width -ge $height) {
@@ -857,23 +897,45 @@ function Render-PdfPage {
     $options.DestinationWidth = [uint32]$renderWidth
     $options.DestinationHeight = [uint32]$renderHeight
 
-    $script:DiagnosticStage = "submit.document.$Position.page.$Index.render"
-    Complete-WinRtAction -Action ($page.RenderToStreamAsync($stream, $options))
-    $stream.Seek(0)
-    $script:DiagnosticStage = "submit.document.$Position.page.$Index.read"
-    $reader = [Windows.Storage.Streams.DataReader]::new($stream.GetInputStreamAt(0))
-    [void](Complete-WinRtOperation -Operation ($reader.LoadAsync([uint32]$stream.Size)) -ResultType ([uint32]))
-    $bytes = New-Object byte[] ([int]$stream.Size)
-    $reader.ReadBytes($bytes)
-
-    $outputPath = Join-Path $TargetDirectory ("{0:D3}-{1:D4}.png" -f $Position, $Index)
-    $script:DiagnosticStage = "submit.document.$Position.page.$Index.write"
-    [System.IO.File]::WriteAllBytes($outputPath, $bytes)
-    return $outputPath
-  } finally {
-    if ($null -ne $reader) { $reader.Dispose() }
+    $task = Start-WinRtAction -Action ($page.RenderToStreamAsync($stream, $options))
+    return [pscustomobject]@{ page = $page; stream = $stream; task = $task }
+  } catch {
     $stream.Dispose()
     $page.Dispose()
+    throw
+  }
+}
+
+<#
+.SYNOPSIS
+  Collect a started render as the bytes of one page image.
+
+.DESCRIPTION
+  Returned rather than written to a file. The bytes go straight to GDI, so a
+  customer's document never lands on this machine's disk during printing, and a
+  page costs no encode, no write, no read and no decode round trip.
+#>
+function Complete-PdfPageRender {
+  param($Pending)
+
+  try {
+    [void]$Pending.task.GetAwaiter().GetResult()
+    $Pending.stream.Seek(0)
+    $reader = [Windows.Storage.Streams.DataReader]::new($Pending.stream.GetInputStreamAt(0))
+    try {
+      [void](Complete-WinRtOperation -Operation ($reader.LoadAsync([uint32]$Pending.stream.Size)) `
+        -ResultType ([uint32]))
+      $bytes = New-Object byte[] ([int]$Pending.stream.Size)
+      $reader.ReadBytes($bytes)
+      # The leading comma matters. Without it PowerShell unrolls the array into
+      # the pipeline and the caller receives several million integers.
+      return ,$bytes
+    } finally {
+      $reader.Dispose()
+    }
+  } finally {
+    $Pending.stream.Dispose()
+    $Pending.page.Dispose()
   }
 }
 
@@ -1138,11 +1200,6 @@ function Invoke-Submit {
   $renderLongEdge = Get-RenderLongEdge -QueueName $printer.Name
   Add-PhaseMark -Name 'surfaceMeasured'
 
-  $script:DiagnosticStage = 'submit.render-directory'
-  $renderPath = Get-RenderPath -OperationId $Request.operationId
-  if (Test-Path $renderPath) { Remove-Item -LiteralPath $renderPath -Recurse -Force }
-  New-Item -ItemType Directory -Path $renderPath -Force | Out-Null
-
   $prepared = @()
   try {
     # Everything that can refuse this submission happens here, before a spooler
@@ -1267,41 +1324,65 @@ function Invoke-Submit {
         }
         Add-PhaseMark -Name "document.$position.jobObserved"
 
-        # Rasterise and draw one page at a time, so the spooler has page one
-        # while page two is still being drawn. The first copy renders; any
-        # further copy redraws the files it left behind, which keeps the total
-        # rasterising work identical to drawing them all up front.
+        # Rasterise and draw as a pipeline: the next page is already being
+        # produced while this one is handed to the driver. Sequentially, a page
+        # cost the rasterise plus the draw and arrived more slowly than the
+        # engine printed; overlapped, it costs the larger of the two and the
+        # engine stays fed. The first page still goes out as soon as it exists,
+        # which is what page-at-a-time was for.
+        #
+        # Further copies re-rasterise rather than keeping pages around. The
+        # rendering is free in wall-clock terms while it overlaps the drawing,
+        # and holding a whole document's pages to avoid it is what this stopped
+        # doing on purpose.
         $script:DiagnosticStage = "submit.document.$position.draw-pages"
-        $renderedPaths = New-Object 'System.Collections.Generic.List[string]'
-        for ($copy = 0; $copy -lt $item.copies; $copy++) {
-          for ($index = 0; $index -lt $item.pageNumbers.Count; $index++) {
-            if ($copy -eq 0) {
-              $path = Render-PdfPage -Pdf $item.pdf -PageNumber ([int]$item.pageNumbers[$index]) `
-                -TargetDirectory $renderPath -Position $position -Index $index `
-                -LongEdgePixels $renderLongEdge
-              if ($item.copies -gt 1) { $renderedPaths.Add($path) }
-            } else {
-              $path = $renderedPaths[$index]
+        $pageCount = $item.pageNumbers.Count
+        $totalPages = $pageCount * $item.copies
+        $emitted = 0
+        $pending = $null
+        try {
+          for ($copy = 0; $copy -lt $item.copies; $copy++) {
+            for ($index = 0; $index -lt $pageCount; $index++) {
+              if ($null -eq $pending) {
+                $script:DiagnosticStage = "submit.document.$position.page.$index.render"
+                $pending = Start-PdfPageRender -Pdf $item.pdf `
+                  -PageNumber ([int]$item.pageNumbers[$index]) -LongEdgePixels $renderLongEdge
+              }
+              $script:DiagnosticStage = "submit.document.$position.page.$index.collect"
+              $bytes = Complete-PdfPageRender -Pending $pending
+              $pending = $null
+              $emitted++
+
+              # Started before the draw below, not after it. This line is the
+              # optimisation; moving it down would restore the stop-start.
+              if ($emitted -lt $totalPages) {
+                $nextIndex = ($index + 1) % $pageCount
+                $script:DiagnosticStage = "submit.document.$position.page.$nextIndex.render"
+                $pending = Start-PdfPageRender -Pdf $item.pdf `
+                  -PageNumber ([int]$item.pageNumbers[$nextIndex]) -LongEdgePixels $renderLongEdge
+              }
+
+              $script:DiagnosticStage = "submit.document.$position.page.$index.draw"
+              $job.PrintImageBytes($bytes)
+              if (-not $script:FirstPageDrawn) {
+                # The moment a page first reached the spooler. It is the number
+                # this ordering exists to reduce, so it is reported on its own
+                # rather than inferred from the totals around it.
+                Add-PhaseMark -Name 'firstPageDrawn'
+                $script:FirstPageDrawn = $true
+              }
             }
-            $script:DiagnosticStage = "submit.document.$position.page.$index.draw"
-            $job.PrintImage($path)
-            if (-not $script:FirstPageDrawn) {
-              # The moment a page first reached the spooler. It is the number
-              # this ordering exists to reduce, so it is reported on its own
-              # rather than inferred from the totals around it.
-              Add-PhaseMark -Name 'firstPageDrawn'
-              $script:FirstPageDrawn = $true
-            }
-            # One page of a customer's document on disk at a time rather than
-            # the whole job. A two-hundred-sheet duplex job held four hundred
-            # rendered pages here at once; now it holds one.
-            if ($item.copies -eq 1) {
-              Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if ($item.duplex -and $item.selectedPages % 2 -eq 1 -and $copy -lt $item.copies - 1) {
+              # Keep odd-length copies from sharing a duplex sheet.
+              $job.PrintBlankPage()
             }
           }
-          if ($item.duplex -and $item.selectedPages % 2 -eq 1 -and $copy -lt $item.copies - 1) {
-            # Keep odd-length copies from sharing a duplex sheet.
-            $job.PrintBlankPage()
+        } finally {
+          # A draw that failed leaves the next page's render in flight. Let it
+          # finish and release its buffer rather than leaving tens of megabytes
+          # and a PDF page handle to the process exit.
+          if ($null -ne $pending) {
+            try { [void](Complete-PdfPageRender -Pending $pending) } catch { }
           }
         }
         Add-PhaseMark -Name "document.$position.drawn"
@@ -1324,7 +1405,7 @@ function Invoke-Submit {
     Write-Result -Result (Get-OperationReport -OperationId $Request.operationId `
       -QueueName $printer.Name -WaitForCompletion $true -WaitSeconds $waitSeconds)
   } finally {
-    Remove-Item -LiteralPath $renderPath -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($item in $prepared) { $item.pdf = $null }
   }
 }
 
@@ -1491,6 +1572,8 @@ function Invoke-Discard {
       if ($file.LastWriteTimeUtc -lt $cutoff) { Remove-Item -LiteralPath $file.FullName -Force }
     }
   }
+  # Printing renders to memory now, so nothing new appears here. The sweep
+  # stays for what an earlier version of this host left on an upgraded kiosk.
   if (Test-Path $RenderDirectory) {
     foreach ($directory in Get-ChildItem -Path $RenderDirectory -Directory) {
       if ($directory.LastWriteTimeUtc -lt $cutoff) {
