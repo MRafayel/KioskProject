@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "pdfkit": "0.19.1",
-    "sharp": "0.35.3",
-    "tar-stream": "3.2.0"
+    "pdfkit": "0.20.1",
+    "sharp": "0.35.4",
+    "tar-stream": "3.2.1"
   },
   "scripts": {
     "bench": "tsx bench/run.ts",
