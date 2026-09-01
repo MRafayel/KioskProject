@@ -35,6 +35,6 @@
     "admin-benchmark": "tsx scripts/admin-read-benchmark.ts"
   },
   "devDependencies": {
-    "tsx": "4.23.0"
+    "tsx": "4.23.12"
   }
 }
