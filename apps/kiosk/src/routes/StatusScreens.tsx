@@ -533,8 +533,20 @@ export function CompleteScreen() {
 
   return (
     <div className="terminal-state terminal-state--success">
-      <div className="status-mark status-mark--success" aria-hidden="true">
-        ✓
+      {/* The completion animation lives in the success mark itself rather than
+          on a screen of its own. The mark it settles on is the same one this
+          element renders without the modifier, so the motion is an approach to
+          the receipt's own icon and not a second thing shown before it. Only a
+          confirmed print earns it: a receipt reached any other way opens on the
+          finished mark. */}
+      <div
+        className={`status-mark status-mark--success${
+          completedSuccessfully ? " status-mark--settle" : ""
+        }`}
+        aria-hidden="true"
+      >
+        <span className="status-mark__ring" />
+        <span className="status-mark__glyph">✓</span>
       </div>
       <p className="eyebrow">{messages.status.completeEyebrow}</p>
       <h1>{messages.status.completeTitle}</h1>

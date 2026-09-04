@@ -1852,6 +1852,7 @@ p {
 }
 
 .status-mark {
+  position: relative;
   display: grid;
   width: 92px;
   height: 92px;
@@ -1874,6 +1875,126 @@ p {
   height: 58px;
   margin-bottom: 1rem;
   font-size: 1.6rem;
+}
+
+/* The completion animation, played once when the receipt opens after a
+   confirmed print.
+ *
+ * It is written as an approach to the receipt's own icon rather than as a
+ * sequence of its own. Every keyframe set below describes only where its
+ * element comes *from*; the finished state is the plain `.status-mark--success`
+ * rule above, and the ring's finished state is gone. So anything that cuts the
+ * motion short — a browser that will not run it, a customer who asked for less
+ * motion, a repaint mid-flight — lands on exactly the mark this screen paints
+ * with no animation at all.
+ *
+ * Nothing here touches the box. Only opacity, transform and the ring's own
+ * angle move, and the ring is taken out of flow, so the summary below cannot be
+ * nudged while the check arrives. */
+.status-mark--settle {
+  animation: status-mark-settle 460ms cubic-bezier(0.33, 0.7, 0.32, 1) both;
+}
+
+/* Registered so the sweep angle can be interpolated at all: an unregistered
+   custom property is a string to the animation engine and would jump from 0 to
+   360 degrees halfway through rather than travelling. */
+@property --status-ring-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* The sweep rides the rim of the disc instead of orbiting outside it, so the
+   ring reads as the disc drawing its own edge and needs no room of its own —
+   which is what keeps it from crowding the eyebrow line once it is gone. */
+.status-mark__ring {
+  position: absolute;
+  border-radius: 50%;
+  /* Cut the middle out rather than covering it with a solid inner circle, the
+     way the old full-screen version did. That trick only worked against a white
+     page; here it would paint over the disc the ring is drawn on. */
+  background: conic-gradient(var(--green) var(--status-ring-sweep), transparent 0);
+  mask: radial-gradient(closest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  /* Gone is the resting state, so no rule has to remove it later. */
+  opacity: 0;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+
+/* Sweep and fade are one animation rather than two, because two animations
+   filling the same opacity would fight over it before either had started. The
+   angle rests at 360deg through the fade so the ring dissolves whole instead of
+   appearing to rewind. */
+.status-mark--settle .status-mark__ring {
+  animation: status-ring-sweep 1180ms 120ms both;
+}
+
+/* Held until the ring has come round, so the eye is handed from the closing
+   sweep to the check rather than watching both at once. */
+.status-mark--settle .status-mark__glyph {
+  animation: status-check-settle 380ms cubic-bezier(0.33, 0.7, 0.32, 1) 820ms both;
+}
+
+@keyframes status-mark-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.84);
+  }
+}
+
+@keyframes status-ring-sweep {
+  0% {
+    opacity: 1;
+    --status-ring-sweep: 0deg;
+    animation-timing-function: cubic-bezier(0.2, 0.72, 0.24, 1);
+  }
+
+  64% {
+    opacity: 1;
+    --status-ring-sweep: 360deg;
+    animation-timing-function: ease-out;
+  }
+
+  100% {
+    opacity: 0;
+    --status-ring-sweep: 360deg;
+  }
+}
+
+@keyframes status-check-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+}
+
+/* The global reduced-motion rule collapses durations but not delays, which on
+   its own would leave the check invisible for its delay and then snap in.
+   Dropping the animations outright is what actually keeps that promise: the
+   disc and check are already at rest, and the ring's rest is absent. */
+@media (prefers-reduced-motion: reduce) {
+  .status-mark--settle,
+  .status-mark--settle .status-mark__ring,
+  .status-mark--settle .status-mark__glyph {
+    animation: none;
+  }
+}
+
+@keyframes status-check-settle {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+}
+
+/* The global reduced-motion rule collapses durations but not delays, which on
+   its own would leave the check invisible for its delay and then snap in.
+   Dropping both animations is what actually keeps that promise. */
+@media (prefers-reduced-motion: reduce) {
+  .status-mark--settle,
+  .status-mark--settle .status-mark__glyph {
+    animation: none;
+  }
 }
 
 .failure-detail {
