@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { useKioskNavigate } from "../app/router.js";
+import { BrandLogo } from "../components/BrandLogo.js";
 import { PrinterUnavailableModal } from "../components/PrinterUnavailableModal.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
@@ -72,7 +73,7 @@ export function WelcomeScreen() {
       <header className="welcome__header">
         <div className="brand brand--large">
           <span className="brand__mark" aria-hidden="true">
-            P
+            <BrandLogo />
           </span>
           <span>
             <strong>{messages.brand.name}</strong>

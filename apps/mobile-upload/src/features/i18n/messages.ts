@@ -4,7 +4,7 @@ export type Locale = (typeof locales)[number];
 const hy = {
   languageName: "Հայերեն",
   pageTitle: "Վերբեռնել ֆայլ՝ տպելու համար",
-  brand: "Տպման տերմինալ",
+  brand: "EasyPrint",
   brandNote: "Ֆայլերի անվտանգ վերբեռնում",
   loadingTitle: "Կապվում ենք տպման տերմինալի հետ…",
   loadingText: "Մի փակեք այս էջը։",
@@ -72,7 +72,7 @@ export type Messages = { [Key in keyof typeof hy]: string };
 const ru: Messages = {
   languageName: "Русский",
   pageTitle: "Загрузка файла для печати",
-  brand: "Терминал печати",
+  brand: "EasyPrint",
   brandNote: "Безопасная передача файла",
   loadingTitle: "Подключаемся к терминалу…",
   loadingText: "Пожалуйста, не закрывайте эту страницу.",
@@ -139,7 +139,7 @@ const ru: Messages = {
 const en: Messages = {
   languageName: "English",
   pageTitle: "Upload a file for printing",
-  brand: "Print terminal",
+  brand: "EasyPrint",
   brandNote: "Secure file transfer",
   loadingTitle: "Connecting to the terminal…",
   loadingText: "Please keep this page open.",

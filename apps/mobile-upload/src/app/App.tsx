@@ -15,6 +15,7 @@ import type {
   UploadedFileStatus
 } from "@printing-kiosk/contracts";
 
+import { BrandLogo } from "../components/BrandLogo.js";
 import { LanguageProvider, useLanguage } from "../features/i18n/LanguageProvider.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { interpolate, type Locale } from "../features/i18n/messages.js";
@@ -110,7 +111,7 @@ function PageShell({ children }: { children: ReactNode }) {
       <header className="site-header">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
-            P
+            <BrandLogo />
           </span>
           <span>
             <strong>{text.brand}</strong>

@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
 import { KioskRedirect, useKioskLocation, useKioskNavigate } from "../app/router.js";
+import { BrandLogo } from "./BrandLogo.js";
 import { LanguageSelector } from "../features/i18n/LanguageSelector.js";
 import { useLanguage } from "../features/i18n/LanguageProvider.js";
 import { usePrototypeSession } from "../features/session/PrototypeSessionProvider.js";
@@ -165,7 +166,7 @@ export function KioskLayout({ children }: { children: ReactNode }) {
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true">
-            P
+            <BrandLogo />
           </span>
           <span>
             <strong>{messages.brand.name}</strong>

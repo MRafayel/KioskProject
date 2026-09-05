@@ -198,6 +198,19 @@ p {
   font-weight: 900;
 }
 
+/* Sized as a share of whichever brand tile encloses it, so the small header
+   mark and the larger welcome one are one file at two sizes rather than two
+   exports. `contain` is what keeps it from ever being stretched: the mark holds
+   its own proportions whatever shape the box it is given turns out to be. The
+   brand file carries its own margin, so this sits close to the tile edge on
+   purpose — the visible mark lands at roughly two thirds of the tile. */
+.brand-logo {
+  display: block;
+  width: 92%;
+  height: 92%;
+  object-fit: contain;
+}
+
 .brand strong,
 .brand small {
   display: block;

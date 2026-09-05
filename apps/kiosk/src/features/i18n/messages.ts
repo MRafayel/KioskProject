@@ -280,7 +280,7 @@ export const numberLocales: Record<Locale, string> = {
 const english: MessageCatalog = {
   languageSelectorLabel: "Choose another language",
   brand: {
-    name: "Print kiosk",
+    name: "EasyPrint",
     welcomeSubtitle: "Private self-service printing"
   },
   common: {
@@ -558,7 +558,7 @@ const english: MessageCatalog = {
 const russian: MessageCatalog = {
   languageSelectorLabel: "Выберите другой язык",
   brand: {
-    name: "Терминал печати",
+    name: "EasyPrint",
     welcomeSubtitle: "Безопасная самостоятельная печать"
   },
   common: {
@@ -843,7 +843,7 @@ const russian: MessageCatalog = {
 const armenian: MessageCatalog = {
   languageSelectorLabel: "Ընտրեք այլ լեզու",
   brand: {
-    name: "Տպման տերմինալ",
+    name: "EasyPrint",
     welcomeSubtitle: "Ինքնուրույն և անվտանգ տպում"
   },
   common: {

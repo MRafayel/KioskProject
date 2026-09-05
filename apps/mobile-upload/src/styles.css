@@ -88,6 +88,16 @@ button:disabled {
   place-items: center;
 }
 
+/* A share of the tile rather than a fixed size, so the mark tracks the tile on
+   every phone width, and `contain` holds the file's own proportions so nothing
+   about that scaling can stretch it. */
+.brand-logo {
+  display: block;
+  width: 92%;
+  height: 92%;
+  object-fit: contain;
+}
+
 .brand strong,
 .brand small {
   display: block;
